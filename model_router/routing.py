@@ -261,6 +261,16 @@ def _check_profile_drift(service: Any, profile: str) -> None:
         raise RoutingError("routed job denied because the active profile has model drift")
 
 
+def _fallback_policy_is_approved(value: Any) -> bool:
+    policy = _as_mapping(value)
+    return (
+        policy.get("trigger") == "subscription_exhaustion_before_tools"
+        and type(policy.get("max_retries")) is int
+        and policy.get("max_retries") == 1
+        and policy.get("approved") is True
+    )
+
+
 def _build_job_cache(
     primary: dict[str, dict[str, str]],
     fallbacks: dict[str, dict[str, str] | None],
@@ -382,15 +392,24 @@ class Router:
         ):
             raise RoutingError("enabled Heavy and Light routes must resolve to distinct models")
         fallback = _as_mapping(config.get("fallback"))
-        fallback_enabled = fallback.get("enabled")
-        if not isinstance(fallback_enabled, bool):
+        configured_fallback_enabled = fallback.get("enabled")
+        if not isinstance(configured_fallback_enabled, bool):
             raise RoutingError("fallback.enabled must be boolean")
+        fallback_policy = config.get("fallback_policy")
+        fallback_approved = _fallback_policy_is_approved(fallback_policy)
+        fallback_enabled = configured_fallback_enabled and fallback_approved
         fallbacks: dict[str, dict[str, str] | None] = {}
         for role, key in (("HEAVYWEIGHT", "heavy"), ("LIGHTWEIGHT", "light")):
-            value = fallback.get(key)
+            value = fallback.get(key) if fallback_enabled else None
             fallbacks[role] = None if value is None else _safe_route(value, f"fallback.{key}")
         if fallback_enabled and any(fallbacks[role] is None for role in fallbacks):
-            raise RoutingError("enabled fallback requires explicit Heavy and Light routes")
+            raise RoutingError("approved enabled fallback requires explicit Heavy and Light routes")
+        for role, primary_route in primary.items():
+            fallback_route = fallbacks[role]
+            if fallback_route and (
+                fallback_route["provider"], fallback_route["model"]
+            ) == (primary_route["provider"], primary_route["model"]):
+                raise RoutingError(f"fallback.{role} must differ from its primary route")
 
         home = _profile_home(self.service, profile)
         jobs_root = _jobs_root(home)
@@ -409,6 +428,11 @@ class Router:
             "purpose_role": role,
             "requested": {name: dict(route) for name, route in primary.items()},
             "fallback_enabled": fallback_enabled,
+            "fallback_policy": {
+                "trigger": "subscription_exhaustion_before_tools",
+                "max_retries": 1,
+                "approved": fallback_approved,
+            },
             "fallback": {
                 name: (dict(route) if route is not None else None)
                 for name, route in fallbacks.items()
@@ -657,6 +681,13 @@ class Router:
                 and actual_provider == effective_provider
                 and actual_model == effective_model
             )
+            if result.get("execution_mode") == "scoped_sdk":
+                verified = (
+                    verified
+                    and result.get("completed") is True
+                    and result.get("closure_complete") is True
+                    and result.get("evidence_complete") is True
+                )
             route_evidence = dict(route_evidence)
             route_evidence["actual"] = {
                 "provider": actual_provider,
@@ -666,8 +697,11 @@ class Router:
             }
             output["model_provider_evidence"] = route_evidence
             output["route_verified"] = bool(verified and code == 0 and process_code == 0)
-            output["answer"] = str(result.get("stdout") or "")[:48000]
-            output["answer_truncated"] = len(str(result.get("stdout") or "")) > 48000
+            answer_text = result.get("final_response", result.get("stdout"))
+            if not isinstance(answer_text, str):
+                answer_text = ""
+            output["answer"] = answer_text[:48000]
+            output["answer_truncated"] = len(answer_text) > 48000
             output["artifact_path"] = str(_job_file(job_dir, "runner-result.json"))
             output["verification_kind"] = snapshot.get("verification_kind")
             output["verification_status"] = result.get("verification_status")
@@ -676,6 +710,15 @@ class Router:
             output["actual_model"] = actual_model
             output["actual_provider"] = actual_provider
             output["fallback_used"] = result.get("fallback_used") is True
+            if "fallback_reason" in result:
+                output["fallback_reason"] = result.get("fallback_reason")
+            if isinstance(result.get("attempts"), list):
+                output["attempts"] = result["attempts"]
+            for evidence_field in (
+                "timed_out", "timeout_stage", "process_tree_closed", "cleanup_verified", "terminal_attempt_id"
+            ):
+                if evidence_field in result:
+                    output[evidence_field] = result[evidence_field]
             output["exit_code"] = code
             if isinstance(code, int) and not isinstance(code, bool) and code != 0:
                 output["status"] = "failed"
@@ -693,6 +736,9 @@ class Router:
             output["status"] = "failed"
             output["error_type"] = state.get("error_type")
             output["finished_at"] = state.get("finished_at")
+            output["timed_out"] = state.get("timed_out")
+            output["process_tree_closed"] = state.get("process_tree_closed")
+            output["cleanup_verified"] = state.get("cleanup_verified")
             return output
         pid = launch.get("worker_pid") or state.get("worker_pid")
         if _pid_alive(pid):

@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import uuid
@@ -125,19 +126,90 @@ def build_runner_command(
         str(_job_file(job_dir, "routing-cache.json")),
         "--profile",
         profile,
+        "--purpose",
+        purpose,
         "--cwd",
         str(cwd),
         "--timeout",
         f"{timeout:g}",
         "--output",
         str(_job_file(job_dir, "runner-result.json")),
+        "--job-dir",
+        str(job_dir),
+        "--scoped-attempts",
         "--hermes-exe",
         str(hermes_exe),
     ]
     evidence = snapshot.get("model_provider_evidence")
-    if not isinstance(evidence, dict) or evidence.get("fallback_enabled") is not True:
+    policy = evidence.get("fallback_policy") if isinstance(evidence, dict) else None
+    approved = (
+        isinstance(policy, dict)
+        and policy.get("trigger") == "subscription_exhaustion_before_tools"
+        and type(policy.get("max_retries")) is int
+        and policy.get("max_retries") == 1
+        and policy.get("approved") is True
+    )
+    if not isinstance(evidence, dict) or evidence.get("fallback_enabled") is not True or not approved:
         command.append("--no-fallback")
     return command
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> bool:
+    """Stop only this worker-owned runner tree and verify that it closed."""
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill")
+        if not taskkill:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            return False
+        try:
+            killed = subprocess.run(
+                [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            return False
+        return killed.returncode == 0 and process.poll() is not None
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, 0)
+    except (OSError, ProcessLookupError):
+        return process.poll() is not None
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        return False
+    try:
+        os.killpg(process.pid, 0)
+    except (OSError, ProcessLookupError):
+        return process.poll() is not None
+    return False
 
 
 def run_job(
@@ -202,16 +274,37 @@ def run_job(
             snapshot=snapshot,
         )
         log_path = _job_file(job_dir, "job.log")
-        with log_path.open("ab") as log:
-            completed = subprocess.run(
-                command,
-                cwd=str(job_dir),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                close_fds=True,
-                check=False,
+        creation: dict[str, Any] = {
+            "cwd": str(job_dir),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            creation["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            creation["start_new_session"] = True
+        with log_path.open("ab"):
+            process = subprocess.Popen(command, **creation)
+        try:
+            runner_code = process.wait(timeout=timeout + 5.0)
+        except subprocess.TimeoutExpired:
+            cleanup_verified = _terminate_process_tree(process)
+            _atomic_json(
+                state_path,
+                {
+                    "status": "failed",
+                    "worker_pid": os.getpid(),
+                    "error_type": "RunnerTimeout",
+                    "timed_out": True,
+                    "cleanup_verified": cleanup_verified,
+                    "process_tree_closed": True if cleanup_verified else None,
+                    "started_at": started_at,
+                    "finished_at": _utc_now(),
+                },
             )
+            return 124
         result_path = _job_file(job_dir, "runner-result.json")
         try:
             result = _read_json(result_path)
@@ -222,29 +315,32 @@ def run_job(
             _atomic_json(
                 state_path,
                 {
-                    "status": "failed" if completed.returncode != 0 else "unverified",
+                    "status": "failed" if runner_code != 0 else "unverified",
                     "worker_pid": os.getpid(),
-                    "runner_exit_code": completed.returncode,
+                    "runner_exit_code": runner_code,
                     "error_type": "MissingRunnerArtifact",
+                    "timed_out": False,
+                    "cleanup_verified": None,
+                    "process_tree_closed": None,
                     "started_at": started_at,
                     "finished_at": finished_at,
                 },
             )
         else:
             runner_exit_code = result.get("exit_code")
-            terminal = "failed" if completed.returncode != 0 or runner_exit_code != 0 else "finished"
+            terminal = "failed" if runner_code != 0 or runner_exit_code != 0 else "finished"
             _atomic_json(
                 state_path,
                 {
                     "status": terminal,
                     "worker_pid": os.getpid(),
-                    "worker_exit_code": completed.returncode,
+                    "worker_exit_code": runner_code,
                     "runner_exit_code": runner_exit_code,
                     "started_at": started_at,
                     "finished_at": finished_at,
                 },
             )
-        return completed.returncode
+        return runner_code
     except BaseException as exc:
         _atomic_json(
             state_path,
@@ -252,6 +348,9 @@ def run_job(
                 "status": "failed",
                 "worker_pid": os.getpid(),
                 "error_type": type(exc).__name__,
+                "timed_out": False,
+                "cleanup_verified": None,
+                "process_tree_closed": None,
                 "started_at": started_at,
                 "finished_at": _utc_now(),
             },

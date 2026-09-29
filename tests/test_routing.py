@@ -30,6 +30,7 @@ class FakeService:
         self.enabled = True
         self.drift: list[str] = []
         self.fallback_enabled = False
+        self.fallback_approved = True
         self.heavy_fallback = FALLBACK_HEAVY
         self.light_fallback = FALLBACK_LIGHT
         self.heavy = dict(HEAVY)
@@ -57,6 +58,11 @@ class FakeService:
                 "enabled": self.fallback_enabled,
                 "heavy": dict(self.heavy_fallback) if self.heavy_fallback is not None else None,
                 "light": dict(self.light_fallback) if self.light_fallback is not None else None,
+            },
+            "fallback_policy": {
+                "trigger": "subscription_exhaustion_before_tools",
+                "max_retries": 1,
+                "approved": self.fallback_approved,
             },
             "revision": 17,
         }
@@ -153,6 +159,33 @@ def test_enabled_fallback_is_explicit_in_job_cache(tmp_path, monkeypatch):
     assert routes["backup-heavy/backup/heavy"]["reasoning_effort"] == "medium"
     assert snapshot["model_provider_evidence"]["fallback_enabled"] is True
     assert result["route_class"] == "HEAVYWEIGHT"
+
+
+def test_enabled_fallback_without_current_approval_is_not_snapshotted(tmp_path, monkeypatch):
+    router, service, root, popen_calls = _make_router(tmp_path, monkeypatch)
+    service.fallback_enabled = True
+    service.fallback_approved = False
+    result = _start(router, tmp_path, "plan")
+    job_dir = root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs" / result["job_id"]
+    cache = _load(job_dir / "routing-cache.json")
+    snapshot = _load(job_dir / "snapshot.json")
+    # The runner command is built inside the detached worker, so the approval
+    # gate is asserted on the runner builder itself, not on the worker spawn.
+    runner_command = job_worker.build_runner_command(
+        python=sys.executable,
+        runner=job_worker.Path(__file__).resolve().parents[1] / "lib" / "run_routed_agent.py",
+        hermes_exe=job_worker.Path(popen_calls[0][0][popen_calls[0][0].index("--hermes-exe") + 1]),
+        profile="claire",
+        purpose="plan",
+        cwd=tmp_path / "work",
+        timeout=600,
+        job_dir=job_dir,
+        snapshot=snapshot,
+    )
+    assert "--no-fallback" in runner_command
+    assert cache["fallback_routes"] == {}
+    assert snapshot["model_provider_evidence"]["fallback_enabled"] is False
+    assert snapshot["model_provider_evidence"]["fallback_policy"]["approved"] is False
 
 
 def test_disabled_routing_denies_before_job_or_child_creation(tmp_path, monkeypatch):
@@ -293,7 +326,15 @@ def test_start_failure_is_recorded_and_not_reported_as_running(tmp_path, monkeyp
     assert _load(job_dirs[0] / "state.json")["status"] == "failed"
 
 
-def _seed_result_job(root: Path, profile: str, *, result: dict[str, Any] | None, state=None, launch=None):
+def _seed_result_job(
+    root: Path,
+    profile: str,
+    *,
+    result: dict[str, Any] | None,
+    state=None,
+    launch=None,
+    fallback_enabled: bool = False,
+):
     job_id = str(uuid.uuid4())
     job_dir = root / "profiles" / profile / "plugin-data" / "model-router" / "jobs" / job_id
     job_dir.mkdir(parents=True)
@@ -307,8 +348,11 @@ def _seed_result_job(root: Path, profile: str, *, result: dict[str, Any] | None,
         "model_provider_evidence": {
             "purpose_role": "HEAVYWEIGHT",
             "requested": {"HEAVYWEIGHT": HEAVY, "LIGHTWEIGHT": LIGHT},
-            "fallback_enabled": False,
-            "fallback": {"HEAVYWEIGHT": None, "LIGHTWEIGHT": None},
+            "fallback_enabled": fallback_enabled,
+            "fallback": {
+                "HEAVYWEIGHT": FALLBACK_HEAVY if fallback_enabled else None,
+                "LIGHTWEIGHT": FALLBACK_LIGHT if fallback_enabled else None,
+            },
             "actual": None,
         },
     }
@@ -379,6 +423,130 @@ def test_status_marks_nonzero_runner_failed(tmp_path, monkeypatch):
     assert router.status(job_id)["status"] == "failed"
 
 
+def _scoped_timeout_result(*, cleanup_verified: bool, fallback_timeout: bool) -> dict[str, Any]:
+    terminal_route = FALLBACK_HEAVY if fallback_timeout else HEAVY
+    terminal_attempt = {
+        "attempt_id": str(uuid.uuid4()),
+        "requested_route": terminal_route,
+        "completed": False,
+        "error": {"kind": "timeout", "message": "scoped attempt exceeded its shared deadline"},
+        "timed_out": True,
+        "process_tree_closed": True if cleanup_verified else None,
+        "cleanup_verified": cleanup_verified,
+        "evidence_complete": False,
+        "closure_complete": False,
+        "exhaustion_confirmed": None,
+    }
+    attempts = []
+    if fallback_timeout:
+        attempts.append({
+            "attempt_id": str(uuid.uuid4()),
+            "requested_route": HEAVY,
+            "completed": False,
+            "error": {"kind": "subscription_exhaustion", "message": "structured exhaustion"},
+            "timed_out": False,
+            "process_tree_closed": None,
+            "exhaustion_confirmed": True,
+        })
+    attempts.append(terminal_attempt)
+    return {
+        "execution_mode": "scoped_sdk",
+        "exit_code": 124,
+        "process_exit_code": 124,
+        "effective_provider": terminal_route["provider"],
+        "effective_model": terminal_route["model"],
+        "actual_provider": None,
+        "actual_model": None,
+        "route_verified": False,
+        "verification_status": "not_requested",
+        "config_unchanged": True,
+        "session_evidence": {"status": "unverified", "provider": None, "model": None},
+        "completed": False,
+        "closure_complete": False,
+        "evidence_complete": False,
+        "timed_out": True,
+        "process_tree_closed": True if cleanup_verified else None,
+        "cleanup_verified": cleanup_verified,
+        "timeout_stage": "fallback" if fallback_timeout else "primary",
+        "fallback_used": fallback_timeout,
+        "fallback_reason": "exhaustion" if fallback_timeout else "not_exhaustion",
+        "attempts": attempts,
+    }
+
+
+@pytest.mark.parametrize("cleanup_verified", [True, False])
+def test_status_exposes_primary_timeout_cleanup_without_verifying_route(
+    tmp_path, monkeypatch, cleanup_verified
+):
+    router, _service, root, _ = _make_router(tmp_path, monkeypatch)
+    job_id, _ = _seed_result_job(
+        root,
+        "claire",
+        result=_scoped_timeout_result(cleanup_verified=cleanup_verified, fallback_timeout=False),
+    )
+
+    result = router.status(job_id)
+    assert result["status"] == "failed"
+    assert result["route_verified"] is False
+    assert result["timed_out"] is True
+    assert result["cleanup_verified"] is cleanup_verified
+    assert result["process_tree_closed"] is (True if cleanup_verified else None)
+    assert result["attempts"][0]["error"]["kind"] == "timeout"
+    assert result["timeout_stage"] == "primary"
+    assert result["attempts"][0]["process_tree_closed"] is (True if cleanup_verified else None)
+
+
+@pytest.mark.parametrize("cleanup_verified", [True, False])
+def test_status_preserves_primary_exhaustion_when_fallback_times_out(
+    tmp_path, monkeypatch, cleanup_verified
+):
+    router, _service, root, _ = _make_router(tmp_path, monkeypatch)
+    job_id, _ = _seed_result_job(
+        root,
+        "claire",
+        result=_scoped_timeout_result(cleanup_verified=cleanup_verified, fallback_timeout=True),
+        fallback_enabled=True,
+    )
+
+    result = router.status(job_id)
+    assert result["status"] == "failed"
+    assert result["route_verified"] is False
+    assert result["timed_out"] is True
+    assert result["fallback_used"] is True
+    assert result["timeout_stage"] == "fallback"
+    assert result["fallback_reason"] == "exhaustion"
+    assert result["cleanup_verified"] is cleanup_verified
+    assert result["process_tree_closed"] is (True if cleanup_verified else None)
+    assert len(result["attempts"]) == 2
+    assert result["attempts"][0]["exhaustion_confirmed"] is True
+    assert result["attempts"][0]["error"]["kind"] == "subscription_exhaustion"
+    assert result["attempts"][1]["error"]["kind"] == "timeout"
+
+
+def test_status_keeps_runner_crash_or_missing_artifact_unverified(tmp_path, monkeypatch):
+    router, _service, root, _ = _make_router(tmp_path, monkeypatch)
+    job_id, _ = _seed_result_job(
+        root,
+        "claire",
+        result=None,
+        state={
+            "status": "failed",
+            "error_type": "MissingRunnerArtifact",
+            "timed_out": False,
+            "cleanup_verified": None,
+            "process_tree_closed": None,
+        },
+    )
+
+    result = router.status(job_id)
+    assert result["status"] == "failed"
+    assert result["route_verified"] is False
+    assert result["error_type"] == "MissingRunnerArtifact"
+    assert result["timed_out"] is False
+    assert result["cleanup_verified"] is None
+    assert result["process_tree_closed"] is None
+
+
 def test_status_reports_running_only_when_worker_pid_is_live(tmp_path, monkeypatch):
     router, _service, root, _ = _make_router(tmp_path, monkeypatch)
     job_id, _ = _seed_result_job(root, "claire", result=None, state={"status": "running"}, launch={"worker_pid": 777})
@@ -443,13 +611,24 @@ def test_worker_invokes_only_fake_runner_subprocess_and_writes_terminal_state(tm
     (job_dir / "job.log").write_bytes(b"")
     calls = []
 
-    def fake_run(command, **kwargs):
+    class FakeRunnerProcess:
+        pid = 12345
+        returncode = None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+    def fake_popen(command, **kwargs):
         calls.append((list(command), kwargs))
         output_path = Path(command[command.index("--output") + 1])
         output_path.write_text(json.dumps(_verified_runner_result()), encoding="utf-8")
-        return subprocess.CompletedProcess(command, 0)
+        return FakeRunnerProcess()
 
-    monkeypatch.setattr(job_worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(job_worker.subprocess, "Popen", fake_popen)
     code = job_worker.run_job(
         job_dir=job_dir,
         runner=routing.RUNNER_PATH,
@@ -465,9 +644,13 @@ def test_worker_invokes_only_fake_runner_subprocess_and_writes_terminal_state(tm
     assert command[command.index("--route-class") + 1] == "HEAVYWEIGHT"
     assert command[command.index("--verification-kind") + 1] == "independent-review"
     assert "--no-fallback" in command
+    assert "--scoped-attempts" in command
+    assert command[command.index("--job-dir") + 1] == str(job_dir)
+    assert "chat" not in command
     assert kwargs["stdin"] is subprocess.DEVNULL
-    assert kwargs["stdout"] is not subprocess.PIPE
-    assert kwargs["stderr"] is subprocess.STDOUT
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["close_fds"] is True
     state = _load(job_dir / "state.json")
     assert state["status"] == "finished"
     assert state["runner_exit_code"] == 0
@@ -499,7 +682,7 @@ def test_worker_records_runner_crash_without_fabricating_result(tmp_path, monkey
     def crash(*_args, **_kwargs):
         raise OSError("fake runner crash")
 
-    monkeypatch.setattr(job_worker.subprocess, "run", crash)
+    monkeypatch.setattr(job_worker.subprocess, "Popen", crash)
     code = job_worker.run_job(
         job_dir=job_dir,
         runner=routing.RUNNER_PATH,

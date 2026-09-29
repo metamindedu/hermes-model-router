@@ -92,6 +92,21 @@ def test_windows_pid_probe_does_not_terminate_child():
     assert not is_process_alive(child.pid)
 
 
+def run_launcher(command, env, timeout=30):
+    """Use file handles instead of inherited pipes; failures remain failures."""
+    import tempfile
+    scratch = Path(os.environ.get('TMPDIR') or Path.home() / 'AppData/Local/hermes/profiles/claire/cache/scratch')
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryFile(dir=scratch) as out, tempfile.TemporaryFile(dir=scratch) as err:
+        completed = subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
+                                   stdout=out, stderr=err, timeout=timeout, check=False)
+        out.seek(0)
+        err.seek(0)
+        completed.stdout = out.read().decode('utf-8', 'replace')
+        completed.stderr = err.read().decode('utf-8', 'replace')
+        return completed
+
+
 def test_actual_cli_writes_only_isolated_home(tmp_path):
     launcher = Path(os.environ.get("LOCALAPPDATA", "")) / "hermes/bin/hermes.exe"
     if not launcher.is_file(): pytest.skip("Windows local Hermes CLI not installed")
@@ -101,7 +116,12 @@ def test_actual_cli_writes_only_isolated_home(tmp_path):
     (other / "config.yaml").write_bytes(original_other)
     (root / "active_profile").write_text("claire", encoding="utf-8")
     env = dict(os.environ, HERMES_HOME=str(root)); env.pop("HERMES_PROFILE", None)
-    check = subprocess.run([str(launcher), "--profile", "default", "config", "path"], env=env, capture_output=True, text=True, timeout=30)
+    # The launcher must resolve its own installed environment: a tester venv
+    # (uv/conda/pytest sandbox) inherited through the environment would shadow
+    # the real Hermes runtime and fail on its own missing dependencies.
+    for inherited in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
+        env.pop(inherited, None)
+    check = run_launcher([str(launcher), "--profile", "default", "config", "path"], env=env, timeout=30)
     assert check.returncode == 0 and str(root).lower() in check.stdout.lower()
     service = Service(root)
     service._cli_path = lambda: str(launcher)

@@ -10,12 +10,15 @@ import subprocess
 import tempfile
 import time
 import uuid
+import copy
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-SCHEMA = 1
+from . import effective_config, fallback_policy
+
+SCHEMA = 2
 STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
 STATE_RELATIVE = Path("plugin-data") / "model-router" / "recent_apply.json"
 SKILL_NAME = "adaptive-coding-orchestration"
@@ -35,6 +38,7 @@ STALE_KEYS = {
     "main": ("model.base_url", "model.api_mode"),
     "delegation": ("delegation.base_url", "delegation.api_mode"),
 }
+DELEGATION_FALLBACK_KEY = "delegation.fallback_providers"
 
 
 class ServiceError(RuntimeError):
@@ -281,18 +285,121 @@ class Service:
         data = _read_json(self.store_path)
         if data is None:
             return None
-        if not isinstance(data, dict) or set(data) != {"schema", "revision", "profiles"} or data.get("schema") != SCHEMA:
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"schema", "revision", "profiles"}
+            or isinstance(data.get("schema"), bool)
+            or data.get("schema") not in {1, SCHEMA}
+        ):
             raise ServiceError("settings schema is invalid")
         if not isinstance(data.get("revision"), int) or isinstance(data.get("revision"), bool) or data["revision"] < 0:
             raise ServiceError("settings revision is invalid")
         if not isinstance(data.get("profiles"), dict):
             raise ServiceError("settings profiles are invalid")
+        normalized: dict[str, Any] = {}
         for name, entry in data["profiles"].items():
-            if PROFILE_RE.fullmatch(name) is None or not isinstance(entry, dict) or set(entry) != {"models", "routing"}:
+            if PROFILE_RE.fullmatch(name) is None or not isinstance(entry, dict):
                 raise ServiceError("settings profile entry is invalid")
-            _models(entry["models"], allow_empty_model=True)
-            _routing(entry["routing"])
-        return data
+            try:
+                if data["schema"] == 1:
+                    if set(entry) != {"models", "routing"}:
+                        raise ValueError("schema1 profile entry has unknown fields")
+                    models = _models(entry["models"], allow_empty_model=True)
+                    routing = _routing(entry["routing"])
+                    native_fallback = None
+                    delegation_fallback = None
+                    legacy_consent = None
+                    if routing["fallback"]["enabled"]:
+                        legacy_consent = fallback_policy.make_consent(
+                            name, "routing", routing["fallback"], source="legacy-approved"
+                        )
+                    consent = {"native": None, "routing": legacy_consent, "delegation": None}
+                else:
+                    old_fields = {"models", "routing", "native_fallback", "fallback_consent"}
+                    if not old_fields <= set(entry) or set(entry) - old_fields - {"delegation_fallback"}:
+                        raise ValueError("schema2 profile entry has unknown fields")
+                    models = _models(entry["models"], allow_empty_model=True)
+                    routing = _routing(entry["routing"])
+                    native_fallback = self._validate_native_fallback(entry["native_fallback"])
+                    delegation_fallback = self._validate_delegation_fallback(entry.get("delegation_fallback"))
+                    raw_consent = entry["fallback_consent"]
+                    if (
+                        not isinstance(raw_consent, dict)
+                        or not {"native", "routing"} <= set(raw_consent)
+                        or set(raw_consent) - {"native", "routing", "delegation"}
+                    ):
+                        raise ValueError("fallback consent must define native, routing, and optional delegation")
+                    consent = {
+                        "native": fallback_policy.validate_consent(raw_consent["native"]),
+                        "routing": fallback_policy.validate_consent(raw_consent["routing"]),
+                        "delegation": fallback_policy.validate_consent(raw_consent.get("delegation")),
+                    }
+                    for scope in ("native", "routing", "delegation"):
+                        item = consent[scope]
+                        if item is not None and item["allow_task_rerun"] is not (scope == "routing"):
+                            raise ValueError("fallback consent scope flags are invalid")
+                normalized[name] = {
+                    "models": models,
+                    "routing": routing,
+                    "native_fallback": native_fallback,
+                    "delegation_fallback": delegation_fallback,
+                    "fallback_consent": consent,
+                }
+            except (TypeError, ValueError, KeyError) as exc:
+                raise ServiceError("settings profile entry is invalid") from exc
+        # Schema-1 reads are normalized only in memory. Persistence occurs only
+        # through an explicit settings apply or the existing initializer.
+        return {"schema": data["schema"], "revision": data["revision"], "profiles": normalized}
+
+    def _validate_native_fallback(self, value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) != {"enabled", "chain"} or not isinstance(value["enabled"], bool):
+            raise ValueError("native fallback must define enabled and chain")
+        chain = value["chain"]
+        if not isinstance(chain, list) or len(chain) > 5:
+            raise ValueError("native fallback chain must contain at most five entries")
+        parsed: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in chain:
+            if not isinstance(item, dict) or set(item) != {"provider", "model"}:
+                raise ValueError("native fallback entries must contain provider and model")
+            provider = _validate_token(item["provider"], field="fallback provider", pattern=PROVIDER_RE)
+            model = _validate_token(item["model"], field="fallback model", pattern=MODEL_RE)
+            identity = (provider.casefold(), model.casefold())
+            if identity in seen:
+                raise ValueError("native fallback chain entries must be distinct")
+            seen.add(identity)
+            parsed.append({"provider": provider, "model": model})
+        return {"enabled": value["enabled"], "chain": parsed}
+
+    def _validate_delegation_fallback(self, value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) != {"mode", "chain"}:
+            raise ValueError("delegation fallback must define mode and chain")
+        mode, chain = value["mode"], value["chain"]
+        if mode not in {"default", "off", "custom"}:
+            raise ValueError("delegation fallback mode is invalid")
+        if not isinstance(chain, list):
+            raise ValueError("delegation fallback chain must be a list")
+        if mode != "custom" and chain:
+            raise ValueError("default and off delegation modes require an empty chain")
+        if mode == "custom" and not 1 <= len(chain) <= 5:
+            raise ValueError("custom delegation fallback requires one to five routes")
+        parsed: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in chain:
+            if not isinstance(item, dict) or set(item) != {"provider", "model"}:
+                raise ValueError("delegation routes must contain only provider and model")
+            provider = _validate_token(item["provider"], field="delegation fallback provider", pattern=PROVIDER_RE)
+            model = _validate_token(item["model"], field="delegation fallback model", pattern=MODEL_RE)
+            identity = (provider.casefold(), model.casefold())
+            if identity in seen:
+                raise ValueError("delegation fallback routes must be distinct")
+            seen.add(identity)
+            parsed.append({"provider": provider, "model": model})
+        return {"mode": mode, "chain": parsed}
 
     def _cli_path(self) -> str:
         stable = self.root / "bin" / ("hermes.exe" if os.name == "nt" else "hermes")
@@ -339,7 +446,8 @@ class Service:
         try:
             result = subprocess.run(
                 self._command(profile, "config", "set", key, rendered, "--force"),
-                env=self._env(profile), shell=False, capture_output=True, text=True, timeout=15, check=False,
+                env=self._env(profile), shell=False, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=15, check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ServiceError(f"could not write config key {key}") from exc
@@ -413,6 +521,249 @@ class Service:
         if enabled and (heavy is None or light is None):
             raise ValueError("enabled fallback requires explicit Heavy and Light routes")
         return {"enabled": enabled, "heavy": heavy, "light": light}
+
+    def _read_native_snapshot(self, profile: str) -> effective_config.NativeFallbackSnapshot:
+        """Read one profile's effective native keys and provenance through Hermes helpers."""
+        return effective_config.read_native_fallback(self._profile_home(profile))
+
+    def _native_actual(
+        self, profile: str, snapshot: effective_config.NativeFallbackSnapshot | None = None,
+    ) -> tuple[list[dict[str, str]], list[str]]:
+        """Return only safe provider/model pairs from one effective-config snapshot."""
+        if snapshot is None:
+            snapshot = self._read_native_snapshot(profile)
+        warnings = list(snapshot.warnings)
+        if not snapshot.effective_available:
+            warnings.append("native_fallback_unavailable")
+            return [], list(dict.fromkeys(warnings))
+        if any(
+            key == target or key.startswith(target + ".") or target.startswith(key + ".")
+            for key in snapshot.managed_keys
+            for target in ("fallback_providers", "fallback_model")
+        ):
+            warnings.append("native_fallback_managed_overlay")
+        providers = snapshot.effective("fallback_providers")
+        legacy = snapshot.effective("fallback_model")
+
+        def source_entries(value: Any, *, legacy_source: bool) -> list[Any] | None:
+            if value in (None, [], {}):
+                return []
+            if legacy_source and isinstance(value, dict):
+                return [value]
+            if isinstance(value, list):
+                return value
+            return None
+
+        modern_entries = source_entries(providers, legacy_source=False)
+        legacy_entries = source_entries(legacy, legacy_source=True)
+        if modern_entries is None or legacy_entries is None:
+            warnings.append("native_fallback_malformed")
+            modern_entries = modern_entries or []
+            legacy_entries = legacy_entries or []
+
+        chain: list[dict[str, str]] = []
+        identities: set[tuple[str, str, str]] = set()
+        for item in [*modern_entries, *legacy_entries]:
+            if not isinstance(item, dict):
+                warnings.append("native_fallback_malformed")
+                continue
+            advanced = set(item) - {"provider", "model"}
+            if advanced:
+                warnings.append("native_fallback_advanced_entry")
+            try:
+                provider = _validate_token(item.get("provider"), field="fallback provider", pattern=PROVIDER_RE)
+                model = _validate_token(item.get("model"), field="fallback model", pattern=MODEL_RE)
+            except ValueError:
+                warnings.append("native_fallback_malformed")
+                continue
+            base_url = item.get("base_url")
+            hidden_endpoint = base_url.casefold().rstrip("/") if isinstance(base_url, str) else ""
+            identity = (provider.casefold(), model.casefold(), hidden_endpoint)
+            if identity in identities:
+                continue
+            identities.add(identity)
+            chain.append({"provider": provider, "model": model})
+        if len(chain) > 5:
+            warnings.append("native_fallback_chain_too_long")
+        return chain, list(dict.fromkeys(warnings))
+
+    def _native_status(
+        self,
+        profile: str,
+        entry: dict[str, Any],
+        snapshot: effective_config.NativeFallbackSnapshot | None = None,
+    ) -> dict[str, Any]:
+        managed_value = entry.get("native_fallback")
+        managed = managed_value is not None
+        try:
+            snapshot = snapshot or self._read_native_snapshot(profile)
+            actual_chain, warnings = self._native_actual(profile, snapshot)
+        except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged, OSError):
+            snapshot = None
+            actual_chain, warnings = [], ["native_fallback_unavailable"]
+        editable = not any(
+            warning in {
+                "native_fallback_unavailable",
+                "native_effective_unavailable",
+                "native_managed_provenance_unavailable",
+                "native_managed_env_expression_readonly",
+                "native_fallback_env_expression",
+                "native_fallback_managed_overlay",
+                "native_fallback_malformed",
+                "native_fallback_advanced_entry",
+                "native_fallback_chain_too_long",
+            }
+            for warning in warnings
+        )
+        unknown = snapshot is None or not snapshot.effective_available or (
+            "native_fallback_malformed" in warnings and not actual_chain
+        )
+        if managed:
+            chain = copy.deepcopy(managed_value["chain"])
+            enabled = managed_value["enabled"]
+            expected = chain if enabled else []
+            drift = actual_chain != expected
+        else:
+            chain = copy.deepcopy(actual_chain)
+            enabled = bool(actual_chain)
+            drift = False
+        if unknown:
+            # Unknown effective state must not be rendered as OFF.
+            enabled = None
+            drift = True if managed else False
+        consent = entry.get("fallback_consent", {}).get("native")
+        if not managed or not fallback_policy.consent_matches(profile, "native", {"chain": chain}, consent):
+            consent = None
+        return {
+            "managed": managed,
+            "editable": editable,
+            "enabled": enabled,
+            "chain": chain,
+            "actual_chain": actual_chain,
+            "drift": drift,
+            "warnings": warnings,
+            "consent": copy.deepcopy(consent),
+        }
+
+    def _read_delegation_snapshot(self, profile: str) -> effective_config.NativeFallbackSnapshot:
+        """Read only the effective delegation fallback key and its provenance."""
+        return effective_config.read_key_scoped(
+            self._profile_home(profile), (DELEGATION_FALLBACK_KEY,)
+        )
+
+    def _delegation_actual(
+        self, snapshot: effective_config.NativeFallbackSnapshot,
+    ) -> tuple[str | None, list[dict[str, str]], list[str]]:
+        warnings = [
+            warning.replace("scoped_fallback_", "delegation_fallback_").replace("scoped_", "delegation_fallback_")
+            for warning in snapshot.warnings
+        ]
+        if not snapshot.effective_available:
+            warnings.append("delegation_fallback_unavailable")
+            return None, [], list(dict.fromkeys(warnings))
+        if any(
+            key == DELEGATION_FALLBACK_KEY
+            or DELEGATION_FALLBACK_KEY.startswith(key + ".")
+            or key.startswith(DELEGATION_FALLBACK_KEY + ".")
+            for key in snapshot.managed_keys
+        ):
+            warnings.append("delegation_fallback_managed_overlay")
+        value = snapshot.effective(DELEGATION_FALLBACK_KEY)
+        if value is None:
+            return "default", [], list(dict.fromkeys(warnings))
+        if value == []:
+            return "off", [], list(dict.fromkeys(warnings))
+        if not isinstance(value, list):
+            warnings.append("delegation_fallback_malformed")
+            return None, [], list(dict.fromkeys(warnings))
+        chain: list[dict[str, str]] = []
+        malformed = False
+        advanced = False
+        for item in value:
+            if not isinstance(item, dict):
+                malformed = True
+                continue
+            if set(item) != {"provider", "model"}:
+                advanced = True
+            try:
+                provider = _validate_token(item.get("provider"), field="delegation fallback provider", pattern=PROVIDER_RE)
+                model = _validate_token(item.get("model"), field="delegation fallback model", pattern=MODEL_RE)
+            except ValueError:
+                malformed = True
+                continue
+            chain.append({"provider": provider, "model": model})
+        if malformed:
+            warnings.append("delegation_fallback_malformed")
+        if advanced:
+            warnings.append("delegation_fallback_advanced_entry")
+        if len(value) > 5:
+            warnings.append("delegation_fallback_chain_too_long")
+        if not value:
+            mode = "off"
+        else:
+            mode = None if malformed else "custom"
+        return mode, chain, list(dict.fromkeys(warnings))
+
+    def _delegation_status(
+        self,
+        profile: str,
+        entry: dict[str, Any],
+        snapshot: effective_config.NativeFallbackSnapshot | None = None,
+    ) -> dict[str, Any]:
+        managed_value = entry.get("delegation_fallback")
+        managed = managed_value is not None
+        try:
+            snapshot = snapshot or self._read_delegation_snapshot(profile)
+            actual_mode, actual_chain, warnings = self._delegation_actual(snapshot)
+            actual_value = snapshot.effective(DELEGATION_FALLBACK_KEY) if snapshot.effective_available else None
+        except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged, OSError):
+            snapshot = None
+            actual_mode, actual_chain = None, []
+            actual_value = None
+            warnings = ["delegation_fallback_unavailable"]
+        # Any unresolved or future warning is read-only, never fail-open.
+        editable = not warnings and actual_mode in {"default", "off", "custom"}
+        if managed:
+            mode = managed_value["mode"]
+            chain = copy.deepcopy(managed_value["chain"])
+            projected = None if mode == "default" else [] if mode == "off" else chain
+            drift = snapshot is None or not snapshot.effective_available or actual_value != projected
+        else:
+            mode = actual_mode
+            chain = copy.deepcopy(actual_chain)
+            drift = False
+        consent = entry.get("fallback_consent", {}).get("delegation")
+        if not managed or not fallback_policy.consent_matches(profile, "delegation", managed_value, consent):
+            consent = None
+        return {
+            "managed": managed,
+            "editable": editable,
+            "mode": mode,
+            "chain": chain,
+            "actual_mode": actual_mode,
+            "actual_chain": actual_chain,
+            "drift": drift,
+            "warnings": warnings,
+            "consent": copy.deepcopy(consent),
+        }
+
+    def _fallback_dto(self, profile: str, entry: dict[str, Any]) -> dict[str, Any]:
+        native = self._native_status(profile, entry)
+        delegation = self._delegation_status(profile, entry)
+        routing_value = entry["routing"]["fallback"]
+        consent = entry["fallback_consent"].get("routing")
+        if not fallback_policy.consent_matches(profile, "routing", routing_value, consent):
+            consent = None
+        return {
+            "native": native,
+            "routing": {
+                "enabled": routing_value["enabled"],
+                "heavy": copy.deepcopy(routing_value["heavy"]),
+                "light": copy.deepcopy(routing_value["light"]),
+                "consent": copy.deepcopy(consent),
+            },
+            "delegation": delegation,
+        }
 
     def _read_disabled(self, profile: str) -> list[str]:
         value = self._read_key(profile, "skills.disabled")
@@ -512,10 +863,15 @@ class Service:
             for name in discovered:
                 if name not in entries:
                     actual = self._actual_models(name)
-                    entries[name] = {"models": actual, "routing": self._default_routing(name in selected, self._fallback_for(name, fallbacks))}
+                    entries[name] = {
+                        "models": actual,
+                        "routing": self._default_routing(name in selected, self._fallback_for(name, fallbacks)),
+                        "native_fallback": None,
+                        "delegation_fallback": None,
+                        "fallback_consent": {"native": None, "routing": None, "delegation": None},
+                    }
                 else:
-                    item = entries[name]
-                    item = {"models": item["models"], "routing": dict(item["routing"])}
+                    item = copy.deepcopy(entries[name])
                     item["routing"]["enabled"] = name in selected
                     if fallbacks is not None and item["routing"]["fallback"] == {"enabled": False, "heavy": None, "light": None}:
                         item["routing"]["fallback"] = self._fallback_for(name, fallbacks)
@@ -568,8 +924,16 @@ class Service:
             if entry is None:
                 models = actual
                 routing = self._default_routing(False)
+                view_entry = {
+                    "models": models,
+                    "routing": routing,
+                    "native_fallback": None,
+                    "delegation_fallback": None,
+                    "fallback_consent": {"native": None, "routing": None, "delegation": None},
+                }
             else:
                 models, routing = entry["models"], entry["routing"]
+                view_entry = entry
             drift: list[str] = []
             if not actual:
                 drift.append("actual_models_unavailable")
@@ -583,12 +947,20 @@ class Service:
                     drift.append("skills.disabled")
             except ServiceError:
                 drift.append("skills.disabled_unavailable")
-            result_profiles.append({"name": name, "models": models, "routing": routing, "actual_models": actual, "drift": drift})
+            result_profiles.append({
+                "name": name,
+                "models": models,
+                "routing": routing,
+                "actual_models": actual,
+                "drift": drift,
+                "fallbacks": self._fallback_dto(name, view_entry),
+            })
         return {
             "revision": stored["revision"] if stored else 0,
             "current_profile": self.active_profile(),
             "profiles": result_profiles,
             "recent_apply": self._recent_apply(),
+            "fallback_capabilities": dict(fallback_policy.CAPABILITIES),
         }
 
     def routing_config(self, profile: str) -> dict[str, Any]:
@@ -604,13 +976,34 @@ class Service:
         heavy = models["main"] if routing["heavy"]["follow"] == "main" else routing["heavy"]["custom"]
         light = models["delegation"] if routing["light"]["follow"] == "delegation" else routing["light"]["custom"]
         enabled = routing["enabled"] and SKILL_NAME not in self._read_disabled(profile)
-        return {"enabled": enabled, "heavy": dict(heavy), "light": dict(light), "fallback": dict(routing["fallback"]), "revision": revision}
+        consent = entry.get("fallback_consent", {}).get("routing") if entry else None
+        approved = routing["fallback"]["enabled"] and fallback_policy.consent_matches(
+            profile, "routing", routing["fallback"], consent
+        )
+        return {
+            "enabled": enabled,
+            "heavy": dict(heavy),
+            "light": dict(light),
+            "fallback": dict(routing["fallback"]),
+            "revision": revision,
+            "fallback_policy": {
+                "trigger": fallback_policy.ROUTING_TRIGGER,
+                "max_retries": fallback_policy.ROUTING_MAX_RETRIES,
+                "approved": approved,
+            },
+        }
 
     def _fresh_profile_entry(self, profile: str, entries: dict[str, Any]) -> dict[str, Any]:
         if profile in entries:
-            return {"models": entries[profile]["models"], "routing": entries[profile]["routing"]}
+            return copy.deepcopy(entries[profile])
         actual = self._actual_models(profile)
-        return {"models": actual, "routing": self._default_routing(False)}
+        return {
+            "models": actual,
+            "routing": self._default_routing(False),
+            "native_fallback": None,
+            "delegation_fallback": None,
+            "fallback_consent": {"native": None, "routing": None, "delegation": None},
+        }
 
     def preview(self, body: dict) -> dict[str, Any]:
         if not isinstance(body, dict) or set(body) != {"expected_revision", "profile", "models", "model_targets", "routing", "routing_profiles"}:
@@ -678,6 +1071,8 @@ class Service:
             old_enabled = bool(entry["routing"]["enabled"])
             new_enabled = name in selected_set
             if name == profile:
+                if submitted_routing["fallback"] != entry["routing"]["fallback"]:
+                    raise ValueError("routing.fallback can only be changed by fallback_preview")
                 new_routing = dict(submitted_routing)
                 new_routing["enabled"] = new_enabled
                 if entry["routing"] != new_routing:
@@ -731,6 +1126,315 @@ class Service:
             _atomic_write(plans_dir / (plan_id + ".json"), _json_bytes(plan))
         return {"plan_id": plan_id, "changes": json.loads(json.dumps(changes)), "warnings": [], "expires_at": expires_at}
 
+    def fallback_preview(self, body: dict) -> dict[str, Any]:
+        """Prepare an explicit, scope-bound fallback policy update."""
+        if not isinstance(body, dict) or set(body) != {"expected_revision", "updates", "confirmations"}:
+            raise ValueError("fallback preview body has unknown or missing fields")
+        expected = body["expected_revision"]
+        if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        updates = body["updates"]
+        confirmations = body["confirmations"]
+        if not isinstance(updates, list) or not updates:
+            raise ValueError("updates must be a non-empty list")
+        if not isinstance(confirmations, list):
+            raise ValueError("confirmations must be a list")
+
+        discovered = self._discover_profiles()
+        parsed_updates: list[tuple[str, dict[str, Any]]] = []
+        seen_profiles: set[str] = set()
+        for update in updates:
+            if not isinstance(update, dict) or not set(update) <= {"profile", "native_fallback", "routing_fallback", "delegation_fallback"} or "profile" not in update:
+                raise ValueError("each update must contain profile and known fallback scopes")
+            if not (set(update) & {"native_fallback", "routing_fallback", "delegation_fallback"}):
+                raise ValueError("each update must change at least one fallback scope")
+            profile = self._require_profile(update["profile"], discovered)
+            if profile in seen_profiles:
+                raise ValueError("updates must not contain duplicate profiles")
+            seen_profiles.add(profile)
+            scopes: dict[str, Any] = {}
+            if "native_fallback" in update:
+                scopes["native"] = self._validate_native_fallback(update["native_fallback"])
+                if scopes["native"] is None:
+                    raise ValueError("native_fallback must define enabled and chain")
+                if scopes["native"]["enabled"] and not scopes["native"]["chain"]:
+                    raise ValueError("enabled native fallback requires at least one chain entry")
+            if "routing_fallback" in update:
+                raw = update["routing_fallback"]
+                if not isinstance(raw, dict) or set(raw) != {"enabled", "heavy", "light"} or not isinstance(raw["enabled"], bool):
+                    raise ValueError("routing_fallback must define enabled, heavy, and light")
+                heavy = None if raw["heavy"] is None else _route(raw["heavy"])
+                light = None if raw["light"] is None else _route(raw["light"])
+                if raw["enabled"] and (heavy is None or light is None):
+                    raise ValueError("enabled routing fallback requires Heavy and Light routes")
+                scopes["routing"] = {"enabled": raw["enabled"], "heavy": heavy, "light": light}
+            if "delegation_fallback" in update:
+                scopes["delegation"] = self._validate_delegation_fallback(update["delegation_fallback"])
+                if scopes["delegation"] is None:
+                    raise ValueError("delegation_fallback must define mode and chain")
+            parsed_updates.append((profile, scopes))
+
+        confirmation_map: dict[tuple[str, str], dict[str, bool]] = {}
+        for item in confirmations:
+            if not isinstance(item, dict) or set(item) != {"profile", "scope", "allow_additional_cost", "allow_task_rerun"}:
+                raise ValueError("each confirmation must define profile, scope, cost, and rerun flags")
+            profile = self._require_profile(item["profile"], discovered)
+            scope = item["scope"]
+            if scope not in {"native", "routing", "delegation"}:
+                raise ValueError("confirmation scope must be native, routing, or delegation")
+            pair = (profile, scope)
+            if pair in confirmation_map:
+                raise ValueError("confirmations must not contain duplicate profile scopes")
+            if not isinstance(item["allow_additional_cost"], bool) or not isinstance(item["allow_task_rerun"], bool):
+                raise ValueError("confirmation flags must be boolean")
+            confirmation_map[pair] = {
+                "allow_additional_cost": item["allow_additional_cost"],
+                "allow_task_rerun": item["allow_task_rerun"],
+            }
+
+        allowed_pairs = {(profile, scope) for profile, scopes in parsed_updates for scope in scopes}
+        if set(confirmation_map) - allowed_pairs:
+            raise ValueError("confirmation is not bound to an updated profile scope")
+        for (profile, scope), confirmation in confirmation_map.items():
+            if confirmation["allow_additional_cost"] is not True:
+                raise ValueError("fallback confirmation must allow additional cost")
+            expected_rerun = scope == "routing"
+            if confirmation["allow_task_rerun"] is not expected_rerun:
+                raise ValueError("fallback confirmation retry flag does not match its fixed execution path")
+
+        stored = self._load_store()
+        revision = stored["revision"] if stored else 0
+        if expected != revision:
+            raise RevisionConflict("settings revision changed; reload before fallback preview")
+        entries = copy.deepcopy(stored["profiles"]) if stored else {}
+        all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
+        after = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
+        changes: list[dict[str, Any]] = []
+        snapshots: dict[str, dict[str, Any]] = {}
+        writes: list[dict[str, Any]] = []
+        native_expected: dict[str, list[dict[str, str]]] = {}
+        native_snapshots: dict[str, str] = {}
+        native_provenance: dict[str, str] = {}
+        delegation_expected: dict[str, Any] = {}
+        delegation_snapshots: dict[str, str] = {}
+        delegation_provenance: dict[str, str] = {}
+
+        def raw_pair_view(raw: Any, *, legacy: bool) -> list[dict[str, str]]:
+            if raw in (None, [], {}):
+                return []
+            if legacy and isinstance(raw, dict):
+                values = [raw]
+            elif isinstance(raw, list):
+                values = raw
+            else:
+                return []
+            return [
+                {"provider": item["provider"], "model": item["model"]}
+                for item in values
+                if isinstance(item, dict) and set(item) == {"provider", "model"}
+                and isinstance(item.get("provider"), str) and isinstance(item.get("model"), str)
+            ]
+
+        for profile, scopes in parsed_updates:
+            entry = after[profile]
+            for scope, desired in scopes.items():
+                consent_key = scope
+                old_consent = entry["fallback_consent"][consent_key]
+                confirmation = confirmation_map.get((profile, scope))
+                if scope == "native":
+                    try:
+                        native_snapshot = self._read_native_snapshot(profile)
+                    except effective_config.EffectiveConfigChanged as exc:
+                        raise RevisionConflict("native config changed during preview") from exc
+                    except effective_config.EffectiveConfigUnavailable as exc:
+                        raise ValueError("native fallback is read-only because effective config cannot be verified") from exc
+                    current_status = self._native_status(profile, entry, native_snapshot)
+                    if not current_status["editable"] or current_status["enabled"] is None:
+                        raise ValueError("native fallback is read-only for this profile")
+                    primary = entry["models"]["main"]
+                    if desired["enabled"] and any(
+                        (item["provider"].casefold(), item["model"].casefold())
+                        == (primary["provider"].casefold(), primary["model"].casefold())
+                        for item in desired["chain"]
+                    ):
+                        raise ValueError("native fallback must differ from the primary model")
+                    old_managed = entry["native_fallback"]
+                    already_approved = (
+                        old_managed is not None
+                        and fallback_policy.consent_matches(profile, scope, desired, old_consent)
+                    )
+                    needs_consent = desired["enabled"] and not already_approved
+                    if needs_consent and confirmation is None:
+                        raise ValueError("native fallback requires explicit additional-cost confirmation")
+                    new_consent = (
+                        fallback_policy.make_consent(profile, scope, desired, source="explicit")
+                        if confirmation is not None
+                        else old_consent if fallback_policy.consent_matches(profile, scope, desired, old_consent)
+                        else None
+                    )
+                    before_native = {
+                        "managed": old_managed is not None,
+                        "enabled": current_status["enabled"],
+                        "chain": current_status["chain"],
+                    }
+                    if old_managed != desired:
+                        changes.append({"profile": profile, "field": "native_fallback", "before": before_native, "after": desired})
+                    entry["native_fallback"] = desired
+                    entry["fallback_consent"]["native"] = new_consent
+
+                    raw_providers = native_snapshot.raw("fallback_providers")
+                    raw_legacy = native_snapshot.raw("fallback_model")
+                    projected = copy.deepcopy(desired["chain"]) if desired["enabled"] else []
+                    target_providers = projected
+                    target_legacy: list[Any] = []
+                    native_expected[profile] = projected
+                    native_snapshots[profile] = native_snapshot.cas_digest
+                    native_provenance[profile] = native_snapshot.provenance_digest
+                    profile_snapshot = snapshots.setdefault(profile, {})
+                    for key, raw in (("fallback_providers", raw_providers), ("fallback_model", raw_legacy)):
+                        profile_snapshot[key] = {"sha256": _digest(raw)}
+                    for key, raw, target, legacy_source in (
+                        ("fallback_model", raw_legacy, target_legacy, True),
+                        ("fallback_providers", raw_providers, target_providers, False),
+                    ):
+                        if raw != target:
+                            writes.append({"profile": profile, "key": key, "before": {"sha256": _digest(raw)}, "after": target})
+                            changes.append({
+                                "profile": profile,
+                                "field": key,
+                                "before": raw_pair_view(raw, legacy=legacy_source),
+                                "after": target,
+                            })
+                elif scope == "routing":
+                    old_fallback = entry["routing"]["fallback"]
+                    heavy_primary = entry["models"]["main"] if entry["routing"]["heavy"]["follow"] == "main" else entry["routing"]["heavy"]["custom"]
+                    light_primary = entry["models"]["delegation"] if entry["routing"]["light"]["follow"] == "delegation" else entry["routing"]["light"]["custom"]
+                    if desired["enabled"]:
+                        heavy_id = (desired["heavy"]["provider"].casefold(), desired["heavy"]["model"].casefold())
+                        light_id = (desired["light"]["provider"].casefold(), desired["light"]["model"].casefold())
+                        if heavy_id == light_id:
+                            raise ValueError("enabled Heavy and Light fallbacks must be distinct")
+                        if heavy_id == (heavy_primary["provider"].casefold(), heavy_primary["model"].casefold()) or light_id == (light_primary["provider"].casefold(), light_primary["model"].casefold()):
+                            raise ValueError("fallback route must differ from its primary route")
+                    already_approved = fallback_policy.consent_matches(profile, scope, desired, old_consent)
+                    needs_consent = desired["enabled"] and not already_approved
+                    if needs_consent and confirmation is None:
+                        raise ValueError("routing fallback requires cost and fresh-task rerun confirmation")
+                    new_consent = (
+                        fallback_policy.make_consent(profile, scope, desired, source="explicit")
+                        if confirmation is not None
+                        else old_consent if fallback_policy.consent_matches(profile, scope, desired, old_consent)
+                        else None
+                    )
+                    if old_fallback != desired:
+                        changes.append({"profile": profile, "field": "routing.fallback", "before": old_fallback, "after": desired})
+                    entry["routing"]["fallback"] = desired
+                    entry["fallback_consent"]["routing"] = new_consent
+                elif scope == "delegation":
+                    try:
+                        delegated_snapshot = self._read_delegation_snapshot(profile)
+                    except effective_config.EffectiveConfigChanged as exc:
+                        raise RevisionConflict("delegation config changed during preview") from exc
+                    except effective_config.EffectiveConfigUnavailable as exc:
+                        raise ValueError("delegation fallback is read-only because effective config cannot be verified") from exc
+                    current_status = self._delegation_status(profile, entry, delegated_snapshot)
+                    if not current_status["editable"] or current_status["actual_mode"] is None:
+                        raise ValueError("delegation fallback is read-only for this profile")
+                    old_managed = entry.get("delegation_fallback")
+                    approved = old_managed is not None and fallback_policy.consent_matches(profile, scope, desired, old_consent)
+                    if desired["mode"] != "off" and not approved and confirmation is None:
+                        raise ValueError("delegation fallback requires explicit additional-cost confirmation")
+                    new_consent = (
+                        fallback_policy.make_consent(profile, scope, desired, source="explicit")
+                        if confirmation is not None else old_consent if approved else None
+                    )
+                    if old_managed != desired:
+                        changes.append({"profile": profile, "field": "delegation_fallback",
+                                        "before": {"managed": old_managed is not None, "mode": current_status["mode"], "chain": current_status["chain"]},
+                                        "after": desired})
+                    entry["delegation_fallback"] = desired
+                    entry["fallback_consent"]["delegation"] = new_consent
+                    raw = delegated_snapshot.raw(DELEGATION_FALLBACK_KEY)
+                    projected = None if desired["mode"] == "default" else copy.deepcopy(desired["chain"]) if desired["mode"] == "custom" else []
+                    delegation_expected[profile] = projected
+                    delegation_snapshots[profile] = delegated_snapshot.cas_digest
+                    delegation_provenance[profile] = delegated_snapshot.provenance_digest
+                    snapshots.setdefault(profile, {})[DELEGATION_FALLBACK_KEY] = {"sha256": _digest(raw)}
+                    if raw != projected:
+                        writes.append({"profile": profile, "key": DELEGATION_FALLBACK_KEY,
+                                       "before": {"sha256": _digest(raw)}, "after": projected})
+                        changes.append({"profile": profile, "field": DELEGATION_FALLBACK_KEY,
+                                        "before": raw, "after": projected})
+                old_source = old_consent.get("source") if isinstance(old_consent, dict) else None
+                new_source = new_consent.get("source") if isinstance(new_consent, dict) else None
+                if old_source != new_source:
+                    changes.append({
+                        "profile": profile,
+                        "field": f"fallback_consent.{scope}",
+                        "before": old_source,
+                        "after": new_source,
+                    })
+
+        for name, entry in after.items():
+            self._check_distinct_routes(entry["routing"], entry["models"])
+        state_changed = after != entries
+        plan_id = uuid.uuid4().hex
+        expires_epoch = time.time() + self.PLAN_TTL
+        expires_at = datetime.fromtimestamp(expires_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+        config_digests = {name: _digest(values) for name, values in snapshots.items()}
+        plan = {
+            "kind": "fallback",
+            "id": plan_id,
+            "revision": revision,
+            "after": after,
+            "changes": changes,
+            "snapshots": snapshots,
+            "config_digests": config_digests,
+            "writes": writes,
+            "skill_snapshots": {},
+            "model_targets": [],
+            "native_expected": native_expected,
+            "native_snapshots": native_snapshots,
+            "native_provenance": native_provenance,
+            "delegation_expected": delegation_expected,
+            "delegation_snapshots": delegation_snapshots,
+            "delegation_provenance": delegation_provenance,
+            "state_changed": state_changed,
+            "expires_epoch": expires_epoch,
+        }
+        # Eligibility, sanitized preview and before hashes all came from the
+        # same immutable snapshot. Reject an intervening edit instead of
+        # adopting it as the CAS baseline.
+        for profile, expected_snapshot in native_snapshots.items():
+            try:
+                current_snapshot = self._read_native_snapshot(profile)
+            except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                raise RevisionConflict("native config changed during preview") from exc
+            if current_snapshot.cas_digest != expected_snapshot:
+                raise RevisionConflict("native config changed during preview")
+        for profile, expected_snapshot in delegation_snapshots.items():
+            try:
+                current_snapshot = self._read_delegation_snapshot(profile)
+            except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                raise RevisionConflict("delegation config changed during preview") from exc
+            if current_snapshot.cas_digest != expected_snapshot:
+                raise RevisionConflict("delegation config changed during preview")
+        self._plans[plan_id] = plan
+        plans_dir = self.store_path.parent / "plans"
+        with _FileLock(self._lock_path):
+            _secure_dir(plans_dir)
+            for path in plans_dir.glob("*.json"):
+                if path.is_symlink():
+                    raise ServiceError("unsafe preview plan path")
+                old = _read_json(path, default={})
+                if old.get("expires_epoch", 0) < time.time():
+                    path.unlink(missing_ok=True)
+            if len(list(plans_dir.glob("*.json"))) >= self.PLAN_LIMIT:
+                raise ServiceError("too many pending previews; wait for expiry")
+            plan["owner_profile"] = self.active_profile()
+            _atomic_write(plans_dir / (plan_id + ".json"), _json_bytes(plan))
+        return {"plan_id": plan_id, "changes": json.loads(json.dumps(changes)), "warnings": [], "expires_at": expires_at}
+
     def _actual_key_matches(self, profile: str, key: str, expected: Any) -> bool:
         observed = self._read_key(profile, key)
         if isinstance(expected, dict) and set(expected) == {"sha256"}:
@@ -764,6 +1468,20 @@ class Service:
                 current_values = {key: ({"sha256": _digest(self._read_key(profile, key))} if isinstance(expected, dict) and set(expected) == {"sha256"} else self._read_key(profile, key)) for key, expected in values.items()}
                 if current_values != values or _digest(current_values) != plan["config_digests"][profile]:
                     raise RevisionConflict("profile config changed since preview; reload before apply")
+            for profile, expected_snapshot in plan.get("native_snapshots", {}).items():
+                try:
+                    current_snapshot = self._read_native_snapshot(profile)
+                except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                    raise RevisionConflict("native config changed since preview; reload before apply") from exc
+                if current_snapshot.cas_digest != expected_snapshot:
+                    raise RevisionConflict("native config changed since preview; reload before apply")
+            for profile, expected_snapshot in plan.get("delegation_snapshots", {}).items():
+                try:
+                    current_snapshot = self._read_delegation_snapshot(profile)
+                except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                    raise RevisionConflict("delegation config changed since preview") from exc
+                if current_snapshot.cas_digest != expected_snapshot:
+                    raise RevisionConflict("delegation config changed since preview")
             for profile, expected in plan["skill_snapshots"].items():
                 if self._skill_digest(profile) != expected:
                     raise RevisionConflict("profile skill state changed since preview")
@@ -791,6 +1509,17 @@ class Service:
             try:
                 for item in plan["writes"]:
                     profile, key, before, after = item["profile"], item["key"], item["before"], item["after"]
+                    if profile in plan.get("native_provenance", {}):
+                        try:
+                            current_snapshot = self._read_native_snapshot(profile)
+                        except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                            raise RevisionConflict("native managed provenance changed during apply") from exc
+                        if current_snapshot.provenance_digest != plan["native_provenance"][profile]:
+                            raise RevisionConflict("native managed provenance changed during apply")
+                    if profile in plan.get("delegation_provenance", {}):
+                        current_snapshot = self._read_delegation_snapshot(profile)
+                        if current_snapshot.provenance_digest != plan["delegation_provenance"][profile]:
+                            raise RevisionConflict("delegation managed provenance changed during apply")
                     if not self._actual_key_matches(profile, key, before):
                         raise RevisionConflict("profile config changed during apply")
                     self._write_key(profile, key, after)
@@ -804,6 +1533,15 @@ class Service:
                 for profile in plan.get("model_targets", []):
                     if self._actual_models(profile) != next_store["profiles"][profile]["models"]:
                         raise RevisionConflict("resolved roles differ from approved desired models")
+                for profile, expected_chain in plan.get("native_expected", {}).items():
+                    actual_chain, warnings = self._native_actual(profile)
+                    if warnings or actual_chain != expected_chain:
+                        raise RevisionConflict("effective native fallback chain differs from approved selection")
+                for profile, expected_value in plan.get("delegation_expected", {}).items():
+                    current_snapshot = self._read_delegation_snapshot(profile)
+                    _mode, _chain, warnings = self._delegation_actual(current_snapshot)
+                    if warnings or current_snapshot.effective(DELEGATION_FALLBACK_KEY) != expected_value:
+                        raise RevisionConflict("effective delegation fallback differs from approved selection")
                 for profile in plan["skill_snapshots"]:
                     if next_store["profiles"].get(profile, {}).get("routing", {}).get("enabled"):
                         self._ensure_compat_skill(profile)

@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from model_router.service import Service
-from test_integration import make_home, writer, payload
+from test_integration import make_home, writer, payload, run_launcher
 
 
 @pytest.mark.parametrize('role', ['delegation', 'compression', 'title'])
@@ -49,7 +49,9 @@ def test_native_plugin_cli_transport_in_isolated_home(tmp_path):
     data = yaml.safe_load(config.read_text()); data['plugins']={'enabled':['model-router']}
     config.write_text(yaml.safe_dump(data),encoding='utf-8')
     env=dict(os.environ,HERMES_HOME=str(root));env.pop('HERMES_PROFILE',None)
-    result=subprocess.run([str(launcher),'--profile','default','model-router','status'],env=env,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=40)
+    for inherited in ('VIRTUAL_ENV','PYTHONHOME','PYTHONPATH'):
+        env.pop(inherited,None)
+    result=run_launcher([str(launcher),'--profile','default','model-router','status'],env=env,timeout=40)
     assert result.returncode==0,result.stderr
     line=next(v for v in result.stdout.splitlines() if v.startswith('MODEL_ROUTER_JSON:'))
     response=json.loads(line.split(':',1)[1])

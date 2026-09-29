@@ -56,6 +56,11 @@ def preview(body: dict):
     return _call(lambda service: service.preview(body))
 
 
+@router.post("/fallback-preview")
+def fallback_preview(body: dict):
+    return _call(lambda service: service.fallback_preview(body))
+
+
 @router.post("/apply")
 def apply(body: ApplyRequest):
     return _call(lambda service: service.apply(body.plan_id))

@@ -1,6 +1,7 @@
 """Model Router native plugin. No configuration writes during registration."""
 from pathlib import Path
 import json
+import os
 
 
 def register(ctx):
@@ -24,7 +25,7 @@ def register(ctx):
             return False
 
     def cli_setup(parser):
-        parser.add_argument("operation", choices=["status", "preview", "apply"])
+        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "apply"])
         parser.add_argument("--body", default="{}")
 
     def cli_handler(args):
@@ -40,6 +41,7 @@ def register(ctx):
                     if body: raise ValueError("status does not accept a body")
                     return service.status()
                 if args.operation == "preview": return service.preview(body)
+                if args.operation == "fallback-preview": return service.fallback_preview(body)
                 if set(body) != {"plan_id"}: raise ValueError("apply accepts only plan_id")
                 return service.apply(body["plan_id"])
             result = scoped(operation)
@@ -50,6 +52,29 @@ def register(ctx):
             return 2
 
     ctx.register_cli_command("model-router", "Profile model settings and coding routing", cli_setup, cli_handler)
+
+    # Observers are inert outside a validated plugin-owned attempt. Registration
+    # does not change profile settings or make ordinary requests route-scoped.
+    from .model_router.attempt_observer import record_event
+    def make_observer(event_name):
+        def observer(**payload):
+            # Each hook belongs to its loading profile. The observer validates
+            # an environment-bound child request, so reject a foreign manager
+            # before its own module can record that child's API events.
+            bound_home = os.environ.get("HERMES_HOME")
+            try:
+                if not bound_home or Path(bound_home).resolve(strict=True) != home.resolve(strict=True):
+                    return
+            except (OSError, RuntimeError):
+                return
+            token = set_hermes_home_override(home)
+            try:
+                record_event(event_name, **payload)
+            finally:
+                reset_hermes_home_override(token)
+        return observer
+    for event_name in ("pre_api_request", "post_api_request", "api_request_error", "pre_tool_call", "post_tool_call"):
+        ctx.register_hook(event_name, make_observer(event_name))
 
     if not enabled():
         return

@@ -21,7 +21,7 @@ def load(name, path, package=False):
 @pytest.fixture
 def api(monkeypatch):
     mod = load("test_router_dashboard", ROOT / "dashboard/plugin_api.py")
-    service = SimpleNamespace(status=lambda: {"revision": 2, "profiles": []}, preview=lambda b: {"plan_id": "x" * 32}, apply=lambda p: {"status": "applied"})
+    service = SimpleNamespace(status=lambda: {"revision": 2, "profiles": []}, preview=lambda b: {"plan_id": "x" * 32}, fallback_preview=lambda b: {"plan_id": "f" * 32}, apply=lambda p: {"status": "applied"})
     monkeypatch.setattr(mod, "_service", lambda: service)
     app = FastAPI(); app.include_router(mod.router)
     return mod, service, TestClient(app)
@@ -66,6 +66,9 @@ def plugin(monkeypatch):
     class Service:
         def active_profile(self): return "claire"
         def routing_config(self, profile): return {"enabled": state["enabled"], "revision": 1}
+        def fallback_preview(self, body):
+            state['fallback_body'] = body
+            return {'plan_id': 'f' * 32, 'changes': [], 'warnings': []}
     class Router:
         def __init__(self, service): self.service = service
         def start(self, *args): state["started"] += 1; return {"job_id": "a" * 32, "status": "running"}
@@ -79,8 +82,11 @@ def plugin(monkeypatch):
     constants.set_hermes_home_override = lambda home: state["bound"].append(str(home)) or "token"
     constants.reset_hermes_home_override = lambda token: state["bound"].append(token)
     monkeypatch.setitem(sys.modules, "hermes_constants", constants)
+    observer_module = ModuleType(package.__name__ + '.attempt_observer')
+    observer_module.record_event = lambda event_name, **payload: state.setdefault('events', []).append((event_name, payload))
+    monkeypatch.setitem(sys.modules, observer_module.__name__, observer_module)
     tools, skills = [], []
-    ctx = SimpleNamespace(register_cli_command=lambda *args: state.update(cli=args), register_tool=lambda **kwargs: tools.append(kwargs), register_skill=lambda *args: skills.append(args))
+    ctx = SimpleNamespace(register_cli_command=lambda *args: state.update(cli=args), register_tool=lambda **kwargs: tools.append(kwargs), register_skill=lambda *args: skills.append(args), register_hook=lambda event, callback: state.setdefault('hooks', {}).update({event: callback}))
     return mod, ctx, state, tools, skills
 
 
@@ -109,6 +115,45 @@ def test_stale_tool_cannot_bypass_profile_disable(plugin):
     result = json.loads(tools[0]["handler"]({"action": "start", "purpose": "implementation"}))
     assert result["error"] == "routing_disabled"
     assert state["started"] == 0
+
+
+def test_backend_fallback_preview_uses_separate_service_method(api):
+    _, service, client = api
+    captured = []
+    service.fallback_preview = lambda body: captured.append(body) or {'plan_id': 'f' * 32}
+    body = {'expected_revision': 4, 'updates': [{'profile': 'claire', 'native_fallback': {'enabled': False, 'chain': []}}], 'confirmations': []}
+    assert client.post('/fallback-preview', json=body).json()['plan_id'] == 'f' * 32
+    assert captured == [body]
+
+
+def test_native_fallback_command_is_scoped_and_framed(plugin, capsys):
+    mod, ctx, state, _, _ = plugin
+    mod.register(ctx)
+    body = {'expected_revision': 4, 'updates': [{'profile': 'claire', 'native_fallback': {'enabled': False, 'chain': []}}], 'confirmations': []}
+    handler = state['cli'][3]
+    assert handler(SimpleNamespace(operation='fallback-preview', body=json.dumps(body))) == 0
+    output = capsys.readouterr().out
+    assert json.loads(output.split('MODEL_ROUTER_JSON:', 1)[1])['plan_id'] == 'f' * 32
+    assert state['fallback_body'] == body
+    assert state['bound'][-1] == 'token'
+    assert handler(SimpleNamespace(operation='fallback-preview', body='x' * 16385)) == 2
+    assert 'x' * 50 not in capsys.readouterr().out
+
+
+def test_observer_events_bind_distinct_names_and_original_profile(plugin, monkeypatch, tmp_path):
+    mod, ctx, state, _, _ = plugin
+    home = tmp_path / 'claire'
+    home.mkdir()
+    monkeypatch.setattr(sys.modules['hermes_constants'], 'get_hermes_home', lambda: home)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    mod.register(ctx)
+    expected = {'pre_api_request', 'post_api_request', 'api_request_error', 'pre_tool_call', 'post_tool_call'}
+    assert set(state['hooks']) == expected
+    for event in sorted(expected):
+        state['hooks'][event](session_id='attempt-session')
+        assert state['events'][-1] == (event, {'session_id': 'attempt-session'})
+        assert state['bound'][-2] == str(home)
+        assert state['bound'][-1] == 'token'
 
 
 def test_tool_rejects_cross_profile_field(plugin):

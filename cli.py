@@ -10,6 +10,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("status")
     p = sub.add_parser("preview"); p.add_argument("--file", required=True)
+    p = sub.add_parser("fallback-preview"); p.add_argument("--file", required=True)
     p = sub.add_parser("apply"); p.add_argument("--plan-id", required=True)
     p = sub.add_parser("initialize")
     p.add_argument("--routing-profiles", nargs="*", required=True)
@@ -28,6 +29,8 @@ def main(argv=None):
             result = service.status()
         elif args.action == "preview":
             result = service.preview(json.loads(Path(args.file).read_text(encoding="utf-8")))
+        elif args.action == "fallback-preview":
+            result = service.fallback_preview(json.loads(Path(args.file).read_text(encoding="utf-8")))
         elif args.action == "apply":
             result = service.apply(args.plan_id)
         elif args.action == "initialize":
