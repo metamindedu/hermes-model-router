@@ -1,0 +1,93 @@
+[
+  {
+    "profile": "default",
+    "available": true,
+    "matches": [
+      {
+        "name": "adaptive-coding-orchestration",
+        "description": "Use for nearly all coding tasks—implementation, debugging, refactoring, tests, architecture, and code review—even when delegation or model routing is not explicitly requested. Classifies complexity and risk, chooses local versus delegated work, and separates mechanical verification from semantic review. Skip only pure writing, general conversation, one-step reads, and non-coding research.",
+        "category": "software-development"
+      }
+    ]
+  },
+  {
+    "profile": "claire",
+    "available": true,
+    "matches": [
+      {
+        "name": "adaptive-coding-orchestration",
+        "description": "Use for nearly all coding tasks—implementation, debugging, refactoring, tests, architecture, and code review—even when delegation or model routing is not explicitly requested. Classifies complexity and risk, chooses local versus delegated work, and separates mechanical verification from semantic review. Skip only pure writing, general conversation, one-step reads, and non-coding research.",
+        "category": "software-development"
+      }
+    ]
+  },
+  {
+    "profile": "ireum",
+    "available": false,
+    "matches": []
+  },
+  {
+    "profile": "morgan",
+    "available": true,
+    "matches": [
+      {
+        "name": "adaptive-coding-orchestration",
+        "description": "Use for nearly all coding tasks—implementation, debugging, refactoring, tests, architecture, and code review—even when delegation or model routing is not explicitly requested. Classifies complexity and risk, chooses local versus delegated work, and separates mechanical verification from semantic review. Skip only pure writing, general conversation, one-step reads, and non-coding research.",
+        "category": "software-development"
+      }
+    ]
+  },
+  {
+    "profile": "postmaster",
+    "available": false,
+    "matches": []
+  },
+  {
+    "profile": "pychrong",
+    "available": true,
+    "matches": [
+      {
+        "name": "adaptive-coding-orchestration",
+        "description": "Use for nearly all coding tasks—implementation, debugging, refactoring, tests, architecture, and code review—even when delegation or model routing is not explicitly requested. Classifies complexity and risk, chooses local versus delegated work, and separates mechanical verification from semantic review. Skip only pure writing, general conversation, one-step reads, and non-coding research.",
+        "category": "software-development"
+      }
+    ]
+  },
+  {
+    "profile": "satoshi",
+    "available": false,
+    "matches": []
+  },
+  {
+    "profile": "shinyoung",
+    "available": true,
+    "matches": [
+      {
+        "name": "adaptive-coding-orchestration",
+        "description": "Use for nearly all coding tasks—implementation, debugging, refactoring, tests, architecture, and code review—even when delegation or model routing is not explicitly requested. Classifies complexity and risk, chooses local versus delegated work, and separates mechanical verification from semantic review. Skip only pure writing, general conversation, one-step reads, and non-coding research.",
+        "category": null
+      }
+    ]
+  },
+  {
+    "profile": "taxkeeper",
+    "available": false,
+    "matches": []
+  },
+  {
+    "profile": "vmaicreator",
+    "available": false,
+    "matches": []
+  },
+  {
+    "profile": "wallace",
+    "available": true,
+    "matches": [
+      {
+        "name": "adaptive-coding-orchestration",
+        "description": "Use for nearly all coding tasks—implementation, debugging, refactoring, tests, architecture, and code review—even when delegation or model routing is not explicitly requested. Classifies complexity and risk, chooses local versus delegated work, and separates mechanical verification from semantic review. Skip only pure writing, general conversation, one-step reads, and non-coding research.",
+        "category": "software-development"
+      }
+    ]
+  }
+]

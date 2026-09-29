@@ -1,0 +1,450 @@
+{
+  "active_set": "openai",
+  "candidate_sets": {
+    "non-openai": {
+      "description": "Use while the configured main lane is a non-OpenAI API lane (for example the deepseek or xiaomi providers).",
+      "routes": {
+        "HEAVYWEIGHT": "xiaomi/mimo-v2.6-pro",
+        "LIGHTWEIGHT": "deepseek/deepseek-flash"
+      }
+    },
+    "openai": {
+      "description": "Use while the configured main lane is the OpenAI family (subscription lane or OpenAI API billing).",
+      "routes": {
+        "HEAVYWEIGHT": "openai-api/gpt-6-astra",
+        "LIGHTWEIGHT": "openai-api/gpt-5.6-luna"
+      }
+    }
+  },
+  "default_routes": {
+    "GENERAL": "openai-codex/gpt-5.6-sol",
+    "HEAVYWEIGHT": "openai-codex/gpt-6-astra",
+    "LIGHTWEIGHT": "openai-codex/gpt-5.6-luna"
+  },
+  "evidence_cutoff": "2026-09-22T14:00:45Z",
+  "fallback_routes": {
+    "HEAVYWEIGHT": "openai-api/gpt-6-astra",
+    "LIGHTWEIGHT": "openai-api/gpt-5.6-luna"
+  },
+  "fresh_until": "2026-10-22T13:19:37Z",
+  "generated_at": "2026-09-22T14:00:45Z",
+  "models": [
+    {
+      "agentic_summary": "Confirmed in the current Hermes openai-codex OAuth configuration and active session; use for scoped implementation and mechanical verification.",
+      "coding_summary": "Codex subscription model used for the stable lightweight delegation lane; no OpenAI API token billing route.",
+      "confidence": "high",
+      "context_window": 1050000,
+      "key": "openai-codex/gpt-5.6-luna",
+      "max_output_tokens": 128000,
+      "model_id": "gpt-5.6-luna",
+      "pricing": {
+        "cached_input": 0,
+        "currency": "subscription",
+        "input": 0,
+        "notes": "Covered by the configured Codex subscription; no OpenAI API per-token pricing is used by this route.",
+        "output": 0,
+        "unit": "subscription"
+      },
+      "provider": "openai-codex",
+      "reasoning_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "recommended_use": [
+        "well-scoped implementation",
+        "boilerplate and mechanical refactors",
+        "tests, lint, typecheck, and build loops",
+        "straightforward failure repair",
+        "repository exploration and log collection"
+      ],
+      "role": "LIGHTWEIGHT",
+      "sources": [
+        {
+          "checked_at": "2026-08-21T03:25:59Z",
+          "kind": "hermes_provider_docs",
+          "url": "https://hermes-agent.nousresearch.com/docs/integrations/providers"
+        },
+        {
+          "checked_at": "2026-08-21T03:25:59Z",
+          "kind": "hermes_delegation_docs",
+          "url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/delegation"
+        }
+      ],
+      "status": "active",
+      "tool_use": true
+    },
+    {
+      "agentic_summary": "Available on the stable subscription lane as the general comparative route; superseded as the Heavy selection on 2026-09-17.",
+      "coding_summary": "Codex subscription model retained as the general comparative route after the Heavy role moved to the newer flagship; balanced capability and efficiency for professional work.",
+      "confidence": "medium",
+      "context_window": 1050000,
+      "key": "openai-codex/gpt-5.6-sol",
+      "max_output_tokens": 128000,
+      "model_id": "gpt-5.6-sol",
+      "pricing": {
+        "cached_input": 0,
+        "currency": "subscription",
+        "input": 0,
+        "notes": "Covered by the configured Codex subscription; no OpenAI API per-token pricing is used by this route.",
+        "output": 0,
+        "unit": "subscription"
+      },
+      "provider": "openai-codex",
+      "reasoning_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "recommended_use": [
+        "general comparative reference for subscription-lane work",
+        "secondary comparison when route confidence is low"
+      ],
+      "role": "GENERAL",
+      "sources": [
+        {
+          "checked_at": "2026-08-21T03:25:59Z",
+          "kind": "hermes_provider_docs",
+          "url": "https://hermes-agent.nousresearch.com/docs/integrations/providers"
+        },
+        {
+          "checked_at": "2026-08-21T03:25:59Z",
+          "kind": "hermes_delegation_docs",
+          "url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/delegation"
+        }
+      ],
+      "status": "active",
+      "tool_use": true
+    },
+    {
+      "agentic_summary": "Available in Codex under the shared subscription allowance; first successful child metadata in this install will promote this route to high confidence.",
+      "coding_summary": "Codex subscription Heavy model released 2026-09-03 for the hardest end-to-end coding and agentic work, replacing the previous Heavy selection at the same context budget.",
+      "confidence": "medium",
+      "context_window": 1050000,
+      "key": "openai-codex/gpt-6-astra",
+      "max_output_tokens": 128000,
+      "model_id": "gpt-6-astra",
+      "pricing": {
+        "cached_input": 0,
+        "currency": "subscription",
+        "input": 0,
+        "notes": "Covered by the configured Codex subscription; no OpenAI API per-token pricing is used by this route.",
+        "output": 0,
+        "unit": "subscription"
+      },
+      "provider": "openai-codex",
+      "reasoning_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "recommended_use": [
+        "ambiguous or complex requirements",
+        "repository-wide architecture",
+        "difficult root-cause analysis",
+        "security, concurrency, and data-integrity review",
+        "independent semantic verification for high-risk changes"
+      ],
+      "role": "HEAVYWEIGHT",
+      "sources": [
+        {
+          "checked_at": "2026-09-17T10:08:17Z",
+          "kind": "official_release_notes",
+          "url": "https://openai.com/index/gpt-6-astra/"
+        },
+        {
+          "checked_at": "2026-09-17T10:08:17Z",
+          "kind": "official_work_and_codex_announcement",
+          "url": "https://openai.com/index/gpt-6-astra-next-generation-work/"
+        },
+        {
+          "checked_at": "2026-09-17T10:08:17Z",
+          "kind": "official_help_center_usage",
+          "url": "https://help.openai.com/en/articles/20001516-managing-usage-with-gpt-6-astra-in-work-and-codex"
+        }
+      ],
+      "status": "active",
+      "tool_use": true
+    },
+    {
+      "agentic_summary": "Official API model page confirms tool support, structured outputs, and rate tiers; retained as an alternative API-billed Heavy for operators who configure OpenAI API credentials; no longer the declared exhaustion fallback.",
+      "coding_summary": "API-billed GPT-6 Astra for the hardest end-to-end work when the subscription lane is exhausted; specs and pricing verified from official pages.",
+      "confidence": "medium",
+      "context_window": 1050000,
+      "key": "openai-api/gpt-6-astra",
+      "max_output_tokens": 128000,
+      "model_id": "gpt-6-astra",
+      "pricing": {
+        "cached_input": 1.0,
+        "currency": "USD",
+        "input": 10.0,
+        "notes": "Standard pricing; prompts above 272K input tokens are billed at 2x input/cache and 1.5x output; Batch/Flex 50%; Fast mode 2x; cache writes $12.50 per 1M.",
+        "output": 50.0,
+        "unit": "per_1m_tokens"
+      },
+      "provider": "openai-api",
+      "reasoning_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "recommended_use": [
+        "alternative API-billed Heavy when OpenAI API credentials are configured",
+        "comparison baseline against the declared non-OpenAI Heavy fallback"
+      ],
+      "role": "HEAVYWEIGHT",
+      "sources": [
+        {
+          "checked_at": "2026-09-17T10:08:17Z",
+          "kind": "official_model_docs",
+          "url": "https://developers.openai.com/api/docs/models/gpt-6-astra"
+        },
+        {
+          "checked_at": "2026-09-17T10:08:17Z",
+          "kind": "official_pricing",
+          "url": "https://openai.com/api/pricing/"
+        }
+      ],
+      "status": "active",
+      "tool_use": true
+    },
+    {
+      "agentic_summary": "Listed in the current official API catalog with tool support; retained as an alternative API-billed Light for operators who configure OpenAI API credentials; no longer the declared exhaustion fallback.",
+      "coding_summary": "Cost-efficient API model reinstated for scoped implementation and mechanical work when the subscription lane is exhausted.",
+      "confidence": "medium",
+      "context_window": 1050000,
+      "key": "openai-api/gpt-5.6-luna",
+      "max_output_tokens": 128000,
+      "model_id": "gpt-5.6-luna",
+      "pricing": {
+        "cached_input": 0.02,
+        "currency": "USD",
+        "input": 0.2,
+        "notes": "Standard short-context pricing; requests above 272K input tokens use the documented long-context multiplier.",
+        "output": 1.2,
+        "unit": "per_1m_tokens"
+      },
+      "provider": "openai-api",
+      "reasoning_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "recommended_use": [
+        "alternative API-billed Light when OpenAI API credentials are configured"
+      ],
+      "role": "LIGHTWEIGHT",
+      "sources": [
+        {
+          "checked_at": "2026-09-17T10:08:17Z",
+          "kind": "official_model_catalog",
+          "url": "https://developers.openai.com/api/docs/models"
+        },
+        {
+          "checked_at": "2026-09-17T10:08:17Z",
+          "kind": "official_pricing",
+          "url": "https://openai.com/api/pricing/"
+        }
+      ],
+      "status": "active",
+      "tool_use": true
+    },
+    {
+      "agentic_summary": "Present in the provider model API and suitable as a general fallback, but it is not the permanent Light/Heavy policy boundary.",
+      "coding_summary": "Officially positioned between the flagship and cost-sensitive tiers, balancing intelligence and cost when neither extreme route is appropriate.",
+      "confidence": "medium",
+      "context_window": 1050000,
+      "key": "openai-api/gpt-5.6-terra",
+      "max_output_tokens": 128000,
+      "model_id": "gpt-5.6-terra",
+      "pricing": {
+        "cached_input": 0.2,
+        "currency": "USD",
+        "input": 2.0,
+        "notes": "Standard short-context pricing. Requests above 272K input tokens use the documented long-context multiplier; cache writes and alternate service tiers are priced separately.",
+        "output": 12.0,
+        "unit": "per_1m_tokens"
+      },
+      "provider": "openai-api",
+      "reasoning_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "recommended_use": [
+        "general fallback when Light or Heavy is unavailable",
+        "medium-complexity coding with balanced cost",
+        "secondary comparison when route confidence is low"
+      ],
+      "role": "GENERAL",
+      "sources": [
+        {
+          "checked_at": "2026-08-19T01:46:26Z",
+          "kind": "official_model_catalog",
+          "url": "https://platform.openai.com/docs/models"
+        },
+        {
+          "checked_at": "2026-08-19T01:46:26Z",
+          "kind": "official_pricing",
+          "url": "https://platform.openai.com/docs/pricing"
+        },
+        {
+          "checked_at": "2026-08-19T01:46:26Z",
+          "kind": "official_model_api_presence",
+          "url": "https://api.openai.com/v1/models/gpt-5.6-terra"
+        }
+      ],
+      "status": "deprecated",
+      "tool_use": true
+    },
+    {
+      "agentic_summary": "Tool calls, JSON output, Responses and Anthropic formats are documented; Hermes core carries the DeepSeek thinking-mode reasoning-content echo handling and DEEPSEEK_V4 effort mapping (xhigh clamps to max). Live use is confirmed by the current main/delegation route.",
+      "coding_summary": "DeepSeek V4.1 Flash cost-efficient API model; already the configured main and delegation model on this install, so it is the working non-subscription Light lane.",
+      "confidence": "high",
+      "context_window": 1048576,
+      "key": "deepseek/deepseek-flash",
+      "max_output_tokens": 393216,
+      "model_id": "deepseek-flash",
+      "pricing": {
+        "cached_input": 0.006,
+        "currency": "USD",
+        "input": 0.3,
+        "notes": "Peak rates; off-peak is half ($0.15 / $0.003 / $0.60) outside weekdays 01:00-04:00 and 06:00-10:00 UTC. Concurrency limit 2500.",
+        "output": 1.2,
+        "unit": "per_1m_tokens"
+      },
+      "provider": "deepseek",
+      "reasoning_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "recommended_use": [
+        "declared Light fallback for scoped implementation and mechanical work when the subscription lane is exhausted",
+        "tests, lint, typecheck and build loops, straightforward repair, log collection"
+      ],
+      "role": "LIGHTWEIGHT",
+      "sources": [
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "official_models_and_pricing",
+          "url": "https://api-docs.deepseek.com/quick_start/pricing/"
+        },
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "official_thinking_mode_docs",
+          "url": "https://api-docs.deepseek.com/guides/thinking_mode"
+        },
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "hermes_provider_docs",
+          "url": "https://hermes-agent.nousresearch.com/docs/integrations/providers"
+        }
+      ],
+      "status": "active",
+      "tool_use": true
+    },
+    {
+      "agentic_summary": "OpenAI- and Anthropic-compatible API with function calling, structured output and streaming; deep thinking is enabled by default and switched via thinking.type with no effort ladder. Hermes ships a native 'xiaomi' provider profile and explicit MiMo reasoning-echo handling in core, so the known thinking plus tool-call replay hazard is covered by the client; the key is configured in every profile and a live routed child run on 2026-09-22 confirmed the route (exit 0, unchanged config, verified session metadata on a mechanical task) after an API-level check showed function calling and reasoning-echo replay both returning 200.",
+      "coding_summary": "Xiaomi MiMo V2.6 flagship (released 2026-09-22): open-weights trillion-parameter MoE that tops the open-weights tier on the Artificial Analysis index (46) with vendor-reported agentic coding above the previous MiMo generation; positioned by Xiaomi below frontier closed models, at roughly 1/20 of their API price.",
+      "confidence": "high",
+      "context_window": 1048576,
+      "key": "xiaomi/mimo-v2.6-pro",
+      "max_output_tokens": 131072,
+      "model_id": "mimo-v2.6-pro",
+      "pricing": {
+        "cached_input": 0.0036,
+        "currency": "USD",
+        "input": 0.435,
+        "notes": "Overseas pay-as-you-go rates (domestic CNY list 3.00 / 0.025 / 6.00); Batch API 50% ($0.2175 / $0.435); UltraSpeed from the same checkpoint about 10x ($4.35 / $8.70); web search is billed per call and not included.",
+        "output": 0.87,
+        "unit": "per_1m_tokens"
+      },
+      "provider": "xiaomi",
+      "reasoning_efforts": [
+        "enabled",
+        "disabled"
+      ],
+      "recommended_use": [
+        "declared Heavy fallback for complex work when the subscription lane is exhausted",
+        "long-horizon agentic coding and independent review at a fraction of frontier API cost"
+      ],
+      "role": "HEAVYWEIGHT",
+      "sources": [
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "official_release_notes",
+          "url": "https://mimo.mi.com/docs/en-US/news/latest/v2-6"
+        },
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "official_pricing",
+          "url": "https://platform.xiaomimimo.com/docs/en-US/pricing"
+        },
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "official_models_and_rate_limits",
+          "url": "https://platform.xiaomimimo.com/docs/en-US/quick-start/summary/model"
+        },
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "official_deep_thinking_docs",
+          "url": "https://platform.xiaomimimo.com/docs/en-US/quick-start/usage-guide/text-generation/deep-thinking"
+        },
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "official_hermes_agent_integration",
+          "url": "https://platform.xiaomimimo.com/docs/en-US/integration/hermes-agent"
+        },
+        {
+          "checked_at": "2026-09-22T13:19:37Z",
+          "kind": "independent_benchmark_analysis",
+          "url": "https://artificialanalysis.ai/models/mimo-v2-6-pro"
+        }
+      ],
+      "status": "active",
+      "tool_use": true
+    }
+  ],
+  "operator_route_source": "desktop-model-switcher",
+  "operator_routes": {
+    "HEAVYWEIGHT": {
+      "model_id": "gpt-6-astra-900k",
+      "provider": "openai-codex",
+      "reasoning_effort": "medium"
+    },
+    "LIGHTWEIGHT": {
+      "model_id": "gpt-6-luna-900k",
+      "provider": "openai-codex",
+      "reasoning_effort": "max"
+    }
+  },
+  "recently_deprecated": [
+    "openai-api/gpt-5.6-sol",
+    "openai-api/gpt-5.6-terra"
+  ],
+  "schema_version": 1,
+  "set_selection_rule": "Select the candidate set whose family matches the lane currently in use, then keep fallback_routes mirroring that set. Switching sets is a compare-and-swap cache edit, never a per-call config mutation.",
+  "subscription_routes": {
+    "GENERAL": "openai-codex/gpt-5.6-sol",
+    "HEAVYWEIGHT": "openai-codex/gpt-6-astra",
+    "LIGHTWEIGHT": "openai-codex/gpt-5.6-luna"
+  }
+}
