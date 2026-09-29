@@ -37,33 +37,41 @@ const styles = {
     padding: 'clamp(1rem, 3vw, 2.25rem)',
     display: 'flex',
     flexDirection: 'column',
-    gap: '1.6rem',
+    gap: '1rem',
     color: 'var(--ui-text-primary)'
   },
   header: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' },
   title: { margin: 0, fontSize: '1.5rem', lineHeight: 1.2, fontWeight: 650, letterSpacing: '-0.025em' },
   subtitle: { margin: '0.55rem 0 0', color: 'var(--ui-text-secondary)', lineHeight: 1.55, maxWidth: '48rem' },
-  section: { display: 'flex', flexDirection: 'column', gap: '1rem', borderTop: '1px solid var(--ui-stroke-tertiary)', paddingTop: '1.2rem' },
+  section: { display: 'flex', flexDirection: 'column', gap: '0.9rem', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: '0.9rem', padding: '1rem' },
   sectionHeading: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' },
   heading: { margin: 0, fontSize: '1rem', fontWeight: 620 },
   hint: { margin: 0, color: 'var(--ui-text-tertiary)', fontSize: '0.82rem', lineHeight: 1.5 },
   fields: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 15rem), 1fr))', gap: '0.8rem 1rem' },
   field: { minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.4rem', color: 'var(--ui-text-secondary)', fontSize: '0.82rem' },
   fieldName: { color: 'var(--ui-text-secondary)', fontWeight: 560 },
-  roleGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 19rem), 1fr))', columnGap: '1.5rem' },
-  roleCard: { minWidth: 0, paddingBlock: '1rem', borderBottom: '1px solid var(--ui-stroke-tertiary)', display: 'flex', flexDirection: 'column', gap: '0.85rem' },
+  roleGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 24rem), 1fr))', gap: '0.8rem' },
+  roleCard: { minWidth: 0, boxSizing: 'border-box', padding: '1rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' },
   roleTitle: { margin: 0, fontSize: '0.95rem', fontWeight: 620 },
   choiceGroup: { display: 'flex', flexDirection: 'column', gap: '0.7rem' },
   choiceRow: { display: 'flex', gap: '0.65rem', alignItems: 'flex-start', color: 'var(--ui-text-primary)' },
   choiceCopy: { display: 'flex', flexDirection: 'column', gap: '0.15rem', minWidth: 0 },
   profileList: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 13rem), 1fr))', gap: '0.45rem 1rem' },
   profileChoice: { minWidth: 0, display: 'flex', alignItems: 'center', gap: '0.6rem', paddingBlock: '0.3rem' },
-  notice: { padding: '0.8rem 0', color: 'var(--ui-text-secondary)', lineHeight: 1.55 },
+  presetGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 19rem), 1fr))', gap: '0.7rem' },
+  presetCard: { boxSizing: 'border-box', width: '100%', minWidth: 0, padding: '0.9rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.75rem', background: 'transparent', color: 'var(--ui-text-primary)', font: 'inherit', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '0.55rem' },
+  presetSelected: { border: '2px solid var(--ui-accent)', padding: 'calc(0.9rem - 1px)' },
+  presetRoleList: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.25rem 0.7rem' },
+  presetRole: { color: 'var(--ui-text-secondary)', fontSize: '0.75rem', lineHeight: 1.45, overflowWrap: 'anywhere' },
+  selectionToolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.6rem', flexWrap: 'wrap' },
+  cardSection: { border: '1px solid var(--ui-stroke-tertiary)', borderRadius: '0.9rem', padding: '1rem' },
+  notice: { padding: '0.75rem 0', color: 'var(--ui-text-secondary)', lineHeight: 1.55 },
   warning: { borderInlineStart: '2px solid var(--ui-accent)', paddingInlineStart: '0.8rem', color: 'var(--ui-text-secondary)', lineHeight: 1.55 },
   message: { padding: '0.75rem 0', color: 'var(--ui-text-secondary)', lineHeight: 1.5 },
   changes: { display: 'flex', flexDirection: 'column', gap: '0.6rem' },
-  change: { display: 'grid', gridTemplateColumns: 'minmax(8rem, 0.8fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '0.8rem', paddingBlock: '0.7rem', borderBottom: '1px solid var(--ui-stroke-tertiary)', alignItems: 'start' },
-  changeLabel: { minWidth: 0, fontWeight: 600, overflowWrap: 'anywhere' },
+  change: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.55rem 0.8rem', padding: '0.75rem 0', borderBottom: '1px solid var(--ui-stroke-tertiary)', alignItems: 'start' },
+  changeLabel: { minWidth: 0, gridColumn: '1 / -1', fontWeight: 600, overflowWrap: 'anywhere' },
+  changeValue: { minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.25rem' },
   value: { minWidth: 0, fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: '0.78rem', color: 'var(--ui-text-secondary)', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
   actions: { display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap', paddingTop: '0.4rem' },
   statusLine: { display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' },
@@ -73,13 +81,97 @@ const styles = {
 
 // Pure helpers are kept separate so the routing payload and stale-scope policy
 // can be exercised without loading the Desktop renderer SDK in Node tests.
+function freezeDeep(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) freezeDeep(child)
+    Object.freeze(value)
+  }
+  return value
+}
+
+export const MODEL_PRESETS = freezeDeep([
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    description: 'OpenAI 계열 모델 조합',
+    models: {
+      main: { provider: 'openai-codex', model: 'gpt-6-astra-900k', reasoning: 'medium' },
+      delegation: { provider: 'openai-codex', model: 'gpt-6-luna-900k', reasoning: 'max' },
+      compression: { provider: 'openai-codex', model: 'gpt-6-luna-900k', reasoning: 'medium' },
+      title: { provider: 'openai-codex', model: 'gpt-6-luna', reasoning: 'none' }
+    }
+  },
+  {
+    id: 'non-openai',
+    name: 'Non-OpenAI',
+    description: '비-OpenAI 모델 조합',
+    models: {
+      main: { provider: 'xiaomi', model: 'mimo-v2.6-pro', reasoning: 'max' },
+      delegation: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'max' },
+      compression: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'medium' },
+      title: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'none' }
+    }
+  }
+])
+
+export function deepClone(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+function sameValue(left, right) {
+  if (left === right) return true
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key, index) => key === rightKeys[index] && sameValue(left[key], right[key]))
+}
+
+export function selectedModelPreset(models) {
+  return MODEL_PRESETS.find(preset => sameValue(models, preset.models))?.id || 'custom'
+}
+
+export function applyModelPresetDraft(draft, presetId) {
+  const preset = MODEL_PRESETS.find(item => item.id === presetId)
+  if (!preset || !draft || typeof draft !== 'object' || !draft.routing) return null
+  return { ...deepClone(draft), models: deepClone(preset.models) }
+}
+
+function uniqueProfileNames(names) {
+  return [...new Set(Array.isArray(names) ? names.filter(name => typeof name === 'string' && name.length > 0) : [])]
+}
+
+export function selectAllModelTargets(profileNames) {
+  return uniqueProfileNames(profileNames)
+}
+
+export function selectNoModelTargets() {
+  return []
+}
+
+export function reconcileModelTargets(selected, profileNames) {
+  const available = uniqueProfileNames(profileNames)
+  if (!Array.isArray(selected)) return available
+  const valid = new Set(available)
+  return [...new Set(selected.filter(name => valid.has(name)))]
+}
+
+export function allModelTargetsSelected(selected, profileNames) {
+  const available = uniqueProfileNames(profileNames)
+  return available.length > 0 && available.every(name => Array.isArray(selected) && selected.includes(name))
+}
+
+export function invalidatePlanState(generation) {
+  return { generation: generation + 1, preview: null, previewPending: false, reviewed: false }
+}
+
 export function scopeFingerprint(connectionId, profile, gateway) {
   return JSON.stringify([connectionId || 'local', profile || 'default', gateway || 'idle'])
 }
 
 export function copyProfileDraft(profile) {
   if (!profile || typeof profile !== 'object' || !profile.models || !profile.routing) return null
-  return JSON.parse(JSON.stringify({ models: profile.models, routing: profile.routing }))
+  return deepClone({ models: profile.models, routing: profile.routing })
 }
 
 export function toggleName(names, name, checked) {
@@ -93,9 +185,9 @@ export function buildPreviewBody(revision, profile, draft, modelTargets, routing
   return {
     expected_revision: revision,
     profile,
-    models: JSON.parse(JSON.stringify(draft.models)),
-    model_targets: [...modelTargets],
-    routing: { ...JSON.parse(JSON.stringify(draft.routing)), enabled: routingProfiles.includes(profile) },
+    models: deepClone(draft.models),
+    model_targets: Array.isArray(modelTargets) ? [...modelTargets] : [],
+    routing: { ...deepClone(draft.routing), enabled: routingProfiles.includes(profile) },
     routing_profiles: [...routingProfiles]
   }
 }
@@ -254,7 +346,7 @@ function RouterPage({ ctx: pluginContext }) {
   const [readyScope, setReadyScope] = useState(scopeKey)
   const [selectedProfile, setSelectedProfile] = useState(null)
   const [draft, setDraft] = useState(null)
-  const [modelTargets, setModelTargets] = useState([])
+  const [modelTargets, setModelTargets] = useState(null)
   const [routingProfiles, setRoutingProfiles] = useState([])
   const [preview, setPreview] = useState(null)
   const [previewPending, setPreviewPending] = useState(false)
@@ -284,7 +376,7 @@ function RouterPage({ ctx: pluginContext }) {
     setReviewed(false)
     setSelectedProfile(null)
     setDraft(null)
-    setModelTargets([])
+    setModelTargets(null)
     setRoutingProfiles([])
     setPageError('')
     if (applyPendingRef.current) {
@@ -305,15 +397,16 @@ function RouterPage({ ctx: pluginContext }) {
     if (!row) return
     setSelectedProfile(row.name)
     setDraft(copyProfileDraft(row))
-    setModelTargets([])
+    setModelTargets(current => reconcileModelTargets(current, profiles.map(item => item.name)))
     setRoutingProfiles(profiles.filter(item => item.routing?.enabled === true).map(item => item.name))
   }, [readyScope, scopeKey, statusQuery.data, selectedProfile, profiles])
 
   const invalidatePlan = () => {
-    generationRef.current += 1
-    setPreview(null)
-    setPreviewPending(false)
-    setReviewed(false)
+    const invalidated = invalidatePlanState(generationRef.current)
+    generationRef.current = invalidated.generation
+    setPreview(invalidated.preview)
+    setPreviewPending(invalidated.previewPending)
+    setReviewed(invalidated.reviewed)
     setPageError('')
   }
   const updateDraft = updater => {
@@ -321,9 +414,14 @@ function RouterPage({ ctx: pluginContext }) {
     setDraft(current => current ? updater(current) : current)
   }
   const currentRow = profiles.find(item => item.name === selectedProfile) || null
-  const disabled = applyPending || needsReload || statusQuery.isFetching
+  const profileNames = profiles.map(item => item.name)
+  const selectedTargets = reconcileModelTargets(modelTargets, profileNames)
+  const allTargetsSelected = allModelTargetsSelected(selectedTargets, profileNames)
+  const targetSummary = allTargetsSelected ? `전체 ${profileNames.length}개 프로필` : `${selectedTargets.length}/${profileNames.length}개 프로필`
+  const disabled = applyPending || needsReload || statusQuery.isFetching || !selectedProfile || !draft
   const validPreview = previewMatchesScope(preview, scopeKey, generationRef.current, selectedProfile)
   const activeRoutes = draft?.routing || {}
+  const routingSummary = `무거운 작업: ${activeRoutes.heavy?.follow === 'custom' ? '별도 모델' : '기본 모델'} · 가벼운 작업: ${activeRoutes.light?.follow === 'custom' ? '별도 모델' : '위임 모델'} · 대체: ${activeRoutes.fallback?.enabled === true ? '사용' : '미사용'}`
 
   const selectProfile = name => {
     const row = profiles.find(item => item.name === name)
@@ -331,12 +429,24 @@ function RouterPage({ ctx: pluginContext }) {
     invalidatePlan()
     setSelectedProfile(name)
     setDraft(copyProfileDraft(row))
-    setModelTargets([])
+    setModelTargets(current => reconcileModelTargets(current, profileNames))
   }
+
+  const applyPreset = presetId => updateDraft(current => applyModelPresetDraft(current, presetId))
 
   const toggleModelTarget = (name, checked) => {
     invalidatePlan()
     setModelTargets(current => toggleName(current, name, checked))
+  }
+
+  const selectAllTargets = () => {
+    invalidatePlan()
+    setModelTargets(selectAllModelTargets(profileNames))
+  }
+
+  const selectNoTargets = () => {
+    invalidatePlan()
+    setModelTargets(selectNoModelTargets())
   }
 
   const toggleRoutingProfile = (name, checked) => {
@@ -389,7 +499,7 @@ function RouterPage({ ctx: pluginContext }) {
     setPageError('')
     setPreviewPending(true)
     try {
-      const body = buildPreviewBody(statusQuery.data.revision, capturedProfile, draft, modelTargets, routingProfiles)
+      const body = buildPreviewBody(statusQuery.data.revision, capturedProfile, draft, selectedTargets, routingProfiles)
       const result = await ctx.rest('/preview', { method: 'POST', body })
       if (generationRef.current !== token || scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope) return
       if (!result || typeof result.plan_id !== 'string' || !Array.isArray(result.changes)) {
@@ -404,7 +514,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const handleApply = async () => {
-    if (!validPreview || !reviewed || applyPendingRef.current || applyPending || needsReload || !preview?.plan_id) return
+    if (!previewMatchesScope(preview, scopeKey, generationRef.current, selectedProfile) || !reviewed || applyPendingRef.current || disabled || !preview?.plan_id) return
     const token = generationRef.current
     const capturedScope = scopeKey
     applyPendingRef.current = true
@@ -446,12 +556,14 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const reloadStatus = async () => {
+    if (applyPendingRef.current) return
+    invalidatePlan()
     const capturedScope = scopeKey
     const token = generationRef.current
     setPageError('')
     const response = await statusQuery.refetch()
     if (generationRef.current !== token || scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope) return
-    if (!response.data) {
+    if (response.error || !response.data) {
       setPageError(response.error?.message || '상태를 다시 불러오지 못했습니다.')
       return
     }
@@ -460,7 +572,7 @@ function RouterPage({ ctx: pluginContext }) {
     generationRef.current += 1
     setPreview(null)
     setReviewed(false)
-    setModelTargets([])
+    setModelTargets(current => reconcileModelTargets(current, rows.map(item => item.name)))
     setRoutingProfiles(rows.filter(item => item.routing?.enabled === true).map(item => item.name))
     if (row) {
       setSelectedProfile(row.name)
@@ -482,24 +594,66 @@ function RouterPage({ ctx: pluginContext }) {
     return jsxs('main', { style: styles.page, children: [jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '설정 서비스를 사용할 수 없습니다.' }), jsx('p', { style: styles.hint, children: '백엔드가 꺼져 있거나 아직 준비되지 않았습니다. 잠시 후 다시 불러오세요. 이 화면에서는 로컬 파일이나 프로필 설정을 직접 변경하지 않습니다.' }), jsx('p', { style: styles.hint, children: statusQuery.error?.message || '상태 요청에 실패했습니다.' }), jsx(Button, { size: 'sm', variant: 'secondary', onClick: () => void statusQuery.refetch(), children: '다시 불러오기' })] })] })
   }
 
-  const modelFields = draft ? jsx('div', {
-    style: styles.roleGrid,
-    children: ROLES.map(role => jsxs('article', {
-      style: styles.roleCard,
-      children: [
-        jsxs('div', { children: [jsx('h3', { style: styles.roleTitle, children: role.label }), jsx('p', { style: { ...styles.hint, marginTop: '0.25rem' }, children: role.description })] }),
-        jsx(RoleRouteFields, { prefix: `model-${role.id}`, route: draft.models?.[role.id], disabled, onChange: (field, value) => updateRole(role.id, field, value) }),
-        jsx('p', { style: styles.actual, children: `실제 설정: ${readableValue(currentRow?.actual_models?.[role.id])}` })
-      ]
-    }, role.id))
+  const currentPreset = draft ? selectedModelPreset(draft.models) : 'custom'
+  const modelPresetCards = draft ? jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: '0.7rem' },
+    children: [
+      jsx('p', { style: styles.hint, children: '프리셋은 네 모델 역할만 편집 가능한 초안에 채웁니다. 라우팅, 대체 모델 허용 여부, 프로필 구성, 모델 적용 대상은 변경하지 않습니다.' }),
+      jsx('div', {
+        style: styles.presetGrid,
+        children: MODEL_PRESETS.map(preset => jsxs('button', {
+          id: `preset-${preset.id}`,
+          type: 'button',
+          'aria-pressed': currentPreset === preset.id,
+          disabled,
+          onClick: () => applyPreset(preset.id),
+          style: currentPreset === preset.id ? { ...styles.presetCard, ...styles.presetSelected } : styles.presetCard,
+          children: [
+            jsxs('div', { style: styles.statusLine, children: [jsx('strong', { children: preset.name }), jsx(Badge, { variant: currentPreset === preset.id ? 'muted' : 'muted', children: currentPreset === preset.id ? '현재 일치' : '초안에 채우기' })] }),
+            jsx('span', { style: styles.hint, children: preset.description }),
+            jsx('div', { style: styles.presetRoleList, children: ROLES.map(role => {
+              const route = preset.models[role.id]
+              return jsx('span', { style: styles.presetRole, children: `${role.label}: ${route.provider}/${route.model} · ${route.reasoning}` }, role.id)
+            }) })
+          ]
+        }, preset.id))
+      }),
+      jsx('p', { role: 'status', 'aria-live': 'polite', style: styles.hint, children: currentPreset === 'custom' ? '현재 모델 역할은 사용자 지정 조합입니다.' : `현재 네 역할이 ${MODEL_PRESETS.find(item => item.id === currentPreset)?.name} 프리셋과 일치합니다.` })
+    ]
+  }) : null
+
+  const modelFields = draft ? jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' },
+    children: [
+      modelPresetCards,
+      jsx('div', {
+        style: styles.roleGrid,
+        children: ROLES.map(role => jsxs('article', {
+          style: styles.roleCard,
+          children: [
+            jsxs('div', { children: [jsx('h3', { style: styles.roleTitle, children: role.label }), jsx('p', { style: { ...styles.hint, marginTop: '0.25rem' }, children: role.description })] }),
+            jsx(RoleRouteFields, { prefix: `model-${role.id}`, route: draft.models?.[role.id], disabled, onChange: (field, value) => updateRole(role.id, field, value) }),
+            jsx('p', { style: styles.actual, children: `실제 설정: ${readableValue(currentRow?.actual_models?.[role.id])}` })
+          ]
+        }, role.id))
+      })
+    ]
   }) : jsx('p', { role: 'alert', style: styles.warning, children: '선택한 프로필의 모델 또는 라우팅 정보가 없습니다. 프로필을 다시 불러와 상태를 확인하세요.' })
 
   const modelTargetGroup = jsx('fieldset', {
     style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '모델 설정 적용 대상' }),
-      jsx('p', { style: styles.hint, children: '아래 프로필에만 기본·위임·압축·제목 모델을 기록합니다. 아무것도 선택하지 않으면 모델 값은 변경하지 않습니다.' }),
-      jsx('div', { style: styles.profileList, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${row.name}`, label: row.name, checked: modelTargets.includes(row.name), disabled, onChange: checked => toggleModelTarget(row.name, checked) }) }, row.name)) })
+      jsx('p', { style: styles.hint, children: '아래 프로필에만 기본·위임·압축·제목 모델 초안을 기록합니다. 선택한 프로필 목록은 라우팅 활성 목록과 별개입니다. 아무것도 선택하지 않으면 모델 값은 변경하지 않습니다.' }),
+      jsxs('div', { style: styles.selectionToolbar, children: [
+        jsxs('div', { style: styles.statusLine, children: [jsx(Badge, { variant: allTargetsSelected ? 'warn' : 'muted', children: targetSummary }), jsx('span', { style: styles.hint, children: `${selectedTargets.length}개 선택` })] }),
+        jsxs('div', { style: styles.actions, children: [
+          jsx(Button, { id: 'model-target-all', size: 'sm', variant: 'secondary', disabled, onClick: selectAllTargets, children: '모두 선택' }),
+          jsx(Button, { id: 'model-target-none', size: 'sm', variant: 'secondary', disabled, onClick: selectNoTargets, children: '모두 해제' })
+        ] })
+      ] }),
+      allTargetsSelected ? jsx('p', { role: 'note', style: styles.warning, children: `모든 ${profileNames.length}개 프로필이 모델 적용 대상입니다. 넓은 범위이므로 미리보기에서 프로필별 변경을 확인한 뒤 적용하세요.` }) : null,
+      jsx('div', { style: styles.profileList, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${row.name}`, label: row.name, checked: selectedTargets.includes(row.name), disabled, onChange: checked => toggleModelTarget(row.name, checked) }) }, row.name)) })
     ]
   })
 
@@ -535,18 +689,29 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
       profiles.length ? section('대상 프로필', '편집할 설정 프로필을 고릅니다. 현재 Desktop 연결·프로필 범위가 바뀌면 대기 중인 미리보기는 폐기됩니다.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `현재 Desktop 프로필: ${activeProfile || '확인 중'} · 연결: ${connectionId || 'local'} · 게이트웨이: ${gateway || 'idle'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
       profiles.length ? section('모델 대상', '네 역할의 값을 한 번 편집하고, 아래 별도 선택 목록에 체크한 프로필에만 모델 값을 적용합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [modelFields, modelTargetGroup] })) : null,
-      profiles.length ? section('작업 라우팅', '무거운 작업과 가벼운 작업은 각각 독립적으로 대상을 정합니다. 팔로우 설정은 현재 선택한 프로필의 모델을 따릅니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' }, children: [routingFields, routingProfileGroup] })) : null,
+      profiles.length ? section('작업 라우팅', '무거운 작업과 가벼운 작업은 각각 독립적으로 대상을 정합니다. 라우팅 활성 프로필 선택은 모델 설정 적용 대상과 별개입니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
+        jsx('p', { style: styles.hint, children: routingSummary }),
+        jsxs('details', { style: styles.cardSection, children: [
+          jsxs('summary', { style: { cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem', flexWrap: 'wrap' }, children: [jsx('strong', { children: '라우팅 세부 설정' }), jsx(Badge, { variant: 'muted', children: `활성 프로필 ${routingProfiles.length}개` })] }),
+          jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '0.9rem' }, children: [routingFields, routingProfileGroup] })
+        ] })
+      ] })) : null,
       pageError ? jsx('div', { role: 'alert', style: styles.warning, children: pageError }) : null,
       applyOutcome ? jsxs('div', { role: 'status', 'aria-live': 'polite', style: applyOutcome.kind === 'success' ? styles.message : styles.warning, children: [jsx('strong', { children: applyOutcome.kind === 'success' ? '적용 요청이 완료되었습니다.' : applyOutcome.kind === 'partial' ? '일부 설정만 적용되었을 수 있습니다.' : '적용 결과를 확인할 수 없습니다.' }), jsx('p', { style: styles.hint, children: applyOutcome.message || (applyOutcome.kind === 'success' ? '실제 상태를 새로고침해 확인하세요. 같은 계획을 다시 적용하지 않습니다.' : '다시 적용하지 마세요. 상태를 새로고침해 실제 반영 여부를 확인하세요.') }), applyOutcome.result ? jsx('p', { style: styles.value, children: readableValue(applyOutcome.result) }) : null] }) : null,
       needsReload ? jsx('div', { style: styles.actions, children: jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching, onClick: () => void reloadStatus(), children: statusQuery.isFetching ? '상태 확인 중…' : '실제 상태 확인 후 편집 재개' }) }) : null,
       profiles.length && !needsReload ? section('미리보기 및 적용', '변경 전후 값을 확인한 다음 별도 확인을 거쳐 적용합니다. 미리보기는 설정을 변경하지 않습니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
-        jsx('p', { style: styles.hint, children: `설정 revision: ${statusQuery.data?.revision ?? '확인할 수 없음'} · 모델 적용 대상 ${modelTargets.length}개 · 라우팅 활성 대상 ${routingProfiles.length}개` }),
+        jsx('p', { style: styles.hint, children: `설정 revision: ${statusQuery.data?.revision ?? '확인할 수 없음'} · 모델 대상 ${targetSummary} · 라우팅 활성 ${routingProfiles.length}개` }),
         jsx(Button, { size: 'sm', variant: 'secondary', disabled: !canPreview, onClick: () => void handlePreview(), children: previewPending ? '미리보기 계산 중…' : '변경 내용 미리보기' }),
         validPreview ? jsxs('div', { style: styles.section, children: [
           jsxs('div', { style: styles.statusLine, children: [jsx(Badge, { variant: 'muted', children: `${previewChanges.length}개 변경` }), preview.expires_at ? jsx('span', { style: styles.hint, children: `만료: ${preview.expires_at}` }) : null] }),
-          previewChanges.length ? jsxs('div', { style: styles.changes, children: [jsx('div', { style: { ...styles.change, color: 'var(--ui-text-tertiary)', fontSize: '0.75rem', fontWeight: 600 }, children: [jsx('span', { children: '프로필 · 항목' }), jsx('span', { children: '변경 전' }), jsx('span', { children: '변경 후' })] }), previewChanges.map((change, index) => jsxs('div', { style: styles.change, children: [jsx('span', { style: styles.changeLabel, children: `${change.profile || '—'} · ${change.field || '항목'}` }), jsx('code', { style: styles.value, children: readableValue(change.before) }), jsx('code', { style: styles.value, children: readableValue(change.after) })] }, `${change.profile || ''}:${change.field || index}`))] }) : jsx('p', { style: styles.message, children: '변경 사항이 없습니다. 적용할 내용이 없습니다.' }),
+          allTargetsSelected && previewChanges.length ? jsx('div', { role: 'alert', style: styles.warning, children: `광범위한 변경: 모든 ${profileNames.length}개 프로필이 모델 적용 대상입니다. 각 프로필의 변경 전후를 확인하고, 아래 확인란을 선택해야 적용할 수 있습니다.` }) : null,
+          previewChanges.length ? jsxs('div', { role: 'list', style: styles.changes, children: previewChanges.map((change, index) => jsxs('div', { role: 'listitem', style: styles.change, children: [
+            jsx('div', { style: styles.changeLabel, children: `${change.profile || '—'} · ${change.field || '항목'}` }),
+            jsxs('div', { style: styles.changeValue, children: [jsx('span', { style: styles.hint, children: '변경 전' }), jsx('code', { style: styles.value, children: readableValue(change.before) })] }),
+            jsxs('div', { style: styles.changeValue, children: [jsx('span', { style: styles.hint, children: '변경 후' }), jsx('code', { style: styles.value, children: readableValue(change.after) })] })
+          ] }, `${change.profile || ''}:${change.field || index}`)) }) : jsx('p', { style: styles.message, children: '변경 사항이 없습니다. 적용할 내용이 없습니다.' }),
           Array.isArray(preview.warnings) && preview.warnings.length ? jsx('div', { style: styles.warning, children: preview.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: readableValue(warning) }, index)) }) : null,
-          previewChanges.length ? jsxs('div', { style: styles.actions, children: [jsx(CheckRow, { id: 'confirm-preview', label: '변경 전후 내용을 확인했습니다.', checked: reviewed, disabled: applyPending || needsReload, onChange: setReviewed }), jsx(Button, { size: 'sm', disabled: !reviewed || applyPending || !validPreview || needsReload, onClick: () => void handleApply(), children: applyPending ? '적용 중…' : '확인 후 적용' })] }) : null
+          previewChanges.length ? jsxs('div', { style: styles.actions, children: [jsx(CheckRow, { id: 'confirm-preview', label: allTargetsSelected ? '모든 프로필 대상 변경 전후를 확인했습니다.' : '변경 전후 내용을 확인했습니다.', checked: reviewed, disabled: applyPending || needsReload, onChange: setReviewed }), jsx(Button, { size: 'sm', disabled: !reviewed || applyPending || !validPreview || needsReload, onClick: () => void handleApply(), children: applyPending ? '적용 중…' : '확인 후 적용' })] }) : null
         ] }) : null
       ] })) : null
     ]

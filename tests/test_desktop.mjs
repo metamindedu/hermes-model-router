@@ -9,7 +9,7 @@ const helperStart = source.indexOf('// Pure helpers are kept separate')
 const helperEnd = source.indexOf('\nfunction Field(', helperStart)
 assert.ok(helperStart >= 0 && helperEnd > helperStart, 'pure helper block should remain identifiable')
 const helperSource = source.slice(helperStart, helperEnd).replace(/^export\s+/gm, '')
-const helpers = new Function(`${helperSource}\nreturn { scopeFingerprint, copyProfileDraft, toggleName, buildPreviewBody, previewMatchesScope, isPartialReceipt, readableValue }`)()
+const helpers = new Function(`${helperSource}\nreturn { MODEL_PRESETS, deepClone, selectedModelPreset, applyModelPresetDraft, selectAllModelTargets, selectNoModelTargets, reconcileModelTargets, allModelTargetsSelected, invalidatePlanState, scopeFingerprint, copyProfileDraft, toggleName, buildPreviewBody, previewMatchesScope, isPartialReceipt, readableValue }`)()
 
 const sampleProfile = {
   name: 'claire',
@@ -30,6 +30,95 @@ const sampleProfile = {
     }
   }
 }
+
+const expectedPresetModels = {
+  openai: {
+    main: { provider: 'openai-codex', model: 'gpt-6-astra-900k', reasoning: 'medium' },
+    delegation: { provider: 'openai-codex', model: 'gpt-6-luna-900k', reasoning: 'max' },
+    compression: { provider: 'openai-codex', model: 'gpt-6-luna-900k', reasoning: 'medium' },
+    title: { provider: 'openai-codex', model: 'gpt-6-luna', reasoning: 'none' }
+  },
+  'non-openai': {
+    main: { provider: 'xiaomi', model: 'mimo-v2.6-pro', reasoning: 'max' },
+    delegation: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'max' },
+    compression: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'medium' },
+    title: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'none' }
+  }
+}
+
+test('editable model presets exactly match the requested four model-role templates', () => {
+  assert.deepEqual(Object.fromEntries(helpers.MODEL_PRESETS.map(preset => [preset.id, preset.models])), expectedPresetModels)
+  assert.deepEqual(helpers.MODEL_PRESETS.map(preset => preset.id), ['openai', 'non-openai'])
+  assert.ok(Object.isFrozen(helpers.MODEL_PRESETS))
+  for (const preset of helpers.MODEL_PRESETS) {
+    assert.ok(Object.isFrozen(preset.models))
+    for (const role of ['main', 'delegation', 'compression', 'title']) assert.ok(Object.isFrozen(preset.models[role]))
+    assert.equal(helpers.selectedModelPreset(helpers.deepClone(preset.models)), preset.id)
+  }
+  const edited = helpers.deepClone(expectedPresetModels.openai)
+  edited.title.reasoning = 'low'
+  assert.equal(helpers.selectedModelPreset(edited), 'custom')
+  edited.title.reasoning = 'none'
+  edited.main.extra = true
+  assert.equal(helpers.selectedModelPreset(edited), 'custom')
+})
+
+test('applying a preset replaces only cloned model roles and never mutates shared templates', () => {
+  const draft = helpers.copyProfileDraft(sampleProfile)
+  const originalModels = helpers.deepClone(draft.models)
+  const originalRouting = helpers.deepClone(draft.routing)
+  const next = helpers.applyModelPresetDraft(draft, 'non-openai')
+  assert.deepEqual(next.models, expectedPresetModels['non-openai'])
+  assert.deepEqual(next.routing, originalRouting)
+  assert.notStrictEqual(next.models, draft.models)
+  assert.notStrictEqual(next.routing, draft.routing)
+  assert.deepEqual(draft.models, originalModels)
+  next.models.main.model = 'edited-after-apply'
+  next.routing.fallback.heavy.model = 'edited-route'
+  assert.deepEqual(helpers.MODEL_PRESETS[1].models, expectedPresetModels['non-openai'])
+  assert.equal(draft.routing.fallback.heavy.model, 'claude-opus')
+  assert.equal(helpers.applyModelPresetDraft(draft, 'unknown'), null)
+})
+
+test('model targets default to all only when uninitialized and preserve intentional empty selection', () => {
+  const profileNames = ['default', 'claire', 'research', 'claire']
+  assert.deepEqual(helpers.reconcileModelTargets(null, profileNames), ['default', 'claire', 'research'])
+  assert.deepEqual(helpers.selectAllModelTargets(profileNames), ['default', 'claire', 'research'])
+  assert.deepEqual(helpers.selectNoModelTargets(), [])
+  assert.deepEqual(helpers.reconcileModelTargets([], profileNames), [])
+  assert.deepEqual(helpers.reconcileModelTargets(['research', 'removed', 'default', 'research'], ['default', 'research', 'new']), ['research', 'default'])
+  assert.equal(helpers.allModelTargetsSelected(['research', 'default', 'claire'], profileNames), true)
+  assert.equal(helpers.allModelTargetsSelected([], profileNames), false)
+})
+
+test('bulk model targets remain separate from routing scope in both all and none preview payloads', () => {
+  const draft = helpers.copyProfileDraft(sampleProfile)
+  const available = ['default', 'claire', 'research']
+  const routingProfiles = ['default']
+  const allPayload = helpers.buildPreviewBody(8, 'claire', draft, helpers.selectAllModelTargets(available), routingProfiles)
+  const nonePayload = helpers.buildPreviewBody(8, 'claire', draft, helpers.selectNoModelTargets(), routingProfiles)
+  assert.deepEqual(allPayload.model_targets, available)
+  assert.deepEqual(nonePayload.model_targets, [])
+  assert.deepEqual(allPayload.routing_profiles, routingProfiles)
+  assert.deepEqual(nonePayload.routing_profiles, routingProfiles)
+  assert.deepEqual(allPayload.routing, { ...sampleProfile.routing, enabled: false })
+  assert.deepEqual(nonePayload.routing, { ...sampleProfile.routing, enabled: false })
+})
+
+test('bulk target actions invalidate pending previews and their prior confirmation generation', () => {
+  const preview = { scopeKey: 'scope-a', generation: 12, profile: 'claire' }
+  assert.equal(helpers.previewMatchesScope(preview, 'scope-a', 12, 'claire'), true)
+  const invalidated = helpers.invalidatePlanState(12)
+  assert.deepEqual(invalidated, { generation: 13, preview: null, previewPending: false, reviewed: false })
+  assert.equal(helpers.previewMatchesScope(preview, 'scope-a', invalidated.generation, 'claire'), false)
+  for (const action of ['selectAllTargets', 'selectNoTargets']) {
+    const match = source.match(new RegExp(`const ${action} = \\(\\) => \\{([\\s\\S]*?)\\n  \\}`))
+    assert.ok(match, `${action} handler missing`)
+    assert.match(match[1], /invalidatePlan\(\)/)
+    assert.match(match[1], /setModelTargets\(/)
+    assert.doesNotMatch(match[1], /setRoutingProfiles/)
+  }
+})
 
 test('profile draft cloning preserves every model and route field without aliasing source state', () => {
   const draft = helpers.copyProfileDraft(sampleProfile)
