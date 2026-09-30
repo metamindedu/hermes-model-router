@@ -343,7 +343,7 @@ def _pid_alive(pid: Any) -> bool:
 class Router:
     """Start and inspect detached jobs for the active Hermes profile only."""
 
-    def __init__(self, service: Any = None):
+    def __init__(self, service: Any = None, *, runtime: Any = None):
         if service is None:
             try:
                 from .service import Service
@@ -351,6 +351,7 @@ class Router:
                 raise RuntimeError("model-router Service is not available") from exc
             service = Service()
         self.service = service
+        self.runtime = runtime
 
     def start(
         self, purpose: str, prompt: str, cwd: str | Path, timeout: float = 600
@@ -454,6 +455,7 @@ class Router:
             "purpose": purpose,
             "route_class": role,
             "runner_mode": mode,
+            "parent_session_id": self.runtime.parent_session_id if self.runtime is not None else None,
             "verification_kind": verification_kind,
             "cwd": str(working_dir),
             "timeout_seconds": bounded_timeout,
@@ -510,7 +512,21 @@ class Router:
                 "error_type": "HermesLauncherNotFound",
             }
 
-        child_env = os.environ.copy()
+        from tools.environments.local import served_profile_child_env
+        import hermes_bootstrap
+        from pm.environments import site_packages
+        from pm.environments_adopt import running_environment
+        child_env = served_profile_child_env(target_home=home, inherit_credentials=True)
+        # The native helper intentionally strips Hermes-owned Python paths for
+        # arbitrary terminal children. This child uses THIS exact interpreter
+        # and runs Hermes: restore only the already-loaded host code/generation,
+        # never the inherited/project PYTHONPATH or another selected generation.
+        core_root = Path(hermes_bootstrap.__file__).resolve(strict=True).parent
+        runtime_paths = [str(core_root)]
+        environment = running_environment(core_root)
+        if environment is not None:
+            runtime_paths.append(str(site_packages(environment).resolve(strict=True)))
+        child_env["PYTHONPATH"] = os.pathsep.join(runtime_paths)
         child_env["HERMES_HOME"] = str(home)
         child_env["HERMES_PROFILE"] = profile
         command = [
@@ -580,10 +596,24 @@ class Router:
                     "route_class": role,
                     "error_type": type(exc).__name__,
                 }
+        tracking = {}
+        if self.runtime is not None:
+            try:
+                tracking["process_id"] = self.runtime.track(
+                    process, job_id=job_id, purpose=purpose, cwd=str(working_dir)
+                )
+            except Exception as exc:
+                # Already running: never retry the spawn or report a job failure
+                # just because native observation could not be established.
+                tracking["tracking_error"] = type(exc).__name__
+                from .runtime_tracking import DesktopSeedUnavailable
+                if isinstance(exc, DesktopSeedUnavailable):
+                    tracking["process_id"] = exc.process_id
+                    tracking["ui_seeded"] = False
         try:
             _write_json(
                 launch_path,
-                {"worker_pid": process.pid, "launched_at": _utc_now()},
+                {"worker_pid": process.pid, "launched_at": _utc_now(), **tracking},
             )
         except OSError:
             # The worker records its own PID in state.json as soon as it starts;
@@ -598,6 +628,7 @@ class Router:
             "route_class": role,
             "requested_model": selected["model"],
             "requested_provider": selected["provider"],
+            **tracking,
         }
 
     def status(self, job_id: str) -> dict[str, Any]:

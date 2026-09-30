@@ -49,6 +49,12 @@ FALLBACK_REASONS = {
     "disabled",
     "exhaustion",
 }
+_CHILD_CHAT_ROUTING_ENV = (
+    "HERMES_UI_SESSION_ID", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_TYPE",
+    "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_SESSION_USER_ID",
+    "HERMES_SESSION_USER_ID_ALT", "HERMES_SESSION_USER_NAME", "HERMES_SESSION_SCOPE_ID",
+    "HERMES_SESSION_KEY", "HERMES_SESSION_MESSAGE_ID", "HERMES_SESSION_PARENT_CHAT_ID",
+)
 
 
 def _validate_operator_routes(routes: Any) -> None:
@@ -515,6 +521,22 @@ def _scoped_job_context(
     return resolved_job, snapshot
 
 
+def _observed_route_matches(route: Any, provider: str, model: str) -> bool:
+    """Keep the selected route exact; resolve only the installed Codex picker alias on the wire."""
+    if not isinstance(route, dict) or route.get("provider") != provider or route.get("model") != model:
+        return False
+    wire_models = {model}
+    if provider == "openai-codex" and route.get("api_mode") == "codex_responses":
+        try:
+            from agent.model_metadata import is_codex_context_variant, strip_codex_context_variant_suffix
+            if is_codex_context_variant(model):
+                wire_models.add(strip_codex_context_variant_suffix(model))
+        except ImportError:
+            pass  # Unavailable canonical metadata must fail closed, never guess a suffix.
+    return all(route.get(key) is None or route.get(key) in wire_models
+               for key in ("request_model", "response_model"))
+
+
 def _validate_adapter_result(
     value: Any,
     *,
@@ -572,12 +594,7 @@ def _validate_adapter_result(
                    for name in ("request_model", "response_model"))
         ):
             raise ValueError("scoped adapter route evidence is malformed")
-        matching_routes = matching_routes and (
-            route["provider"] == expected["provider"]
-            and route["model"] == expected["model"]
-            and route.get("request_model") in (None, expected["model"])
-            and route.get("response_model") in (None, expected["model"])
-        )
+        matching_routes = matching_routes and _observed_route_matches(route, expected["provider"], expected["model"])
     value = dict(value)
     value["_routes_match"] = matching_routes and value["evidence_complete"] is True
     value["_terminal_consistent"] = (
@@ -810,6 +827,19 @@ def _invoke_scoped_adapter(
     request["budget_seconds"] = request_budget
     _atomic_write_json(request_path, request)
     env = dict(os.environ)
+    for key in (
+        "HERMES_SESSION_ID", "HERMES_SESSION_PLATFORM", "HERMES_SESSION_SOURCE",
+        "HERMES_SESSION_SOURCE_EXPLICIT", "HERMES_PLATFORM", *_CHILD_CHAT_ROUTING_ENV,
+    ):
+        env.pop(key, None)
+    env["HERMES_HOME"] = request["home"]
+    env["HERMES_PROFILE"] = request["profile"]
+    env["HERMES_PROFILE_NAME"] = request["profile"]
+    env["HERMES_SESSION_PROFILE"] = request["profile"]
+    env["HERMES_PLATFORM"] = "subagent"
+    env["HERMES_SESSION_PLATFORM"] = "subagent"
+    env["HERMES_SESSION_SOURCE"] = "subagent"
+    env["HERMES_SESSION_SOURCE_EXPLICIT"] = "1"
     env["MODEL_ROUTER_ATTEMPT_REQUEST"] = str(request_path)
     env["HERMES_SINGLE_QUERY_SESSION"] = "1"
     command = [
@@ -866,6 +896,7 @@ def _scoped_attempt(
     toolsets: list[str],
     attempt_deadline: float,
     parent_session_id: str | None,
+    fallback_attempt: bool,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool, int | None, bool | None]:
     attempt_id = str(uuid.uuid4())
     attempt_dir = job_dir / "attempts" / attempt_id
@@ -885,7 +916,7 @@ def _scoped_attempt(
         "profile": profile,
         "home": str(home),
         "cwd": str(cwd),
-        "source": "model-router-coding-route",
+        "source": "subagent",
         "task_id": str(uuid.uuid4()),
         "session_id": str(uuid.uuid4()),
         "parent_session_id": parent_session_id,
@@ -897,10 +928,10 @@ def _scoped_attempt(
             mode,
             str(cwd),
             note=(
-                "Start a fresh routed task attempt. Do not resume or import another session."
-                if parent_session_id is None
-                else "This is a fresh one-time fallback task after a structured subscription exhaustion. "
-                     "Do not import or continue the prior conversation; use only this task prompt."
+                "This is a fresh one-time fallback task after a structured subscription exhaustion. "
+                "Do not import or continue the prior conversation; use only this task prompt."
+                if fallback_attempt
+                else "Start a fresh routed task attempt. Do not resume or import another session."
             ),
         ),
     }
@@ -1077,10 +1108,12 @@ def run_scoped_attempts(args: argparse.Namespace) -> int:
     primary_deadline = deadline - reserve
     if primary_deadline <= time.monotonic():
         raise ValueError("common execution deadline is insufficient for a primary attempt")
+    primary_parent_session_id = snapshot.get("parent_session_id")
     primary_result, primary_request, primary_timed_out, primary_process_code, primary_cleanup_verified = _scoped_attempt(
         job_dir=job_dir, home=home, job_id=job_dir.name, profile=args.profile,
         cwd=cwd, route=primary_route, route_class=args.route_class, mode=args.mode,
-        task=task, toolsets=toolsets, attempt_deadline=primary_deadline, parent_session_id=None,
+        task=task, toolsets=toolsets, attempt_deadline=primary_deadline,
+        parent_session_id=primary_parent_session_id, fallback_attempt=False,
     )
     if primary_request is None:
         raise RuntimeError("primary scoped attempt did not produce a request record")
@@ -1163,7 +1196,7 @@ def run_scoped_attempts(args: argparse.Namespace) -> int:
                 job_dir=job_dir, home=home, job_id=job_dir.name, profile=args.profile,
                 cwd=cwd, route=fallback_route, route_class=args.route_class, mode=args.mode,
                 task=task, toolsets=toolsets, attempt_deadline=deadline,
-                parent_session_id=primary_request["session_id"],
+                parent_session_id=primary_request["session_id"], fallback_attempt=True,
             )
             if fallback_request is None:
                 raise RuntimeError("fallback scoped attempt did not produce a request record")

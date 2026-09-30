@@ -99,6 +99,8 @@ def register(ctx):
                     allowed = {"action", "purpose", "prompt", "cwd", "timeout"}
                     if set(args) - allowed:
                         raise ValueError("unsupported start fields")
+                    from .model_router.runtime_tracking import capture_runtime
+                    router.runtime = capture_runtime(task_id=kwargs.get("task_id") or "", expected_profile=service.active_profile())
                     return router.start(args.get("purpose"), args.get("prompt"), args.get("cwd"), args.get("timeout", 600))
                 raise ValueError("action must be config, start, or status")
             return json.dumps(scoped(run), ensure_ascii=False)

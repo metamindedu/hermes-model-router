@@ -85,6 +85,9 @@ def plugin(monkeypatch):
     observer_module = ModuleType(package.__name__ + '.attempt_observer')
     observer_module.record_event = lambda event_name, **payload: state.setdefault('events', []).append((event_name, payload))
     monkeypatch.setitem(sys.modules, observer_module.__name__, observer_module)
+    runtime_module = ModuleType(package.__name__ + '.runtime_tracking')
+    runtime_module.capture_runtime = lambda **kwargs: state.setdefault('runtime_calls', []).append(kwargs) or SimpleNamespace(parent_session_id='parent-session')
+    monkeypatch.setitem(sys.modules, runtime_module.__name__, runtime_module)
     tools, skills = [], []
     ctx = SimpleNamespace(register_cli_command=lambda *args: state.update(cli=args), register_tool=lambda **kwargs: tools.append(kwargs), register_skill=lambda *args: skills.append(args), register_hook=lambda event, callback: state.setdefault('hooks', {}).update({event: callback}))
     return mod, ctx, state, tools, skills
@@ -105,6 +108,7 @@ def test_active_profile_registers_scoped_tool_and_skill(plugin):
     result = json.loads(tools[0]["handler"]({"action": "start", "purpose": "independent-review", "prompt": "bounded", "cwd": "C:/fake"}))
     assert result["status"] == "running"
     assert state["started"] == 1
+    assert state['runtime_calls'] == [{'task_id': '', 'expected_profile': 'claire'}]
     assert state["bound"][-1] == "token"
 
 

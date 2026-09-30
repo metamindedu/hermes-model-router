@@ -51,7 +51,13 @@ def _short_home() -> Path:
     return base
 
 
-def _fixture(tmp_path: Path, *, approved: bool = True, role: str = "HEAVYWEIGHT") -> dict[str, Any]:
+def _fixture(
+    tmp_path: Path,
+    *,
+    approved: bool = True,
+    role: str = "HEAVYWEIGHT",
+    parent_session_id: str | None = None,
+) -> dict[str, Any]:
     base = _short_home()
     home = base / "profiles" / "claire"
     job_id = str(uuid.uuid4())
@@ -75,6 +81,7 @@ def _fixture(tmp_path: Path, *, approved: bool = True, role: str = "HEAVYWEIGHT"
         "purpose": "plan" if role == "HEAVYWEIGHT" else "implementation",
         "route_class": role,
         "cwd": str(cwd.resolve()),
+        "parent_session_id": parent_session_id,
         "model_provider_evidence": {
             "purpose_role": role,
             "requested": role_evidence,
@@ -223,6 +230,25 @@ def _install_fake_adapter(
         requests.append(request)
         assert Path(kwargs["env"]["MODEL_ROUTER_ATTEMPT_REQUEST"]) == request_path
         assert kwargs["env"]["HERMES_SINGLE_QUERY_SESSION"] == "1"
+        assert kwargs["env"]["HERMES_SESSION_SOURCE"] == "subagent"
+        assert kwargs["env"]["HERMES_SESSION_SOURCE_EXPLICIT"] == "1"
+        assert kwargs["env"]["HERMES_SESSION_PLATFORM"] == "subagent"
+        assert kwargs["env"]["HERMES_PLATFORM"] == "subagent"
+        for key in (
+            "HERMES_UI_SESSION_ID",
+            "HERMES_SESSION_CHAT_ID",
+            "HERMES_SESSION_CHAT_TYPE",
+            "HERMES_SESSION_CHAT_NAME",
+            "HERMES_SESSION_THREAD_ID",
+            "HERMES_SESSION_USER_ID",
+            "HERMES_SESSION_USER_NAME",
+            "HERMES_SESSION_SCOPE_ID",
+            "HERMES_SESSION_KEY",
+            "HERMES_SESSION_MESSAGE_ID",
+            "HERMES_SESSION_PARENT_CHAT_ID",
+        ):
+            assert key not in kwargs["env"]
+        assert request["source"] == "subagent"
         assert request_path.parent == result_path.parent
         assert request_path.parent.parent.name == "attempts"
         assert request_path.parent.name == request["attempt_id"]
@@ -250,7 +276,8 @@ def _exhaustion(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_approved_exhaustion_runs_one_fresh_same_role_sdk_attempt(tmp_path, monkeypatch):
-    fixture = _fixture(tmp_path)
+    primary_parent_id = "20260930_113515_240566"
+    fixture = _fixture(tmp_path, parent_session_id=primary_parent_id)
     monkeypatch.setenv("HERMES_HOME", str(fixture["home"]))
     commands, requests = _install_fake_adapter(
         monkeypatch,
@@ -279,10 +306,33 @@ def test_approved_exhaustion_runs_one_fresh_same_role_sdk_attempt(tmp_path, monk
     assert requests[0]["attempt_id"] != requests[1]["attempt_id"]
     assert requests[0]["session_id"] != requests[1]["session_id"]
     assert requests[0]["task_id"] != requests[1]["task_id"]
+    assert requests[0]["source"] == requests[1]["source"] == "subagent"
+    assert requests[0]["parent_session_id"] == primary_parent_id
     assert requests[1]["parent_session_id"] == requests[0]["session_id"]
+    assert "Start a fresh routed task attempt." in requests[0]["prompt"]
+    assert "one-time fallback task" not in requests[0]["prompt"]
+    assert "one-time fallback task" in requests[1]["prompt"]
+    assert "Start a fresh routed task attempt." not in requests[1]["prompt"]
     assert all(request["toolsets"] for request in requests)
     assert "private_config_value" not in json.dumps(artifact)
     assert not list((fixture["job_dir"] / "attempts").rglob("config.yaml"))
+
+
+def test_historical_snapshot_without_parent_session_id_keeps_standalone_primary(tmp_path, monkeypatch):
+    fixture = _fixture(tmp_path)
+    snapshot_path = fixture["job_dir"] / "snapshot.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot.pop("parent_session_id")
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(fixture["home"]))
+    _commands, requests = _install_fake_adapter(
+        monkeypatch,
+        [lambda request: _result(request, completed=True, final_response="standalone answer")],
+    )
+
+    assert runner.run_scoped_attempts(_args(fixture)) == 0
+    assert len(requests) == 1
+    assert requests[0]["parent_session_id"] is None
 
 
 def test_only_structured_exhaustion_not_answer_text_triggers_fallback(tmp_path, monkeypatch):

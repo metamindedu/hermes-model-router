@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -54,7 +55,7 @@ def attempt() -> Any:
         "profile": "claire",
         "home": str(home.resolve()),
         "cwd": str(cwd.resolve()),
-        "source": "model-router",
+        "source": "subagent",
         "task_id": str(uuid.uuid4()),
         "session_id": str(uuid.uuid4()),
         "parent_session_id": None,
@@ -270,6 +271,65 @@ def test_request_path_escape_and_foreign_job_are_rejected(attempt, tmp_path):
     result = scoped_agent.run_attempt(traversal_request, dependencies={"redact": lambda text: text})
     assert result["completed"] is False
     assert result["error"]["kind"] == "initialization_error"
+
+
+def test_native_parent_session_token_is_accepted_but_unsafe_parent_is_rejected(attempt):
+    native_parent_id = "20260930_113515_240566"
+    native_request = dict(attempt["request"], parent_session_id=native_parent_id)
+    attempt["request_path"].write_text(json.dumps(native_request), encoding="utf-8")
+
+    normalized, _request_path, _result_path = scoped_agent._validate_request(
+        native_request, attempt["request_path"]
+    )
+    assert normalized["parent_session_id"] == native_parent_id
+
+    for unsafe_parent_id in ("../outside", "parent\nsource", "x" * 129):
+        unsafe_request = dict(native_request, parent_session_id=unsafe_parent_id)
+        with pytest.raises(scoped_agent.AttemptError, match="parent_session_id"):
+            scoped_agent._validate_request(unsafe_request, attempt["request_path"])
+
+
+def test_child_agent_uses_subagent_identity_and_drops_desktop_chat_routing(attempt, monkeypatch):
+    inherited_routing = {
+        "HERMES_UI_SESSION_ID": "desktop-ui-session",
+        "HERMES_SESSION_PLATFORM": "desktop",
+        "HERMES_SESSION_CHAT_ID": "desktop-chat",
+        "HERMES_SESSION_CHAT_TYPE": "group",
+        "HERMES_SESSION_CHAT_NAME": "desktop-room",
+        "HERMES_SESSION_THREAD_ID": "desktop-thread",
+        "HERMES_SESSION_USER_ID": "desktop-user",
+        "HERMES_SESSION_USER_NAME": "desktop-user-name",
+        "HERMES_SESSION_SCOPE_ID": "desktop-scope",
+        "HERMES_SESSION_KEY": "desktop-key",
+        "HERMES_SESSION_MESSAGE_ID": "desktop-message",
+        "HERMES_SESSION_PARENT_CHAT_ID": "desktop-parent-chat",
+    }
+    for key, value in inherited_routing.items():
+        monkeypatch.setenv(key, value)
+    observed_env: dict[str, str | None] = {}
+
+    def on_run(agent: Any, _prompt: str, _task_id: str) -> dict[str, Any]:
+        _emit_api_events(attempt)
+        observed_env.update({key: os.environ.get(key) for key in inherited_routing})
+        observed_env["HERMES_SESSION_SOURCE"] = os.environ.get("HERMES_SESSION_SOURCE")
+        observed_env["HERMES_SESSION_SOURCE_EXPLICIT"] = os.environ.get("HERMES_SESSION_SOURCE_EXPLICIT")
+        observed_env["HERMES_PLATFORM"] = os.environ.get("HERMES_PLATFORM")
+        observed_env["HERMES_SESSION_ID"] = os.environ.get("HERMES_SESSION_ID")
+        return {"completed": True, "failed": False, "partial": False, "final_response": "safe answer"}
+
+    dependencies, stats = _fake_dependencies(attempt, on_run=on_run)
+    result = scoped_agent.run_attempt(attempt["request"], dependencies=dependencies)
+
+    assert result["completed"] is True
+    kwargs = stats["constructor_kwargs"][0]
+    assert kwargs["platform"] == "subagent"
+    assert attempt["request"]["source"] == "subagent"
+    assert observed_env["HERMES_SESSION_SOURCE"] == "subagent"
+    assert observed_env["HERMES_SESSION_SOURCE_EXPLICIT"] == "1"
+    assert observed_env["HERMES_PLATFORM"] == "subagent"
+    assert observed_env["HERMES_SESSION_ID"] == attempt["request"]["session_id"]
+    assert observed_env["HERMES_SESSION_PLATFORM"] == "subagent"
+    assert all(observed_env[key] is None for key in inherited_routing if key != "HERMES_SESSION_PLATFORM")
 
 
 def test_main_rejects_result_artifact_outside_the_attempt_directory(attempt, monkeypatch):

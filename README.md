@@ -61,6 +61,12 @@ UI, 설정 서비스, 라우팅 작업 실행기, 동봉 스킬을 한 패키지
 
 초기 프로필 범위는 `docs/profile-audit.json`의 실제 스킬 탐색 결과를 보존합니다. 새 프로필은 라우팅 OFF가 기본입니다. Desktop UI는 앱 수준에서 공유되지만 런타임 도구와 작업 파일은 호출 프로필에 귀속됩니다.
 
+## 작업 표시와 자식 세션
+
+코딩 라우팅 작업은 채팅 하단의 기존 **Background** 표시로 추적합니다. 실제 실행 프로세스를 연결하며 네이티브 서브에이전트 lifecycle을 위조하지 않습니다. 새 라우팅 자식은 `subagent`로 분류되어 일반 세션 목록에 노출되지 않습니다. 결과와 실제 모델 증거는 기존 작업 상태 조회로 확인합니다.
+
+기존에 잘못 분류된 자식은 `scripts/repair_routed_session_sources.py --home <정확한 프로필 home>`으로 먼저 dry-run합니다. 작업 증거가 확인된 세션의 source만 백업·조건부 교정하며 대화는 삭제하지 않습니다. 상세 운영 경계는 `docs/wiki/routed-session-visibility.md`를 참고하세요.
+
 ## 개발 및 검증
 
 ```bash

@@ -29,6 +29,7 @@ MAX_RESPONSE_CHARS = 48_000
 MAX_ERROR_CHARS = 600
 MAX_BUDGET_SECONDS = 900.0
 PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
+PARENT_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 PROVIDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 REASONING = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
@@ -109,6 +110,8 @@ def _validate_request(request: Any, request_path: Path | None = None) -> tuple[d
         raise AttemptError("initialization_error", "home or cwd is not a safe directory")
 
     source = _clean_text(request.get("source"), "source", maximum=64)
+    if source != "subagent":
+        raise AttemptError("initialization_error", "source must be subagent")
     task_id = _clean_text(request.get("task_id"), "task_id", maximum=128)
     session_id = _clean_text(request.get("session_id"), "session_id", maximum=128)
     if not _canonical_uuid(task_id) or not _canonical_uuid(session_id):
@@ -116,8 +119,8 @@ def _validate_request(request: Any, request_path: Path | None = None) -> tuple[d
     parent_session_id = request.get("parent_session_id")
     if parent_session_id is not None:
         parent_session_id = _clean_text(parent_session_id, "parent_session_id", maximum=128)
-        if not _canonical_uuid(parent_session_id):
-            raise AttemptError("initialization_error", "parent_session_id must be a canonical UUID")
+        if PARENT_SESSION_ID_RE.fullmatch(parent_session_id) is None:
+            raise AttemptError("initialization_error", "invalid parent_session_id")
     route = request.get("route")
     if not isinstance(route, dict) or set(route) != {"provider", "model", "reasoning"}:
         raise AttemptError("initialization_error", "route fields do not match schema 1")
@@ -181,13 +184,34 @@ def _validate_request(request: Any, request_path: Path | None = None) -> tuple[d
     return normalized, request_path, expected_result
 
 
+_INHERITED_CHAT_ROUTING_ENV = (
+    "HERMES_UI_SESSION_ID", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_TYPE",
+    "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_SESSION_USER_ID",
+    "HERMES_SESSION_USER_ID_ALT", "HERMES_SESSION_USER_NAME", "HERMES_SESSION_SCOPE_ID",
+    "HERMES_SESSION_KEY", "HERMES_SESSION_MESSAGE_ID", "HERMES_SESSION_PARENT_CHAT_ID",
+)
+
+
+def _bind_subagent_session_environment(request: dict[str, Any]) -> None:
+    """Make the routed AIAgent a distinct child, never a continuation of Desktop routing."""
+    for key in _INHERITED_CHAT_ROUTING_ENV:
+        os.environ.pop(key, None)
+    os.environ["HERMES_PLATFORM"] = "subagent"
+    os.environ["HERMES_SESSION_PLATFORM"] = "subagent"
+    os.environ["HERMES_SESSION_SOURCE"] = "subagent"
+    os.environ["HERMES_SESSION_SOURCE_EXPLICIT"] = "1"
+    os.environ["HERMES_SESSION_ID"] = request["session_id"]
+
+
 @contextlib.contextmanager
 def _attempt_environment(request: dict[str, Any], request_path: Path):
     """Bind one headless automation session without inheriting a permissive CLI bypass."""
     keys = (
         "HERMES_HOME", "HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_SESSION_PROFILE",
         "HERMES_SESSION_SOURCE", "HERMES_SESSION_SOURCE_EXPLICIT", "HERMES_SINGLE_QUERY_SESSION",
-        "HERMES_SESSION_ID", "MODEL_ROUTER_ATTEMPT_REQUEST", "HERMES_YOLO_MODE", "HERMES_INTERACTIVE",
+        "HERMES_SESSION_ID", "HERMES_PLATFORM", "HERMES_SESSION_PLATFORM",
+        *_INHERITED_CHAT_ROUTING_ENV,
+        "MODEL_ROUTER_ATTEMPT_REQUEST", "HERMES_YOLO_MODE", "HERMES_INTERACTIVE",
     )
     saved = {key: os.environ.get(key) for key in keys}
     old_cwd = Path.cwd()
@@ -196,11 +220,9 @@ def _attempt_environment(request: dict[str, Any], request_path: Path):
         os.environ["HERMES_PROFILE"] = request["profile"]
         os.environ["HERMES_PROFILE_NAME"] = request["profile"]
         os.environ["HERMES_SESSION_PROFILE"] = request["profile"]
-        os.environ["HERMES_SESSION_SOURCE"] = request["source"]
-        os.environ["HERMES_SESSION_SOURCE_EXPLICIT"] = "1"
         os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
-        os.environ["HERMES_SESSION_ID"] = request["session_id"]
         os.environ["MODEL_ROUTER_ATTEMPT_REQUEST"] = str(request_path)
+        _bind_subagent_session_environment(request)
         # Never inherit an interactive-session bypass or make a human prompt appear available.
         os.environ.pop("HERMES_YOLO_MODE", None)
         os.environ.pop("HERMES_INTERACTIVE", None)
@@ -473,6 +495,7 @@ def _default_prepare_runtime(request: dict[str, Any]) -> dict[str, Any]:
     # A profile dotenv or a parent launcher must not turn this headless child into YOLO mode.
     os.environ.pop("HERMES_YOLO_MODE", None)
     os.environ.pop("HERMES_INTERACTIVE", None)
+    _bind_subagent_session_environment(request)
 
     config_path = Path(request["home"]) / "config.yaml"
     effective_config, config, config_snapshot = _strict_profile_config(config_path)
@@ -606,6 +629,22 @@ def _tool_calls_seen(value: Any) -> bool:
     return False
 
 
+def _observed_route_matches(route: Any, provider: str, model: str) -> bool:
+    """Keep the selected route exact; resolve only the installed Codex picker alias on the wire."""
+    if not isinstance(route, dict) or route.get("provider") != provider or route.get("model") != model:
+        return False
+    wire_models = {model}
+    if provider == "openai-codex" and route.get("api_mode") == "codex_responses":
+        try:
+            from agent.model_metadata import is_codex_context_variant, strip_codex_context_variant_suffix
+            if is_codex_context_variant(model):
+                wire_models.add(strip_codex_context_variant_suffix(model))
+        except ImportError:
+            pass  # Unavailable canonical metadata must fail closed, never guess a suffix.
+    return all(route.get(key) is None or route.get(key) in wire_models
+               for key in ("request_model", "response_model"))
+
+
 def _result_error_kind(result: dict[str, Any], observer_snapshot: dict[str, Any], expected_provider: str, expected_model: str) -> tuple[str | None, str | None]:
     if result.get("interrupted") is True:
         return "interrupted", "attempt was interrupted"
@@ -617,13 +656,7 @@ def _result_error_kind(result: dict[str, Any], observer_snapshot: dict[str, Any]
     if not isinstance(observed, list) or not observed:
         return "evidence_missing", "no main-loop API route was observed"
     for route in observed:
-        if (
-            not isinstance(route, dict)
-            or route.get("provider") != expected_provider
-            or route.get("model") != expected_model
-            or (route.get("request_model") is not None and route.get("request_model") != expected_model)
-            or (route.get("response_model") is not None and route.get("response_model") != expected_model)
-        ):
+        if not _observed_route_matches(route, expected_provider, expected_model):
             return "route_mismatch", "observed main-loop route differs from the requested route"
     if observer_snapshot.get("exhaustion_confirmed") is True:
         return "subscription_exhaustion", "Hermes classified a terminal billing/quota response"
@@ -700,7 +733,7 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
                 "session_id": request["session_id"],
                 "parent_session_id": request["parent_session_id"],
                 "session_db": session_db,
-                "platform": "cli",
+                "platform": "subagent",
                 "cwd": request["cwd"],
                 "run_budget_seconds": request["budget_seconds"],
                 "quiet_mode": True,

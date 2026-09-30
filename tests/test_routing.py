@@ -76,6 +76,9 @@ def _fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _make_router(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str = "claire"):
+    # Native helper import performs version discovery; do it before patching the
+    # shared subprocess.Popen module so the fake runner cannot intercept Git.
+    from tools.environments.local import served_profile_child_env  # noqa: F401
     root = tmp_path / "hermes"
     root.mkdir()
     service = FakeService(root, profile)
