@@ -4,3 +4,18 @@ __pycache__/
 .private/
 artifacts/
 *.pyc
+
+# Local credentials, profile state and execution evidence never belong here.
+.env
+.env.*
+!.env.example
+auth.json
+state.db
+state.db-*
+config.yaml
+sessions/
+logs/
+backups/
+plugin-data/
+*.sqlite
+*.sqlite3

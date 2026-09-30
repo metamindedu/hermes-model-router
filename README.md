@@ -2,6 +2,16 @@
 
 Hermes Desktop의 **모델 및 라우팅** 페이지에서 프로필별 모델과 코딩 작업의 Heavy/Light 경로를 관리하는 네이티브 플러그인입니다. 설정 관리와 라우팅 사용 여부는 별개입니다.
 
+## 다른 PC에 설치
+
+개인 비공개 저장소 `metamindedu/hermes-model-router`에서 설치합니다. 새 PC에서 GitHub 접근 권한과 Hermes 모델 인증을 준비한 뒤 다음 명령을 실행합니다.
+
+```text
+hermes --profile default plugins install metamindedu/hermes-model-router
+```
+
+설치/의존성 동의와 Desktop UI 활성화를 확인하세요. 코딩 라우팅은 별도로 선택·적용하며, 개인 프로필 설정이나 대화 자료는 복사하지 않습니다. 프로필별 설치, 버전 고정, 확인·업데이트 절차는 [INSTALL.md](INSTALL.md)를 참고하세요.
+
 ## 사용
 
 1. 사이드바 **모델 및 라우팅**을 엽니다.
