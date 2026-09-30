@@ -1,6 +1,6 @@
 # 다른 PC에서 설치하기
 
-이 저장소는 Hermes 본체의 포크가 아니라, 독립적인 **Model Router 플러그인**입니다. NousResearch의 공식 Hermes를 설치한 다음 이 패키지를 추가합니다. 기존 PC의 인증 정보, 프로필 설정, 대화 DB, 작업 기록은 포함하지 않습니다.
+이 저장소는 NousResearch의 공식 Hermes에 추가해 사용하는 독립적인 **Model Router 플러그인**입니다. 기존 PC의 인증 정보, 프로필 설정, 대화 DB, 작업 기록은 포함하지 않습니다.
 
 ## 1. 준비
 
@@ -26,6 +26,20 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 설치 도중 출처 신뢰 확인, 플러그인 활성화, Python 의존성 준비를 묻는 경우 내용을 확인한 뒤 동의합니다. Python 의존성은 `PyYAML`이며 Hermes의 의존성 관리 경로를 사용합니다. `--enable`을 붙여도 의존성 동의 절차까지 생략하는 것은 아닙니다. 동의를 거부하거나 비대화형으로 실행하면 설치만 되고 비활성 상태로 남을 수 있습니다.
 
 프로필별로 Python 플러그인이 설치됩니다. 예를 들어 **이미 존재하는** `coding` 프로필에서도 사용하려면 별도로 설치합니다.
+
+### 보안 스캔의 CAUTION 확인
+
+이 플러그인은 코딩 작업을 실제 자식 프로세스로 실행하므로 Hermes의 정적 보안 검사에서 `subprocess` 실행, 운영 보조 스크립트, 테스트용 경로 등에 **CAUTION** 경고가 나올 수 있습니다. 이는 검사 생략 권고가 아닙니다. 경고와 소스/커밋을 검토하고 신뢰하는 경우에만 대화형 설치의 확인 질문에 동의합니다. 비대화형 실행은 이 확인을 받을 수 없어 설치가 차단될 수 있습니다.
+
+새 설치의 비대화형 확인이 꼭 필요할 때만, 검토한 **정확한 전체 SHA**와 소유한 저장소를 함께 지정하여 Hermes가 제공하는 명시적 확인 옵션을 사용합니다.
+
+```text
+hermes --profile default plugins install metamindedu/hermes-model-router --ref <검토한-40자리-전체-커밋-SHA> --force --no-enable
+```
+
+`--force`는 신뢰 확인을 명시할 뿐 아니라 **기존 설치도 교체**할 수 있으므로, 기존 설치 유무·진행 중 작업·설정 백업을 먼저 확인합니다. 이 명령은 Python 플러그인을 비활성 상태로 설치합니다. 이후 `hermes --profile default plugins enable model-router`를 실행하고 의존성 준비에 동의하거나 Desktop의 활성화 절차를 사용합니다. `plugins.scan_on_install`을 전역으로 끄지 마세요. `dangerous` 판정은 `--force`로도 허용되는 대상이 아닙니다.
+
+프로필별 추가 설치 예:
 
 ```text
 hermes --profile coding plugins install metamindedu/hermes-model-router
