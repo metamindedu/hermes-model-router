@@ -30,10 +30,27 @@ class RouteRuntime:
     registry: Any
     emit: Callable
 
-    def track(self, process, *, job_id: str, purpose: str, cwd: str) -> str:
+    def track(
+        self,
+        process,
+        *,
+        job_id: str,
+        purpose: str,
+        cwd: str,
+        title: str | None = None,
+        role: str | None = None,
+        model: str = "미지정",
+        provider: str = "미지정",
+        profile: str = "default",
+    ) -> str:
+        from . import task_presentation
+
+        display_title = task_presentation.validate_title(title, purpose)
+        display_role = role or task_presentation.default_role(purpose)
+        command = task_presentation.native_command(display_title, display_role, model, purpose)
         session = self.registry.adopt_local(
             process,
-            command=f"model-router {purpose} ({job_id})",
+            command=command,
             cwd=cwd,
             task_id=self.task_id,
             owner_task_id=self.task_id,
@@ -42,17 +59,32 @@ class RouteRuntime:
             # inject a second completion model turn or forward private job logs.
             notify_on_complete=False,
         )
-        # coding_route is not terminal: core's tool.complete handler does not
-        # seed process.list for it. This native desktop-tool bridge seeds the
-        # existing background rail; thereafter core's normal 5s reconciliation
-        # and stop controls own it. Failure to paint cannot undo a launched job.
+        process_id = str(getattr(session, "id", ""))
+        cwd_basename = os.path.basename(os.path.normpath(cwd)) if isinstance(cwd, str) else "미지정"
+        seed = task_presentation.terminal_seed(
+            title=display_title,
+            purpose=purpose,
+            role=display_role,
+            model=model,
+            provider=provider,
+            profile=profile,
+            job_id=job_id,
+            cwd_basename=cwd_basename,
+        )
+        # Adoption has already transferred ownership of the live process. Seed
+        # exactly once before announcing the native card; failures carry its ID
+        # so the caller reports the adopted process and never tries to relaunch.
         try:
-            seeded = self.emit("status.update", {"kind": "process", "process_id": session.id})
+            append_output = getattr(session, "append_output", None)
+            if not callable(append_output):
+                raise RuntimeError("native process output seeding is unavailable")
+            append_output(seed)
+            seeded = self.emit("status.update", {"kind": "process", "process_id": process_id})
         except Exception:
-            raise DesktopSeedUnavailable(session.id) from None
+            raise DesktopSeedUnavailable(process_id) from None
         if seeded is not True:
-            raise DesktopSeedUnavailable(session.id)
-        return session.id
+            raise DesktopSeedUnavailable(process_id)
+        return process_id
 
 
 def capture_runtime(*, task_id: str = "", expected_profile: str = "", get_env=None, registry=None, emit=None):

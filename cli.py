@@ -20,6 +20,7 @@ def main(argv=None):
     p.add_argument("--prompt-file", required=True)
     p.add_argument("--cwd", required=True)
     p.add_argument("--timeout", type=int, default=600)
+    p.add_argument("--title", help="Public Background task title (1–96 characters; no secrets)")
     p = sub.add_parser("job-status"); p.add_argument("--job-id", required=True)
     args = parser.parse_args(argv)
     try:
@@ -40,7 +41,7 @@ def main(argv=None):
             from model_router.routing import Router
             router = Router(service)
             if args.action == "route":
-                result = router.start(args.purpose, Path(args.prompt_file).read_text(encoding="utf-8"), args.cwd, args.timeout)
+                result = router.start(args.purpose, Path(args.prompt_file).read_text(encoding="utf-8"), args.cwd, args.timeout, title=args.title)
             else:
                 result = router.status(args.job_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))

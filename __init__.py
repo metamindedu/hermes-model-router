@@ -96,12 +96,13 @@ def register(ctx):
                 if action == "status":
                     return router.status(args.get("job_id", ""))
                 if action == "start":
-                    allowed = {"action", "purpose", "prompt", "cwd", "timeout"}
+                    allowed = {"action", "purpose", "prompt", "cwd", "timeout", "title"}
                     if set(args) - allowed:
                         raise ValueError("unsupported start fields")
                     from .model_router.runtime_tracking import capture_runtime
                     router.runtime = capture_runtime(task_id=kwargs.get("task_id") or "", expected_profile=service.active_profile())
-                    return router.start(args.get("purpose"), args.get("prompt"), args.get("cwd"), args.get("timeout", 600))
+                    title_kwargs = {"title": args["title"]} if "title" in args else {}
+                    return router.start(args.get("purpose"), args.get("prompt"), args.get("cwd"), args.get("timeout", 600), **title_kwargs)
                 raise ValueError("action must be config, start, or status")
             return json.dumps(scoped(run), ensure_ascii=False)
         except (ValueError, PermissionError, KeyError) as exc:
@@ -117,6 +118,7 @@ def register(ctx):
             "properties": {
                 "action": {"type": "string", "enum": ["config", "start", "status"]},
                 "purpose": {"type": "string", "enum": ["implementation", "mechanical", "preliminary-review", "plan", "semantic-final", "independent-review"]},
+                "title": {"type": "string", "minLength": 1, "maxLength": 96, "description": "Short human-readable PUBLIC Background task title. Describe the deliverable; never put secrets or private prompt text here."},
                 "prompt": {"type": "string", "description": "Complete bounded handoff; independent review must be read-only."},
                 "cwd": {"type": "string", "description": "Existing task workspace."},
                 "timeout": {"type": "integer", "minimum": 30, "maximum": 900},

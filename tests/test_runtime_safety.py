@@ -113,7 +113,7 @@ def test_ui_seed_state_is_explicit_after_exactly_one_adoption(tmp_path, monkeypa
     class Registry:
         def adopt_local(self, process, **kwargs):
             adopted.append(process)
-            return SimpleNamespace(id='proc_adopted')
+            return SimpleNamespace(id='proc_adopted', append_output=lambda text: None)
     def emit(*args):
         if seed == 'exception':
             raise RuntimeError('SECRET_EXCEPTION_CANARY')

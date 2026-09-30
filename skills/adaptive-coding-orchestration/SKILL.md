@@ -24,7 +24,7 @@ Models are operator-assigned roles, not a claim about benchmark capability. Main
 
 ## Routes
 
-Use coding_route(action="start", purpose=..., prompt=..., cwd=..., timeout=...) with a complete bounded handoff:
+Use coding_route(action="start", title="짧고 구체적인 작업명", purpose=..., prompt=..., cwd=..., timeout=...) with a complete bounded handoff. Always supply a human-readable title describing this specific deliverable (e.g. `게시 안전성 독립 검수`, `결제 오류 원인 조사`). It is PUBLIC display metadata in Background and the terminal, limited to 96 characters; never copy credentials, private prompt text, customer data or full paths into it. Older callers without a title receive a fixed readable purpose label. Titles never authorize execution or prove model identity:
 
 | purpose | execution role |
 |---|---|

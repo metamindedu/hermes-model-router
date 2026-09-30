@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import task_presentation
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = PLUGIN_ROOT / "lib" / "run_routed_agent.py"
 WORKER_PATH = Path(__file__).with_name("job_worker.py")
@@ -354,10 +356,17 @@ class Router:
         self.runtime = runtime
 
     def start(
-        self, purpose: str, prompt: str, cwd: str | Path, timeout: float = 600
+        self,
+        purpose: str,
+        prompt: str,
+        cwd: str | Path,
+        timeout: float = 600,
+        *,
+        title: str | None = None,
     ) -> dict[str, Any]:
         if purpose not in ROUTING_PURPOSES:
             raise RoutingError(f"unsupported routing purpose: {purpose}")
+        display_title = task_presentation.validate_title(title, purpose)
         if not isinstance(prompt, str) or not prompt.strip():
             raise RoutingError("prompt must be a non-empty string")
         bounded_timeout = _bounded_timeout(timeout)
@@ -453,6 +462,7 @@ class Router:
             "profile": profile,
             "settings_revision": revision,
             "purpose": purpose,
+            "title": display_title,
             "route_class": role,
             "runner_mode": mode,
             "parent_session_id": self.runtime.parent_session_id if self.runtime is not None else None,
@@ -491,6 +501,7 @@ class Router:
                 "status": "failed",
                 "profile": profile,
                 "purpose": purpose,
+                "title": display_title,
                 "settings_revision": revision,
                 "route_class": role,
                 "error_type": "HermesLauncherNotFound",
@@ -507,6 +518,7 @@ class Router:
                 "status": "failed",
                 "profile": profile,
                 "purpose": purpose,
+                "title": display_title,
                 "settings_revision": revision,
                 "route_class": role,
                 "error_type": "HermesLauncherNotFound",
@@ -592,6 +604,7 @@ class Router:
                     "status": "failed",
                     "profile": profile,
                     "purpose": purpose,
+                    "title": display_title,
                     "settings_revision": revision,
                     "route_class": role,
                     "error_type": type(exc).__name__,
@@ -600,7 +613,15 @@ class Router:
         if self.runtime is not None:
             try:
                 tracking["process_id"] = self.runtime.track(
-                    process, job_id=job_id, purpose=purpose, cwd=str(working_dir)
+                    process,
+                    job_id=job_id,
+                    purpose=purpose,
+                    cwd=str(working_dir),
+                    title=display_title,
+                    role=role,
+                    model=selected["model"],
+                    provider=selected["provider"],
+                    profile=profile,
                 )
             except Exception as exc:
                 # Already running: never retry the spawn or report a job failure
@@ -624,6 +645,7 @@ class Router:
             "status": "running",
             "profile": profile,
             "purpose": purpose,
+            "title": display_title,
             "settings_revision": revision,
             "route_class": role,
             "requested_model": selected["model"],
@@ -670,10 +692,18 @@ class Router:
         route_evidence = snapshot.get("model_provider_evidence")
         if not isinstance(route_evidence, dict):
             route_evidence = {}
+        snapshot_purpose = snapshot.get("purpose")
+        if not isinstance(snapshot_purpose, str):
+            snapshot_purpose = ""
+        try:
+            display_title = task_presentation.validate_title(snapshot.get("title"), snapshot_purpose)
+        except ValueError:
+            display_title = task_presentation.validate_title(None, snapshot_purpose)
         output: dict[str, Any] = {
             "job_id": job_id,
             "profile": profile,
             "purpose": snapshot.get("purpose"),
+            "title": display_title,
             "settings_revision": snapshot.get("settings_revision"),
             "route_class": snapshot.get("route_class"),
             "model_provider_evidence": route_evidence,

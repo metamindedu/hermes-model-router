@@ -71,7 +71,7 @@ def plugin(monkeypatch):
             return {'plan_id': 'f' * 32, 'changes': [], 'warnings': []}
     class Router:
         def __init__(self, service): self.service = service
-        def start(self, *args): state["started"] += 1; return {"job_id": "a" * 32, "status": "running"}
+        def start(self, *args, **kwargs): state["started"] += 1; state['start_kwargs'] = kwargs; return {"job_id": "a" * 32, "status": "running"}
         def status(self, job_id): return {"status": "failed", "verification_status": "unmet"}
     for name, cls in [("service", Service), ("routing", Router)]:
         child = ModuleType(package.__name__ + "." + name)
@@ -110,6 +110,17 @@ def test_active_profile_registers_scoped_tool_and_skill(plugin):
     assert state["started"] == 1
     assert state['runtime_calls'] == [{'task_id': '', 'expected_profile': 'claire'}]
     assert state["bound"][-1] == "token"
+
+
+def test_public_title_schema_is_forwarded_without_changing_scope(plugin):
+    mod, ctx, state, tools, _ = plugin
+    mod.register(ctx)
+    schema = tools[0]['schema']['parameters']['properties']['title']
+    assert schema['maxLength'] == 96 and schema['minLength'] == 1
+    result = json.loads(tools[0]['handler']({'action': 'start', 'purpose': 'mechanical', 'prompt': 'bounded', 'cwd': 'C:/fake', 'title': '테스트 및 검증'}))
+    assert result['status'] == 'running'
+    assert state['start_kwargs'] == {'title': '테스트 및 검증'}
+    assert state['runtime_calls'] == [{'task_id': '', 'expected_profile': 'claire'}]
 
 
 def test_stale_tool_cannot_bypass_profile_disable(plugin):

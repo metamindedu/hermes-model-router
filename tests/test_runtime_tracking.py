@@ -25,7 +25,17 @@ def test_route_registers_the_actual_worker_and_snapshots_parent(tmp_path, monkey
     assert _load(job / "snapshot.json")["parent_session_id"] == parent
     assert len(adopted) == 1
     assert adopted[0][0].pid == 987654
-    assert adopted[0][1] == {"job_id": result["job_id"], "purpose": "implementation", "cwd": str((tmp_path / "work").resolve())}
+    assert adopted[0][1] == {
+        "job_id": result["job_id"],
+        "purpose": "implementation",
+        "cwd": str((tmp_path / "work").resolve()),
+        "title": "기능 구현",
+        "role": "LIGHTWEIGHT",
+        "model": service.light["model"],
+        "provider": service.light["provider"],
+        "profile": "claire",
+    }
+    assert result["title"] == "기능 구현"
     assert result["process_id"] == "proc_test123"
     assert _load(job / "launch.json")["process_id"] == "proc_test123"
     # The child retains a file-backed log; adopting does not introduce inherited pipes.
@@ -51,11 +61,11 @@ def test_native_adoption_uses_task_local_context_and_no_fake_delegate_events(tmp
     from model_router.runtime_tracking import capture_runtime
     current = ContextVar("route_test_env")
     get_env = lambda name, default="": current.get({}).get(name, default)
-    adoptions, events = [], []
+    adoptions, events, seeds = [], [], []
     class Registry:
         def adopt_local(self, process, **kwargs):
             adoptions.append((process, kwargs))
-            return SimpleNamespace(id="proc_native")
+            return SimpleNamespace(id="proc_native", append_output=seeds.append)
     def launch(parent):
         current.set({"HERMES_SESSION_ID": parent, "HERMES_SESSION_KEY": "key-" + parent, "HERMES_UI_SESSION_ID": "ui-" + parent, "HERMES_SESSION_PROFILE": "claire"})
         runtime = capture_runtime(task_id="task-" + parent, get_env=get_env, registry=Registry(), emit=lambda *a: events.append(a) or True)
@@ -65,7 +75,10 @@ def test_native_adoption_uses_task_local_context_and_no_fake_delegate_events(tmp
     assert {kw["session_key"] for _, kw in adoptions} == {"key-parent-A", "key-parent-B"}
     assert {kw["owner_task_id"] for _, kw in adoptions} == {"task-parent-A", "task-parent-B"}
     assert all(kw["notify_on_complete"] is False for _, kw in adoptions)
-    assert all(kw["command"].startswith("model-router mechanical") for _, kw in adoptions)
+    assert all(kw["command"].startswith("모델 작업: 테스트 및 검증 · Light · 미지정") for _, kw in adoptions)
+    assert all("job-parent-" not in kw["command"] for _, kw in adoptions)
+    assert len(seeds) == 2
+    assert all("작업 ID: job-parent-" in seed and "작업 폴더:" in seed for seed in seeds)
     assert all(event[0] == "status.update" and event[1]["kind"] == "process" for event in events)
 
 
