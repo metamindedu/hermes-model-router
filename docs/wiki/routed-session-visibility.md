@@ -22,10 +22,16 @@
 - 대화·부모·모델·시간·성공/실패 결과는 변경하지 않는다. 적용 후 정확한 대상을 다시 읽고 transcript/다른 필드 보존 여부를 확인한다.
 - 모든 오래된 CLI 세션을 제목만 보고 자식으로 추정하거나 삭제하지 않는다.
 
+## Windows 콘솔 창 억제
+
+- 최상위 작업자를 `DETACHED_PROCESS`로 실행해도 그 아래 콘솔 실행 파일이 창 없이 실행되는 것은 아니다. 실행기·scoped adapter에는 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`을 각각 명시한다. `CREATE_NO_WINDOW`를 `DETACHED_PROCESS`와 함께 지정하면 창 억제 플래그가 무시되므로 최상위 detached 옵션과 구분한다.
+- task-owned timeout 정리의 `taskkill`에도 창 억제 옵션을 명시한다. stdio, close_fds, PID/트리 소유권과 증거 계약은 유지한다. 에이전트가 도구로 별도 실행하는 외부 프로그램 전체의 창 억제는 이 변경의 보장 범위가 아니다.
+- 실제 detached 부모 아래 production adapter launch seam을 실행해 콘솔 연결/가시성을 검사한다. 단순 kwargs mock만으로 창 억제 성공이라고 보고하지 않는다.
+
 ## 사람이 읽을 수 있는 작업 표시
 
 - `coding_route.start`의 짧은 `title`은 공개 표시 메타데이터다. 비밀·개인 프롬프트·고객 자료를 넣지 않는다. 96자 제한과 제어문자 검증은 spawn 전에 수행하며, 제목은 실행 권한·모델 관측·runner identity에 쓰지 않는다.
-- Background의 기본 이름은 `모델 작업: <작업명> · Heavy/Light · <대상 모델>`이다. UUID는 기본 제목에서 빼고 터미널 안내에 남긴다. 제목을 생략한 예전 호출은 고정 한국어 용도 이름을 사용하며 프롬프트를 자동 요약하지 않는다.
+- Background의 기본 이름은 `서브 에이전트 작업: <작업명> · Heavy/Light · <대상 모델>`이다. UUID는 기본 제목에서 빼고 터미널 안내에 남긴다. 제목을 생략한 예전 호출은 고정 한국어 용도 이름을 사용하며 프롬프트를 자동 요약하지 않는다.
 - 파일 기반 private 로그를 터미널에 복사하지 않는다. 실제 채택된 process의 공개 output buffer에 정제된 안내만 한 번 넣는다. 대상 모델과 실제 관측 모델은 별개이며, 프로세스 종료는 의미적 검수 GO가 아니다.
 - 별도 카드 UI는 이번 slice에 포함하지 않는다. UI stored/runtime ID 매핑·프로필 소유권·전환 시 오래된 응답 폐기를 실제 SDK 계약으로 검증하기 전에는 전체 process 목록이나 다른 session ID로 fallback하지 않는다. 네이티브 Background 중지 계약은 그대로 둔다.
 

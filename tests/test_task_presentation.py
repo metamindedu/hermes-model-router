@@ -16,7 +16,7 @@ def test_native_label_and_terminal_summary_are_human_readable(tmp_path):
     runtime.track(SimpleNamespace(pid=42), job_id='12345678-1234-1234-1234-123456789012',
                   purpose='independent-review', cwd=str(tmp_path), title='게시 안전성 독립 검수',
                   role='HEAVYWEIGHT', model='test-heavy', provider='test-provider', profile='claire')
-    assert adopted[0]['command'] == '모델 작업: 게시 안전성 독립 검수 · Heavy · test-heavy'
+    assert adopted[0]['command'] == '서브 에이전트 작업: 게시 안전성 독립 검수 · Heavy · test-heavy'
     assert '12345678' not in adopted[0]['command']
     text = ''.join(output)
     assert '게시 안전성 독립 검수' in text and '독립 검수' in text

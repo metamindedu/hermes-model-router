@@ -654,6 +654,10 @@ def test_worker_invokes_only_fake_runner_subprocess_and_writes_terminal_state(tm
     assert kwargs["stdout"] is subprocess.DEVNULL
     assert kwargs["stderr"] is subprocess.DEVNULL
     assert kwargs["close_fds"] is True
+    if os.name == "nt":
+        assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+        assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+        assert not kwargs["creationflags"] & subprocess.DETACHED_PROCESS
     state = _load(job_dir / "state.json")
     assert state["status"] == "finished"
     assert state["runner_exit_code"] == 0

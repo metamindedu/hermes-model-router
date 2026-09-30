@@ -782,6 +782,7 @@ def _stop_scoped_process_tree(process: subprocess.Popen[Any]) -> bool:
                 stderr=subprocess.DEVNULL,
                 timeout=5,
                 check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             process.wait(timeout=2)
             return killed.returncode == 0 and process.poll() is not None
@@ -860,7 +861,9 @@ def _invoke_scoped_adapter(
         "close_fds": True,
     }
     if os.name == "nt":
-        creation["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creation["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        )
     else:
         creation["start_new_session"] = True
     process = subprocess.Popen(command, **creation)

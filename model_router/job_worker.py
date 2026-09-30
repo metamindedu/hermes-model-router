@@ -176,6 +176,7 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> bool:
                 stderr=subprocess.DEVNULL,
                 timeout=5,
                 check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired):
             return False
@@ -282,7 +283,9 @@ def run_job(
             "close_fds": True,
         }
         if os.name == "nt":
-            creation["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            creation["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            )
         else:
             creation["start_new_session"] = True
         with log_path.open("ab"):

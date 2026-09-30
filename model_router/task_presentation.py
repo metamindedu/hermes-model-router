@@ -111,7 +111,7 @@ def native_command(title: Any, role: Any, model: Any, purpose: str = "") -> str:
     """Build the native process card label without making a UUID its identity."""
     safe_title = safe_display(title if isinstance(title, str) else default_title(purpose), MAX_TITLE_CHARS)
     safe_model = safe_display(model if isinstance(model, str) else "미지정", 128)
-    return f"모델 작업: {safe_title} · {role_label(role, purpose)} · {safe_model}"
+    return f"서브 에이전트 작업: {safe_title} · {role_label(role, purpose)} · {safe_model}"
 
 
 def terminal_seed(

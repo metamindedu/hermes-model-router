@@ -17,6 +17,10 @@
 - 대상 프로필 환경 생성 시 번들 Python의 런타임 import 경로를 복원해야 하는 함정과, 레포에 미반영된 설치 hotfix 보존 원칙을 기록.
 - 기본 dry-run의 정확한 source-only 교정, 백업/CAS/독립 readback과 강제 중지의 artifact 미확정 경계를 기록. 실제 실행 기록은 private 작업 증거로 유지.
 
+## 2026-09-30 | headless-subagent-launch
+- 사용자 요청에 따라 공개 표시 접두어를 `서브 에이전트 작업:`으로 변경하되 네이티브 위임 lifecycle과 분리 유지.
+- detached 작업자의 하위 실행기/adapter가 보이는 콘솔을 만드는 Windows 재현과 각 단계의 창 억제 경계를 기록.
+
 ## 2026-09-30 | readable-background
 - 공개 표시용 작업명·대상 모델과 private 프롬프트/로그의 경계를 기록. 긴 ID는 기본 표시에서 제거하고 정제된 터미널 안내에 유지.
 - 네이티브 process 소유권·중지·완료 계약과 표시 실패 시 재실행 금지 원칙을 유지. 별도 카드형은 stored/runtime ID·프로필 소유권 검증 뒤 분리.

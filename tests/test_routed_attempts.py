@@ -224,6 +224,10 @@ def _install_fake_adapter(
         assert kwargs["stdout"] is subprocess.DEVNULL
         assert kwargs["stderr"] is subprocess.DEVNULL
         assert kwargs["close_fds"] is True
+        if runner.os.name == "nt":
+            assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+            assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+            assert not kwargs["creationflags"] & subprocess.DETACHED_PROCESS
         request_path = Path(command[command.index("--request") + 1])
         result_path = Path(command[command.index("--result") + 1])
         request = json.loads(request_path.read_text(encoding="utf-8"))
