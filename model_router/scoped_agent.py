@@ -747,6 +747,13 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
                 "tool_start_callback": lambda *_args, **_kwargs: observer.mark_tool_seen(),
             })
             agent = agent_type(**options)
+            # Match native delegate_tool before the first lazy session-row write.
+            # source=subagent alone does not exclude a child from resume traversal.
+            if request["parent_session_id"]:
+                initial_config = getattr(agent, "_session_init_model_config", None)
+                if not isinstance(initial_config, dict):
+                    raise AttemptError("initialization_error", "Hermes cannot persist delegated session identity")
+                initial_config["_delegate_from"] = request["parent_session_id"]
             runner = getattr(agent, "run_conversation", None)
             if not callable(runner):
                 raise AttemptError("initialization_error", "Hermes AIAgent does not expose run_conversation")

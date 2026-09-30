@@ -157,6 +157,7 @@ def _fake_dependencies(
         def __init__(self, **kwargs: Any):
             stats["constructor_kwargs"].append(kwargs)
             self.kwargs = kwargs
+            self._session_init_model_config = {"fixture_existing": "preserved"}
 
         def run_conversation(self, prompt: str, *, task_id: str) -> dict[str, Any]:
             if on_run is not None:
@@ -237,6 +238,91 @@ def _run_through_main(
     return scoped_agent.main(
         ["--request", str(attempt["request_path"]), "--result", str(attempt["result_path"])]
     )
+
+
+def test_routed_child_marker_prevents_native_resume_hijack(attempt):
+    from hermes_state import SessionDB
+
+    parent_id = "20260930_113515_240566"
+    attempt["request"]["parent_session_id"] = parent_id
+    attempt["request_path"].write_text(json.dumps(attempt["request"]), encoding="utf-8")
+    db = SessionDB(db_path=attempt["home"] / "state.db")
+    try:
+        db.create_session(session_id=parent_id, source="desktop")
+        db.append_message(parent_id, "user", "parent conversation")
+        before = db.get_messages_as_conversation(parent_id)
+
+        def on_run(agent, prompt, task_id):
+            # Use the actual init configuration at the first-turn persistence seam.
+            assert agent._session_init_model_config == {
+                "fixture_existing": "preserved", "_delegate_from": parent_id,
+            }
+            db.create_session(
+                session_id=agent.kwargs["session_id"], source=agent.kwargs["platform"],
+                parent_session_id=agent.kwargs["parent_session_id"],
+                model_config=agent._session_init_model_config,
+            )
+            db.append_message(agent.kwargs["session_id"], "user", "independent child")
+            _emit_api_events(attempt)
+            return {"completed": True, "final_response": "fixture"}
+
+        dependencies, stats = _fake_dependencies(attempt, on_run=on_run)
+        stats["db"] = db
+        result = scoped_agent.run_attempt(attempt["request"], dependencies=dependencies)
+        assert result["completed"] is True, result["error"]
+        assert db.resolve_resume_session_id(parent_id) == parent_id
+        assert db.resolve_resume_session_id(attempt["request"]["session_id"]) == attempt["request"]["session_id"]
+        assert db.get_messages_as_conversation(parent_id) == before
+        assert stats["close_calls"] == stats["release_calls"] == 1
+        # A genuine continuation must still be followed, not blocked by this fix.
+        db.create_session(session_id="continuation", source="desktop", parent_session_id=parent_id)
+        db.append_message("continuation", "user", "continued main conversation")
+        assert db.resolve_resume_session_id(parent_id) == "continuation"
+    finally:
+        db.close()
+
+
+def test_rootless_route_does_not_invent_delegate_marker(attempt):
+    def on_run(agent, prompt, task_id):
+        assert agent._session_init_model_config == {"fixture_existing": "preserved"}
+        _emit_api_events(attempt)
+        return {"completed": True, "final_response": "fixture"}
+
+    dependencies, _stats = _fake_dependencies(attempt, on_run=on_run)
+    assert scoped_agent.run_attempt(attempt["request"], dependencies=dependencies)["completed"] is True
+
+
+@pytest.mark.parametrize("initial_config", [None, "invalid", []])
+def test_parented_route_without_init_config_fails_before_turn(attempt, initial_config):
+    attempt["request"]["parent_session_id"] = "20260930_113515_240566"
+    attempt["request_path"].write_text(json.dumps(attempt["request"]), encoding="utf-8")
+    dependencies, stats = _fake_dependencies(attempt)
+    original_prepare = dependencies["prepare_runtime"]
+    ran = []
+
+    def prepare(request):
+        prepared = original_prepare(request)
+        base = prepared["AIAgent"]
+
+        class UnsupportedAgent(base):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._session_init_model_config = initial_config
+
+            def run_conversation(self, *args, **kwargs):
+                ran.append(True)
+                return super().run_conversation(*args, **kwargs)
+
+        prepared["AIAgent"] = UnsupportedAgent
+        return prepared
+
+    dependencies["prepare_runtime"] = prepare
+    result = scoped_agent.run_attempt(attempt["request"], dependencies=dependencies)
+    assert result["completed"] is False
+    assert result["error"]["kind"] == "initialization_error"
+    assert ran == []
+    assert stats["close_calls"] == stats["release_calls"] == 1
+    assert result["observed_routes"] == []
 
 
 def test_request_and_result_artifacts_are_bound_to_the_attempt_directory(attempt):
