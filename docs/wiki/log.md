@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-01 | native-background-output
+- 사용자 승인: 별도 입력창 진행 UI를 폐기하고 기존 Background 상세 터미널에만 정제된 공개 활동/종료 요약을 연결한다. 아래 public-progress-ui 설계를 대체한다.
+- native process 소유권, 부모/profile/runtime 고정, 공개 출력 이중 정제, 한도·실패 시 관찰만 종료하는 경계를 기록. 의미적 GO는 실행 종료와 분리한다.
+
 ## 2026-10-01 | public-progress-ui
 - 입력창 위 실제 라우팅 작업의 경과 시간·최신 공개 활동 표시와 프로필/durable/runtime 부모 범위 고정을 기록.
 - per-composer SDK context 부재에 따른 다중 가시 입력창 표시 억제, 완결 공개 메시지/도구 이름만 전달하는 privacy 경계, Windows atomic 인덱스 경로 길이 함정을 기록. 설치와 live 검증은 별도의 증거로 판단한다.

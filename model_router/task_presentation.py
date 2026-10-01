@@ -6,11 +6,13 @@ metadata only; it never inspects a prompt or forwards process logs/environment.
 from __future__ import annotations
 
 import unicodedata
+import re
 from typing import Any
 
 MAX_TITLE_CHARS = 96
 MAX_TERMINAL_SEED_CHARS = 2048
 SAFE_FALLBACK_TEXT = "민감정보 보호를 위해 표시하지 않습니다."
+_CREDENTIAL_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s]+@")
 
 # Fixed Korean labels: do not infer an operation from user prompt wording.
 PURPOSE_DEFAULTS = {
@@ -42,6 +44,10 @@ def _force_redact(value: str) -> str:
     # caught by safe_display's fail-closed path instead of exposing raw content.
     from agent.redact import redact_sensitive_text
 
+    # Native redaction may leave arbitrary URL userinfo unchanged. Reject the
+    # whole display input BEFORE truncation, including in the public writer.
+    if _CREDENTIAL_URL.search(value):
+        return SAFE_FALLBACK_TEXT
     cleaned = redact_sensitive_text(value, force=True)
     if not isinstance(cleaned, str):
         raise TypeError("sensitive-text sanitizer returned a non-string")
@@ -141,7 +147,8 @@ def terminal_seed(
         f"프로필: {safe_profile}\n"
         f"작업 ID: {safe_job_id}\n"
         f"작업 폴더: {safe_cwd}\n"
-        "이 프로세스는 실제 라우팅된 모델 작업을 수행합니다.\n"
+        "[00:00] 작업 시작\n"
+        "아래에는 마지막으로 확인한 공개 활동을 기록합니다. 전체 로그가 아니며 빠른 활동은 합쳐질 수 있습니다.\n"
         "중지는 Hermes 프로세스 화면의 X 버튼을 사용하세요.\n"
         "프로세스 종료만으로 의미 검수 통과나 GO가 확정되지는 않습니다.\n"
     )

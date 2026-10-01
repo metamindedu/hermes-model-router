@@ -35,18 +35,18 @@
 
 - `coding_route.start`의 짧은 `title`은 공개 표시 메타데이터다. 비밀·개인 프롬프트·고객 자료를 넣지 않는다. 96자 제한과 제어문자 검증은 spawn 전에 수행하며, 제목은 실행 권한·모델 관측·runner identity에 쓰지 않는다.
 - Background의 기본 이름은 `서브 에이전트 작업: <작업명> · Heavy/Light · <대상 모델>`이다. UUID는 기본 제목에서 빼고 터미널 안내에 남긴다. 제목을 생략한 예전 호출은 고정 한국어 용도 이름을 사용하며 프롬프트를 자동 요약하지 않는다.
-- 파일 기반 private 로그를 터미널에 복사하지 않는다. 실제 채택된 process의 공개 output buffer에 정제된 안내만 한 번 넣는다. 대상 모델과 실제 관측 모델은 별개이며, 프로세스 종료는 의미적 검수 GO가 아니다.
-- 이전 Background 표시 slice는 별도 카드 UI를 포함하지 않았다. 실시간 공개 진행 목록은 아래의 부모/runtime·프로필 소유권·단일 가시 composer 검증을 거친 별도 확장이다. 전체 process 목록이나 다른 session ID로 fallback하지 않고 네이티브 Background 중지 계약은 그대로 둔다.
+- 파일 기반 private 로그를 터미널에 복사하지 않는다. 실제 채택된 process의 공개 output buffer에 정제된 시작 안내와 제한된 활동·종료 요약만 넣는다. 대상 모델과 실제 관측 모델은 별개이며, 프로세스 종료는 의미적 검수 GO가 아니다.
+- 전체 process 목록이나 다른 session ID로 fallback하지 않고 네이티브 Background 중지 계약은 그대로 둔다.
 
-## 실시간 공개 진행 표시
+## 기존 Background 출력 확장 — 현재 계약
 
-- 기존 process registry를 lifecycle 권위로 유지하면서 `composer.top` 슬롯에 플러그인 전용 목록을 추가한다. 네이티브 subagent 이벤트/내부 store를 위조하거나 코어를 수정하지 않는다.
-- 신규 작업의 durable 부모 ID와 Desktop runtime ID를 실제 ContextVars에서 각각 고정한다. 프로필별·부모별 원자적 인덱스와 public progress만 읽고, legacy 작업을 전체 프로필/제목으로 보충하지 않는다. 인덱스는 조회 최적화이지 실행·권한·모델 identity 증거가 아니다.
-- 활동 수집은 기존 observer 부작용을 보존한다. 도구 이름 및 완결 공개 중간 메시지를 먼저 정제하고 제한한다. 스트림 조각·숨겨진 추론·원본 로그·도구 인자·프롬프트·최종 결과 전문은 이 목록으로 전달하지 않는다.
-- 현재 SDK의 composer render 함수는 대화별 인자를 받지 않는다. 전역 focused 상태만 읽으면 다른 tile에도 같은 작업이 나타날 수 있다. 정확한 source/profile/parent/runtime 대응과 소유한 단일 가시 composer가 확인될 때만 렌더링/조회한다. 다중 가시 composer는 숨기는 보수적 경계로 유지하며 private React context/DOM 주입으로 우회하지 않는다.
-- 공개 진행 인덱스는 부모/runtime별 하나의 크기 제한 문서로 유지하며 기존 교차 프로세스 잠금 아래에서 최신 등록을 앞에 넣는다. 디렉터리 열거를 먼저 잘라 나중에 정렬하면 최신 실행 작업이 영구 누락될 수 있다. 손상·foreign scope 인덱스는 덮어쓰지 않고 표시를 보수적으로 중단한다.
-- UI 상태 조회는 지원되는 명시적 프로필 CLI와 session-scoped native process.list/kill을 사용한다. private 메타데이터보다 native process 종료 상태를 우선하고, 종료 시 타이머를 고정하며 identity 불명확/분실 시 실행·재개·재시작하지 않는다.
-- Windows profile 깊이에서는 긴 digest 디렉터리와 파일명을 반복한 atomic temp 이름이 MAX_PATH를 넘을 수 있다. 범위 digest는 충분한 길이로 유지하고 metadata를 재검증하며, 임시 파일 basename은 짧고 고유하게 만든다.
+- 입력창 위 별도 진행 목록은 폐기했다. 단일 가시 composer와 focused/primary 일치만으로 입력창 소유권이 입증되지 않았으므로 표시 조건을 완화하지 않고 UI·DOM 감시·타이머·전용 CLI/부모 인덱스 자체를 제거한다. 새 패널/가짜 delegate 이벤트로 대체하지 않는다.
+- 이미 채택된 정확한 ProcessSession에만 공개 활동을 추가한다. native process ID뿐 아니라 같은 registry 객체, Popen, PID, raw owner task, session key, durable parent와 작업 snapshot의 profile/runtime을 검증한다. 실제 작업의 launch readback 전에는 활동을 전달하지 않는다.
+- daemon 관찰자는 시작 ContextVars를 복사하여 기존 status.update process refresh를 발행한다. 전역 focused 대화를 추측하지 않는다. 고정 작업 아래 최대 두 시도만 읽고 크기/경로/심볼릭 링크/identity/시간을 검증하며 출력 직전 전체 활동을 다시 정제한다. private 로그·답변은 읽거나 전달하지 않는다. 요청 파일은 시도 identity 비교에만 사용하며 prompt 등은 출력하지 않는다.
+- 기존 public writer는 observer 부작용, 실제 callback 인자 순서, 완결 공개 중간 메시지 정제와 trailing flush를 보존한다. 최신 스냅샷을 관찰하므로 빠른 활동은 합쳐질 수 있다. 조용한 동안 마지막 활동을 반복하거나 가짜 heartbeat를 넣지 않는다.
+- 활동 기록은 줄/문자 한도를 두고 제한 안내는 한 번만 남긴다. ProcessRegistry의 종료를 관측한 뒤 공개 스냅샷을 다시 읽고 종료 확인/소요 시간을 한 번 추가한다. native kill이 reader 종료 사유를 나중에 정정할 수 있으므로 정상/실패/중지를 관찰자가 불변 판정하지 않는다. 의미적 GO/FAIL을 최종 답변에서 추론하지 않는다. private 결과 전문을 공개하지 않는다.
+- 관찰 실패·한도·소유권 소실은 표시만 중단하며 모델 작업을 재시작/중지하지 않는다. worker 회수·kill·종료 코드와 알림 소유권은 native registry에 남긴다. 종료 알림과 마지막 요약의 선후관계는 보장하지 않는다. 후행 출력은 현재 호스트의 메모리 출력이며 native 보존 receipt/재시작 후 재조회에는 없을 수 있다. 보존 receipt를 임의 갱신하지 않는다.
+- 오래된 progress-index와 과거 private 증거는 읽지 않고 보존한다. 코드 제거가 작업/대화 자료 삭제를 뜻하지 않는다. 새 작업에만 관찰자를 붙이며 live backend를 재시작하지 않는다.
 
 ## 설치 및 검증
 

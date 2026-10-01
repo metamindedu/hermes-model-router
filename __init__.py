@@ -25,7 +25,7 @@ def register(ctx):
             return False
 
     def cli_setup(parser):
-        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "apply", "progress"])
+        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "apply"])
         parser.add_argument("--body", default="{}")
 
     def cli_handler(args):
@@ -40,9 +40,6 @@ def register(ctx):
                 if args.operation == "status":
                     if body: raise ValueError("status does not accept a body")
                     return service.status()
-                if args.operation == "progress":
-                    from .model_router.job_progress import progress_for_parent
-                    return progress_for_parent(service, body)
                 if args.operation == "preview": return service.preview(body)
                 if args.operation == "fallback-preview": return service.fallback_preview(body)
                 if set(body) != {"plan_id"}: raise ValueError("apply accepts only plan_id")

@@ -87,6 +87,37 @@ class RouteRuntime:
             raise DesktopSeedUnavailable(process_id)
         return process_id
 
+    def observe(self, process, *, process_id, home, job_id, profile, timeout):
+        """Start only AFTER Router publishes the exact launch metadata.
+
+        Starting a reader before os.replace can cause a Windows sharing
+        violation and strand launch.json at worker_pid=null forever.
+        """
+        session = self.registry.get(process_id)
+        if (session is None or session.process is not process
+                or session.pid != process.pid or session.owner_task_id != self.task_id
+                or session.session_key != self.session_key
+                or session.parent_session_id != self.parent_session_id):
+            return None
+        try:
+            from .background_output import start_background_output
+            return start_background_output(
+                session=session, registry=self.registry, process=process,
+                home=home, job_id=job_id, profile=profile,
+                parent_session_id=self.parent_session_id, session_key=self.session_key,
+                owner_task_id=self.task_id, ui_session_id=self.ui_session_id,
+                emit=self.emit, timeout=timeout,
+            )
+        except Exception:
+            # Observation may fail; the real process remains adopted. Never
+            # relaunch it, change lifecycle, or forward raw exception text.
+            if session is not None:
+                try:
+                    session.append_output("활동 기록 연결을 확인할 수 없습니다. 실제 실행 상태는 Background에서 확인하세요.\n")
+                except Exception:
+                    pass
+            return None
+
 
 def capture_runtime(*, task_id: str = "", expected_profile: str = "", get_env=None, registry=None, emit=None):
     """Use bound ContextVars, not stale process-global chat identity.

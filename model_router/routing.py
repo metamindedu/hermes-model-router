@@ -640,13 +640,15 @@ class Router:
         except OSError:
             # The worker records its own PID in state.json as soon as it starts;
             # avoid returning an ambiguous failure after the process was spawned.
-            pass
-        try:
-            from .job_progress import index_job
-            index_job(home, snapshot, {"process_id": tracking.get("process_id")})
-        except (OSError, ValueError, RuntimeError):
-            # Presentation only. The worker is already owned: never relaunch it.
-            tracking["progress_tracking_error"] = True
+            tracking["activity_tracking_error"] = True
+        else:
+            observe = getattr(self.runtime, "observe", None)
+            if callable(observe) and tracking.get("process_id"):
+                try:
+                    observe(process, process_id=tracking["process_id"], home=home,
+                            job_id=job_id, profile=profile, timeout=bounded_timeout)
+                except Exception:
+                    tracking["activity_tracking_error"] = True
         return {
             "job_id": job_id,
             "status": "running",

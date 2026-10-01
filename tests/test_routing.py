@@ -79,6 +79,11 @@ def _make_router(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str =
     # Native helper import performs version discovery; do it before patching the
     # shared subprocess.Popen module so the fake runner cannot intercept Git.
     from tools.environments.local import served_profile_child_env  # noqa: F401
+    # Unit fixtures test spawning, never source-update maintenance/relaunch.
+    # A new native bootstrap may otherwise run Git through fake Popen.
+    import hermes_cli.venv_sync
+    monkeypatch.setattr(hermes_cli.venv_sync, "prepare_launch", lambda *a, **k: None)
+    import hermes_bootstrap  # noqa: F401
     root = tmp_path / "hermes"
     root.mkdir()
     service = FakeService(root, profile)

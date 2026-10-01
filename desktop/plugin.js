@@ -3,7 +3,6 @@ import {
   Button,
   Checkbox,
   Codicon,
-  COMPOSER_AREAS,
   GlyphSpinner,
   Input,
   PALETTE_AREA,
@@ -80,25 +79,6 @@ const styles = {
   actual: { margin: 0, color: 'var(--ui-text-tertiary)', fontSize: '0.78rem', lineHeight: 1.45, overflowWrap: 'anywhere' },
   fieldset: { margin: 0, padding: 0, border: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.8rem' }
 }
-
-const progressStyles = {
-  root: { marginBlock: '0.15rem', minWidth: 0 },
-  details: { borderBottom: '1px solid var(--ui-stroke-tertiary)', color: 'var(--ui-text-primary)' },
-  summary: { display: 'flex', alignItems: 'center', gap: '0.45rem', padding: '0.35rem 0', cursor: 'pointer', listStyle: 'none', fontSize: '0.78rem', fontWeight: 600 },
-  list: { display: 'flex', flexDirection: 'column', paddingBottom: '0.25rem' },
-  row: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '0.7rem', alignItems: 'center', padding: '0.45rem 0', borderTop: '1px solid var(--ui-stroke-tertiary)', minWidth: 0 },
-  copy: { display: 'flex', flexDirection: 'column', gap: '0.12rem', minWidth: 0 },
-  heading: { display: 'flex', alignItems: 'baseline', gap: '0.4rem', minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap' },
-  title: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.78rem', fontWeight: 580 },
-  meta: { flex: '0 0 auto', color: 'var(--ui-text-tertiary)', fontSize: '0.7rem' },
-  activity: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--ui-text-secondary)', fontSize: '0.72rem' },
-  trailing: { display: 'flex', alignItems: 'center', gap: '0.45rem', color: 'var(--ui-text-tertiary)', fontSize: '0.7rem', fontVariantNumeric: 'tabular-nums' },
-  state: { color: 'var(--ui-text-tertiary)', fontSize: '0.68rem' },
-  message: { margin: '0.25rem 0 0.45rem', color: 'var(--ui-text-tertiary)', fontSize: '0.72rem' }
-}
-
-const COMPOSER_SURFACE_SELECTOR = '[data-slot="composer-surface"]'
-const PROGRESS_FINISHED_RETENTION_MS = 8_000
 
 // Pure helpers are kept separate so the routing payload and stale-scope policy
 // can be exercised without loading the Desktop renderer SDK in Node tests.
@@ -506,98 +486,6 @@ export function fallbackPreviewMatchesScope(preview, scopeKey, generation, profi
     preview.profile === profile && preview.scope === scope)
 }
 
-function nonEmptyString(value) {
-  return typeof value === 'string' && value.trim().length > 0
-}
-
-function visibleComposerSurface(element, doc) {
-  if (!element || element.isConnected !== true || !doc?.defaultView?.getComputedStyle) return false
-  if (typeof element.getClientRects === 'function' && element.getClientRects().length === 0) return false
-  let current = element
-  while (current && current !== doc) {
-    if (current.hidden === true || current.getAttribute?.('aria-hidden') === 'true') return false
-    const style = doc.defaultView.getComputedStyle(current)
-    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false
-    if (Number.isFinite(Number.parseFloat(style.opacity)) && Number.parseFloat(style.opacity) <= 0) return false
-    current = current.parentElement
-  }
-  return true
-}
-
-export function progressScopeAllowed(snapshot, root, doc) {
-  if (!root || root.isConnected !== true || !doc || !snapshot) return false
-  const { activeSessionId, focusedSessionId, focusedStoredSessionId, connectionId, profile, focusedSessionOwner } = snapshot
-  if (![activeSessionId, focusedSessionId, focusedStoredSessionId, connectionId, profile].every(nonEmptyString)) return false
-  if (focusedSessionId !== activeSessionId) return false
-  if (!focusedSessionOwner || focusedSessionOwner.connectionId !== connectionId || focusedSessionOwner.profile !== profile) return false
-  const rootSurface = typeof root.closest === 'function' ? root.closest(COMPOSER_SURFACE_SELECTOR) : null
-  if (!rootSurface || rootSurface.isConnected !== true || !visibleComposerSurface(rootSurface, doc)) return false
-  const surfaces = Array.from(doc.querySelectorAll(COMPOSER_SURFACE_SELECTOR) || []).filter(surface => visibleComposerSurface(surface, doc))
-  return surfaces.length === 1 && surfaces[0] === rootSurface
-}
-
-export function progressResponseMatchesScope(response, scope) {
-  if (!response || response.schema !== 1 || response.profile !== scope.profile ||
-    response.parent_session_id !== scope.parentSessionId || response.ui_session_id !== scope.uiSessionId ||
-    !Array.isArray(response.jobs) || response.jobs.length > 16 || typeof response.has_more !== 'boolean') return false
-  return response.jobs.every(job => job && nonEmptyString(job.job_id) && nonEmptyString(job.process_id) &&
-    nonEmptyString(job.title) && nonEmptyString(job.role) && nonEmptyString(job.model) &&
-    nonEmptyString(job.status) && Number.isFinite(job.started_at) &&
-    (job.finished_at === null || Number.isFinite(job.finished_at)) && typeof job.activity === 'string')
-}
-
-export function formatElapsed(startedAt, endedAt) {
-  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) return '—'
-  const totalSeconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000))
-  const seconds = String(totalSeconds % 60).padStart(2, '0')
-  const minutes = Math.floor(totalSeconds / 60)
-  if (minutes >= 60) return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}:${seconds}`
-  return `${minutes}:${seconds}`
-}
-
-function processEntryId(entry) {
-  // The native process.list contract calls this registry id `session_id`; match it exactly.
-  if (nonEmptyString(entry?.process_id)) return entry.process_id
-  return nonEmptyString(entry?.session_id) ? entry.session_id : ''
-}
-
-function terminalProgressState(entry, backendStatus) {
-  const nativeStatus = typeof entry?.status === 'string' ? entry.status.toLowerCase() : ''
-  const reason = typeof entry?.completion_reason === 'string' ? entry.completion_reason.toLowerCase() : ''
-  if (nativeStatus === 'running') return 'running'
-  if (nativeStatus === 'killed' || nativeStatus === 'stopped' || ['killed', 'stopped', 'cancelled', 'canceled', 'terminated'].includes(reason)) return 'stopped'
-  if (nativeStatus !== 'exited') return null
-  if (typeof entry.exit_code === 'number' && entry.exit_code !== 0) return 'failed'
-  if (entry.exit_code === 0 && backendStatus === 'completed') return 'completed'
-  return 'unverified'
-}
-
-export function reconcileProgressJobs(response, processSnapshot, now, previousTerminalTimes = new Map(), scopeKey = '') {
-  if (!response || !Array.isArray(processSnapshot?.processes)) return { jobs: [], terminalTimes: new Map() }
-  const processRows = new Map(processSnapshot.processes.map(row => [processEntryId(row), row]).filter(([id]) => id))
-  const terminalTimes = new Map()
-  const jobs = []
-  for (const job of response.jobs) {
-    const process = processRows.get(job.process_id)
-    if (!process) continue
-    const state = terminalProgressState(process, job.status)
-    if (!state) continue
-    if (state === 'running') {
-      jobs.push({ ...job, displayState: state, terminalAt: null })
-      continue
-    }
-    const key = `${scopeKey}\u0000${job.job_id}\u0000${job.process_id}`
-    const terminalAt = Number.isFinite(job.finished_at)
-      ? job.finished_at
-      : (previousTerminalTimes.get(key) ?? now)
-    terminalTimes.set(key, terminalAt)
-    if (now - terminalAt < PROGRESS_FINISHED_RETENTION_MS) {
-      jobs.push({ ...job, displayState: state, terminalAt })
-    }
-  }
-  return { jobs, terminalTimes }
-}
-
 function Field({ id, label, value, onChange, disabled = false, hint }) {
   return jsxs('label', {
     htmlFor: id,
@@ -699,7 +587,7 @@ function StatusView({ profile }) {
 }
 
 export async function nativeBackendCall(path, options = {}) {
-  const operation = { '/status': 'status', '/preview': 'preview', '/fallback-preview': 'fallback-preview', '/apply': 'apply', '/progress': 'progress' }[path]
+  const operation = { '/status': 'status', '/preview': 'preview', '/fallback-preview': 'fallback-preview', '/apply': 'apply' }[path]
   if (!operation) throw new Error('지원하지 않는 플러그인 요청입니다.')
   const profile = options.profile || host.state.profile.get() || 'default'
   const reply = await host.request('cli.exec', {
@@ -715,249 +603,6 @@ export async function nativeBackendCall(path, options = {}) {
   catch { throw new Error('플러그인 응답이 잘렸거나 손상됐습니다. 상태를 다시 확인하세요.') }
   if (reply.code !== 0 || data.error) throw new Error(data.message || '요청이 완료되지 않았습니다.')
   return data
-}
-
-const NULL_HOST_ATOM = { get: () => null, subscribe: () => () => {} }
-
-function useOptionalHostValue(key) {
-  const candidate = host.state?.[key]
-  return useValue(candidate && typeof candidate.get === 'function' ? candidate : NULL_HOST_ATOM)
-}
-
-function readProgressScope() {
-  const read = key => {
-    const atom = host.state?.[key]
-    return atom && typeof atom.get === 'function' ? atom.get() : null
-  }
-  return {
-    activeSessionId: read('activeSessionId'),
-    focusedSessionId: read('focusedSessionId'),
-    focusedStoredSessionId: read('focusedStoredSessionId'),
-    connectionId: read('connectionId'),
-    profile: read('profile'),
-    focusedSessionOwner: read('focusedSessionOwner')
-  }
-}
-
-function ComposerProgress() {
-  const activeSessionId = useOptionalHostValue('activeSessionId')
-  const focusedSessionId = useOptionalHostValue('focusedSessionId')
-  const focusedStoredSessionId = useOptionalHostValue('focusedStoredSessionId')
-  const connectionId = useOptionalHostValue('connectionId')
-  const profile = useOptionalHostValue('profile')
-  const focusedSessionOwner = useOptionalHostValue('focusedSessionOwner')
-  const rootRef = useRef(null)
-  const [surfaceAllowed, setSurfaceAllowed] = useState(false)
-  const [clockNow, setClockNow] = useState(() => Date.now())
-  const [documentVisible, setDocumentVisible] = useState(() => typeof document !== 'undefined' && document.visibilityState !== 'hidden')
-  const [stoppingIds, setStoppingIds] = useState([])
-  const [cancelError, setCancelError] = useState('')
-  const terminalTimesRef = useRef(new Map())
-  const scope = { activeSessionId, focusedSessionId, focusedStoredSessionId, connectionId, profile, focusedSessionOwner }
-  const scopeKey = JSON.stringify([connectionId, profile, focusedStoredSessionId, activeSessionId])
-  const doc = typeof document === 'undefined' ? null : document
-  const currentlyAllowed = progressScopeAllowed(scope, rootRef.current, doc)
-
-  useEffect(() => {
-    if (!doc) {
-      setSurfaceAllowed(false)
-      return undefined
-    }
-    let disposed = false
-    let resizeObserver = null
-    let mutationObserver = null
-    let attributeObserver = null
-    const observed = new Set()
-    const observeSurfaces = () => {
-      const surfaces = new Set(Array.from(doc.querySelectorAll(COMPOSER_SURFACE_SELECTOR) || []))
-      if (resizeObserver) {
-        for (const surface of observed) {
-          if (!surfaces.has(surface)) {
-            resizeObserver.unobserve?.(surface)
-            observed.delete(surface)
-          }
-        }
-        for (const surface of surfaces) {
-          if (!observed.has(surface)) {
-            resizeObserver.observe(surface)
-            observed.add(surface)
-          }
-        }
-      }
-      if (attributeObserver) {
-        attributeObserver.disconnect()
-        const targets = new Set()
-        for (const surface of surfaces) {
-          let current = surface
-          while (current) {
-            targets.add(current)
-            if (current === doc.body || current === doc.documentElement) break
-            current = current.parentElement
-          }
-        }
-        for (const target of targets) attributeObserver.observe(target, {
-          attributes: true,
-          attributeFilter: ['aria-hidden', 'class', 'hidden', 'style']
-        })
-      }
-    }
-    const refresh = () => {
-      if (disposed) return
-      const next = progressScopeAllowed(readProgressScope(), rootRef.current, doc)
-      setSurfaceAllowed(current => current === next ? current : next)
-      observeSurfaces()
-    }
-    const hasSurface = node => Boolean(node?.nodeType === 1 && (
-      node.matches?.(COMPOSER_SURFACE_SELECTOR) || node.querySelector?.(COMPOSER_SURFACE_SELECTOR)
-    ))
-    const ResizeObserverType = doc.defaultView?.ResizeObserver
-    if (typeof ResizeObserverType === 'function') {
-      resizeObserver = new ResizeObserverType(refresh)
-    }
-    const MutationObserverType = doc.defaultView?.MutationObserver
-    if (typeof MutationObserverType === 'function') {
-      mutationObserver = new MutationObserverType(records => {
-        if (records.some(record => [...(record.addedNodes || []), ...(record.removedNodes || [])].some(hasSurface))) refresh()
-      })
-      mutationObserver.observe(doc.body || doc.documentElement, { childList: true, subtree: true })
-      attributeObserver = new MutationObserverType(refresh)
-    }
-    refresh()
-    return () => {
-      disposed = true
-      resizeObserver?.disconnect()
-      mutationObserver?.disconnect()
-      attributeObserver?.disconnect()
-    }
-  }, [doc, activeSessionId, focusedSessionId, focusedStoredSessionId, connectionId, profile,
-    focusedSessionOwner?.connectionId, focusedSessionOwner?.profile])
-
-  useEffect(() => {
-    if (!doc) return undefined
-    const update = () => setDocumentVisible(doc.visibilityState !== 'hidden')
-    update()
-    doc.addEventListener?.('visibilitychange', update)
-    return () => doc.removeEventListener?.('visibilitychange', update)
-  }, [doc])
-
-  const queryEnabled = surfaceAllowed && currentlyAllowed
-  const progressQuery = useQuery({
-    queryKey: ['model-router-progress', connectionId, profile, focusedStoredSessionId, activeSessionId],
-    enabled: Boolean(queryEnabled),
-    retry: false,
-    refetchInterval: query => query.state.error ? 15_000 : 3_000,
-    refetchIntervalInBackground: false,
-    queryFn: async ({ signal } = {}) => {
-      const captured = { connectionId, profile, parentSessionId: focusedStoredSessionId, uiSessionId: activeSessionId }
-      const isCurrent = () => {
-        const live = readProgressScope()
-        return live.connectionId === captured.connectionId && live.profile === captured.profile &&
-          live.focusedStoredSessionId === captured.parentSessionId && live.activeSessionId === captured.uiSessionId &&
-          progressScopeAllowed(live, rootRef.current, typeof document === 'undefined' ? null : document)
-      }
-      if (signal?.aborted || !isCurrent()) throw new Error('stale progress scope')
-      const body = { parent_session_id: captured.parentSessionId, ui_session_id: captured.uiSessionId }
-      const [response, processSnapshot] = await Promise.all([
-        nativeBackendCall('/progress', { body, profile: captured.profile }),
-        host.request('process.list', { session_id: captured.uiSessionId })
-      ])
-      if (signal?.aborted || !isCurrent()) throw new Error('stale progress scope')
-      const responseScope = { profile: captured.profile, parentSessionId: captured.parentSessionId, uiSessionId: captured.uiSessionId }
-      if (!progressResponseMatchesScope(response, responseScope) || !Array.isArray(processSnapshot?.processes)) {
-        throw new Error('invalid progress response')
-      }
-      const reconciled = reconcileProgressJobs(response, processSnapshot, Date.now(), terminalTimesRef.current, scopeKey)
-      terminalTimesRef.current = reconciled.terminalTimes
-      return { scopeKey, jobs: reconciled.jobs, hasMore: response.has_more }
-    }
-  })
-
-  const matchingData = queryEnabled && !progressQuery.isError && progressQuery.data?.scopeKey === scopeKey
-    ? progressQuery.data
-    : null
-  const renderNow = matchingData?.jobs.some(job => job.displayState === 'running') ? clockNow : Date.now()
-  const displayJobs = (matchingData?.jobs || []).filter(job =>
-    job.displayState === 'running' || (job.terminalAt !== null && renderNow - job.terminalAt < PROGRESS_FINISHED_RETENTION_MS)
-  )
-  const hasRunning = displayJobs.some(job => job.displayState === 'running')
-
-  useEffect(() => {
-    if (!queryEnabled || !hasRunning || !documentVisible) return undefined
-    setClockNow(Date.now())
-    const timer = setInterval(() => setClockNow(Date.now()), 1_000)
-    return () => clearInterval(timer)
-  }, [queryEnabled, hasRunning, documentVisible])
-
-  const stopProcess = async processId => {
-    if (!nonEmptyString(processId) || !currentlyAllowed || stoppingIds.includes(processId)) return
-    const capturedSessionId = activeSessionId
-    const capturedScopeKey = scopeKey
-    const live = readProgressScope()
-    if (JSON.stringify([live.connectionId, live.profile, live.focusedStoredSessionId, live.activeSessionId]) !== capturedScopeKey ||
-      live.activeSessionId !== capturedSessionId || !progressScopeAllowed(live, rootRef.current, doc)) return
-    setCancelError('')
-    setStoppingIds(current => current.includes(processId) ? current : [...current, processId])
-    try {
-      await host.request('process.kill', { session_id: capturedSessionId, process_id: processId })
-      await progressQuery.refetch()
-    } catch {
-      setCancelError('중지 결과를 확인할 수 없습니다. 현재 상태를 새로 확인하세요.')
-    } finally {
-      setStoppingIds(current => current.filter(id => id !== processId))
-    }
-  }
-
-  const root = children => jsx('div', { ref: rootRef, style: progressStyles.root, 'data-model-router-progress': true, children })
-  if (!queryEnabled) return root(null)
-  if (!displayJobs.length) {
-    if (progressQuery.isError) return root(jsx('div', { role: 'status', style: progressStyles.message, children: '서브 에이전트 진행 상황을 확인할 수 없습니다.' }))
-    // A registry poll is not evidence that a routed task is executing.
-    // Empty/finished conversations remain visually idle, including pending polls.
-    return root(null)
-  }
-
-  const statusLabel = { running: '실행 중', completed: '완료', failed: '실패', stopped: '중지', unverified: '결과 확인 필요' }
-  return root(jsxs('details', {
-    style: progressStyles.details,
-    children: [
-      jsxs('summary', { style: progressStyles.summary, children: [
-        jsx(Codicon, { name: 'chevron-right', size: '0.75rem' }),
-        `서브 에이전트 작업 ${displayJobs.length}개`,
-        hasRunning && progressQuery.isFetching ? jsx(GlyphSpinner, {}) : null
-      ] }),
-      jsxs('div', { style: progressStyles.list, children: [
-        ...displayJobs.map(job => {
-          const role = job.role.toLowerCase() === 'heavy' ? 'Heavy' : job.role.toLowerCase() === 'light' ? 'Light' : '작업'
-          const endpoint = job.terminalAt ?? clockNow
-          return jsxs('div', { style: progressStyles.row, children: [
-            jsxs('div', { style: progressStyles.copy, children: [
-              jsxs('div', { style: progressStyles.heading, children: [
-                jsx('span', { title: job.title, style: progressStyles.title, children: job.title }),
-                jsx('span', { style: progressStyles.meta, children: role }),
-                jsx('span', { title: job.model, style: { ...progressStyles.meta, maxWidth: '12rem', overflow: 'hidden', textOverflow: 'ellipsis' }, children: job.model }),
-                job.displayState !== 'running' ? jsx('span', { style: progressStyles.state, children: statusLabel[job.displayState] }) : null
-              ] }),
-              jsx('div', { title: job.activity, style: progressStyles.activity, children: job.activity })
-            ] }),
-            jsxs('div', { style: progressStyles.trailing, children: [
-              jsx('time', { children: formatElapsed(job.started_at, endpoint) }),
-              job.displayState === 'running' ? jsx(Button, {
-                size: 'sm', variant: 'ghost', disabled: stoppingIds.includes(job.process_id),
-                'aria-label': '위임 작업 중지',
-                onClick: () => void stopProcess(job.process_id),
-                children: jsxs('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }, children: [
-                  jsx(Codicon, { name: 'close', size: '0.75rem' }),
-                  stoppingIds.includes(job.process_id) ? '중지 중…' : '중지'
-                ] })
-              }) : null
-            ] })
-          ] }, job.job_id)
-        }),
-        matchingData.hasMore ? jsx('p', { style: progressStyles.message, children: '최신 작업 16개를 표시합니다.' }) : null,
-        cancelError ? jsx('p', { role: 'status', style: progressStyles.message, children: cancelError }) : null
-      ] })
-    ]
-  }))
 }
 
 function RouterPage({ ctx: pluginContext }) {
@@ -1788,12 +1433,6 @@ export default {
   defaultEnabled: false,
   register(ctx) {
     ctx.registerMany([
-      {
-        id: 'progress',
-        area: COMPOSER_AREAS.top,
-        order: -100,
-        render: () => jsx(ComposerProgress, {})
-      },
       {
         id: 'page',
         area: ROUTES_AREA,
