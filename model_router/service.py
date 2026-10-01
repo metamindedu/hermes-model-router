@@ -505,6 +505,30 @@ class Service:
         if (heavy["provider"], heavy["model"]) == (light["provider"], light["model"]):
             raise ValueError("enabled Heavy and Light routes must resolve to distinct models")
 
+    @staticmethod
+    def _check_changed_routing_fallbacks(before: dict, after: dict) -> None:
+        """Validate final primaries, including retained spares, without adopting them."""
+        def primary_ids(entry):
+            routing, models = entry["routing"], entry["models"]
+            return tuple(
+                (route["provider"].casefold(), route["model"].casefold())
+                for role, model_role in (("heavy", "main"), ("light", "delegation"))
+                for route in [models[model_role] if routing[role]["follow"] == model_role else routing[role]["custom"]]
+            )
+        for name, entry in after.items():
+            fallback = entry["routing"]["fallback"]
+            if not fallback["enabled"]:
+                continue
+            old = before.get(name)
+            primaries = primary_ids(entry)
+            if old is not None and primaries == primary_ids(old) and fallback == old["routing"]["fallback"]:
+                continue
+            spares = tuple((fallback[role]["provider"].casefold(), fallback[role]["model"].casefold()) for role in ("heavy", "light"))
+            if spares[0] == spares[1]:
+                raise ValueError("enabled Heavy and Light fallbacks must be distinct")
+            if any(primary == spare for primary, spare in zip(primaries, spares)):
+                raise ValueError("fallback route must differ from its final primary route")
+
     def _fallback_for(self, profile: str, fallbacks: dict[str, Any] | None) -> dict[str, Any]:
         if not fallbacks:
             return {"enabled": False, "heavy": None, "light": None}
@@ -1006,8 +1030,16 @@ class Service:
         }
 
     def preview(self, body: dict) -> dict[str, Any]:
-        if not isinstance(body, dict) or set(body) != {"expected_revision", "profile", "models", "model_targets", "routing", "routing_profiles"}:
+        required = {"expected_revision", "profile", "models", "model_targets", "routing", "routing_profiles"}
+        optional = {"fallback_updates", "fallback_confirmations"}
+        if not isinstance(body, dict) or not required <= set(body) or set(body) - required - optional:
             raise ValueError("preview body has unknown or missing fields")
+        fallback_updates = body.get("fallback_updates", [])
+        fallback_confirmations = body.get("fallback_confirmations", [])
+        if not isinstance(fallback_updates, list) or not isinstance(fallback_confirmations, list):
+            raise ValueError("fallback updates and confirmations must be lists")
+        if fallback_confirmations and not fallback_updates:
+            raise ValueError("fallback confirmations require explicit fallback updates")
         expected = body["expected_revision"]
         if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
             raise ValueError("expected_revision must be a non-negative integer")
@@ -1100,6 +1132,8 @@ class Service:
 
         for name, entry in after.items():
             self._check_distinct_routes(entry["routing"], entry["models"])
+        if not fallback_updates:
+            self._check_changed_routing_fallbacks(entries, after)
         state_changed = after != entries
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
@@ -1110,6 +1144,14 @@ class Service:
             "snapshots": snapshots, "config_digests": config_digests, "writes": writes,
             "skill_snapshots": skill_snapshots, "model_targets": targets, "state_changed": state_changed, "expires_epoch": expires_epoch,
         }
+        if fallback_updates:
+            # Compose before publishing: one immutable token, revision and apply.
+            # Never apply two independent previews in sequence.
+            return self._prepare_fallback_preview({
+                "expected_revision": expected,
+                "updates": fallback_updates,
+                "confirmations": fallback_confirmations,
+            }, base_plan=plan)
         self._plans[plan_id] = plan
         plans_dir = self.store_path.parent / "plans"
         with _FileLock(self._lock_path):
@@ -1127,7 +1169,11 @@ class Service:
         return {"plan_id": plan_id, "changes": json.loads(json.dumps(changes)), "warnings": [], "expires_at": expires_at}
 
     def fallback_preview(self, body: dict) -> dict[str, Any]:
-        """Prepare an explicit, scope-bound fallback policy update."""
+        """Prepare a fallback-only update through the same combined-plan builder."""
+        return self._prepare_fallback_preview(body)
+
+    def _prepare_fallback_preview(self, body: dict, *, base_plan: dict | None = None) -> dict[str, Any]:
+        """Prepare explicit scope updates, optionally on a pending model plan."""
         if not isinstance(body, dict) or set(body) != {"expected_revision", "updates", "confirmations"}:
             raise ValueError("fallback preview body has unknown or missing fields")
         expected = body["expected_revision"]
@@ -1207,11 +1253,14 @@ class Service:
         if expected != revision:
             raise RevisionConflict("settings revision changed; reload before fallback preview")
         entries = copy.deepcopy(stored["profiles"]) if stored else {}
+        if base_plan is not None and base_plan["revision"] != revision:
+            raise RevisionConflict("settings revision changed during combined preview")
         all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
-        after = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
-        changes: list[dict[str, Any]] = []
-        snapshots: dict[str, dict[str, Any]] = {}
-        writes: list[dict[str, Any]] = []
+        after = (copy.deepcopy(base_plan["after"]) if base_plan is not None else
+                 {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries})
+        changes: list[dict[str, Any]] = copy.deepcopy(base_plan["changes"]) if base_plan else []
+        snapshots: dict[str, dict[str, Any]] = copy.deepcopy(base_plan["snapshots"]) if base_plan else {}
+        writes: list[dict[str, Any]] = copy.deepcopy(base_plan["writes"]) if base_plan else []
         native_expected: dict[str, list[dict[str, str]]] = {}
         native_snapshots: dict[str, str] = {}
         native_provenance: dict[str, str] = {}
@@ -1377,6 +1426,7 @@ class Service:
 
         for name, entry in after.items():
             self._check_distinct_routes(entry["routing"], entry["models"])
+        self._check_changed_routing_fallbacks(entries, after)
         state_changed = after != entries
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
@@ -1391,8 +1441,8 @@ class Service:
             "snapshots": snapshots,
             "config_digests": config_digests,
             "writes": writes,
-            "skill_snapshots": {},
-            "model_targets": [],
+            "skill_snapshots": copy.deepcopy(base_plan["skill_snapshots"]) if base_plan else {},
+            "model_targets": list(base_plan["model_targets"]) if base_plan else [],
             "native_expected": native_expected,
             "native_snapshots": native_snapshots,
             "native_provenance": native_provenance,

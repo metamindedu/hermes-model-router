@@ -213,9 +213,10 @@ test('form exposes four model roles, distinct application scopes, and accessible
 
 test('preview and apply are separate, scope-guarded requests with no retry affordance after ambiguity', () => {
   assert.match(source, /ctx\.rest\('\/status'\)/)
-  assert.match(source, /ctx\.rest\('\/preview', \{ method: 'POST', body \}\)/)
-  assert.match(source, /ctx\.rest\('\/apply', \{ method: 'POST', body: \{ plan_id: preview\.plan_id \}, timeoutMs: 180000 \}\)/)
-  assert.match(source, /미리보기는 설정을 변경하지 않습니다/)
+  assert.match(source, /ctx\.rest\('\/preview', \{ method: 'POST', body: combined\.body \}\)/)
+  assert.match(source, /ctx\.rest\('\/apply', \{ method: 'POST', body: \{ plan_id: planId \}, timeoutMs: 180000 \}\)/)
+  assert.match(source, /const planId = preview\.plan_id/)
+  assert.match(source, /미리보기만으로 설정은 바뀌지 않습니다/)
   assert.match(source, /확인 후 적용/)
   assert.match(source, /다시 적용하지 마세요/)
   assert.match(source, /setPreview\(null\)/)

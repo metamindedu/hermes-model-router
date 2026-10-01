@@ -1,5 +1,11 @@
 # Model Router implementation contract
 
+## 2026-10-01: 이해하기 쉬운 폴백 UI와 전체 저장
+
+사용자는 폴백별 비용·재실행 동의 체크박스를 제거하고 고지 문구로 대체하도록 요청했다. 폴백별 미리보기 확인 체크박스도 없애고 명시적 적용 버튼을 유지한다. 전체 미리보기의 최종 변경 확인은 유지한다. 기존 계약의 별도 체크박스 요구를 대체하며, 실제 예비 모델 선택·적용 없이 설치만으로 활성화하거나 비용 허용을 저장하는 것은 여전히 금지한다.
+
+전체 미리보기는 모델·라우팅과 사용자가 수정한 폴백/복사 대상만 하나의 서버 계획으로 구성한다. 각 폴백의 적용 대상은 모델 일괄 대상과 독립적이고 초기값은 원본 프로필 하나다. 수정하지 않은 폴백은 인수·재승인·투영하지 않는다. 수정한 범위의 대상이 없으면 전체 미리보기를 차단한다. 범위별 미리보기/적용도 유지한다. 단일 토큰·revision·CAS·유효 설정 읽기·부분 실패·중복 적용 차단은 유지한다. 라이브 설정을 변경하지 않고 fake-home 저장 검증과 독립 Heavy 검수 후 플러그인 코드만 반영한다.
+
 ## Next phase (user-requested, not yet designed in detail): delegation fallback in plugin scope
 The user asked to extend fallback management to `delegation.fallback_providers`, because a pinned delegated child (explicit provider/model) inherits no native chain and therefore failed hard on the 2026-09-30 subscription outage. Design must preserve the documented `scoped_fallback_chain` semantics (an unpinned child inherits the parent chain; `[]` disables; an explicit declaration wins), keep routing-scope consent separate from main-conversation consent, and avoid silently changing live delegation behavior on install. Implement this as a separate bounded phase after native/routing corrections, then review and install the combined candidate once. See DELEGATION_PLAN.md for the fixed additive contract; an intermediate installation is no longer required.
 
