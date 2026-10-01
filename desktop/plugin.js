@@ -911,7 +911,8 @@ function ComposerProgress() {
   if (!queryEnabled) return root(null)
   if (!displayJobs.length) {
     if (progressQuery.isError) return root(jsx('div', { role: 'status', style: progressStyles.message, children: '서브 에이전트 진행 상황을 확인할 수 없습니다.' }))
-    if (progressQuery.isPending || progressQuery.isFetching) return root(jsx('div', { role: 'status', style: progressStyles.message, children: jsx(GlyphSpinner, {}) }))
+    // A registry poll is not evidence that a routed task is executing.
+    // Empty/finished conversations remain visually idle, including pending polls.
     return root(null)
   }
 
@@ -922,7 +923,7 @@ function ComposerProgress() {
       jsxs('summary', { style: progressStyles.summary, children: [
         jsx(Codicon, { name: 'chevron-right', size: '0.75rem' }),
         `서브 에이전트 작업 ${displayJobs.length}개`,
-        progressQuery.isFetching ? jsx(GlyphSpinner, {}) : null
+        hasRunning && progressQuery.isFetching ? jsx(GlyphSpinner, {}) : null
       ] }),
       jsxs('div', { style: progressStyles.list, children: [
         ...displayJobs.map(job => {

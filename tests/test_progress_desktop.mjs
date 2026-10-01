@@ -226,7 +226,7 @@ function createHarness({ scope = baseScope(), surfaces = 1, optionalAtoms = true
         const operationIndex = args.argv.indexOf('model-router')
         const operation = args.argv[operationIndex + 1]
         const body = JSON.parse(args.argv.at(-1))
-        const data = responseBuilder(body, args.profile, operation)
+        const data = await responseBuilder(body, args.profile, operation)
         return { blocked: false, code: 0, output: `MODEL_ROUTER_JSON:${JSON.stringify(data)}\n` }
       }
       if (method === 'process.list') return processBuilder(args)
@@ -402,6 +402,84 @@ test('composer contribution polls exact progress body and same-session native pr
   assert.deepEqual(h.calls.find(call => call.method === 'process.list').args, { session_id: 'ui-runtime-1' })
   assert.equal(h.queryOptions.refetchInterval({ state: { error: null } }), 3_000)
   assert.equal(h.queryOptions.retry, false)
+})
+
+test('idle and pending empty progress polls never show a task-loading spinner', async () => {
+  const h = createHarness()
+  const hasSpinner = () => h.nodes().some(node => node.type === 'GlyphSpinner')
+  assert.equal(hasSpinner(), false, 'idle query state is not evidence of a running task')
+  let finish
+  h.setResponseBuilder(() => new Promise(resolve => { finish = resolve }))
+  const pending = h.fetch()
+  assert.equal(hasSpinner(), false, 'an empty registry poll must not masquerade as task execution')
+  let completed = false
+  pending.then(() => { completed = true })
+  await Promise.resolve()
+  assert.equal(completed, false, "deferred empty query must remain pending until resolved")
+  finish(progress(baseScope(), []))
+  const result = await pending
+  assert.equal(result.error, undefined)
+  assert.ok(result.data)
+  assert.doesNotMatch(h.text(), /진행 상황을 확인할 수 없습니다/)
+  assert.equal(hasSpinner(), false)
+  assert.doesNotMatch(h.text(), /서브 에이전트 작업/)
+})
+
+test('terminal-only retention and post-retention polls never show a running spinner', async () => {
+  const h = createHarness()
+  const rows = [job({ status: 'completed' })]
+  h.setResponseBuilder(body => progress(baseScope(), rows, { parent_session_id: body.parent_session_id, ui_session_id: body.ui_session_id }))
+  h.setProcessBuilder(() => processSnapshot(rows, 'exited'))
+  await h.fetch()
+  assert.match(h.text(), /완료/)
+  let finish
+  h.setResponseBuilder(body => new Promise(resolve => { finish = () => resolve(progress(baseScope(), rows, { parent_session_id: body.parent_session_id, ui_session_id: body.ui_session_id })) }))
+  const pending = h.fetch()
+  assert.equal(h.nodes().some(node => node.type === 'GlyphSpinner'), false, 'finished rows are not executing during a refresh')
+  let completed = false
+  pending.then(() => { completed = true })
+  await Promise.resolve()
+  assert.equal(completed, false)
+  finish()
+  const result = await pending
+  assert.equal(result.error, undefined)
+  assert.ok(result.data)
+  assert.match(h.text(), /완료/)
+  assert.doesNotMatch(h.text(), /진행 상황을 확인할 수 없습니다/)
+  h.setNow(59_000)
+  const expiredPoll = h.fetch()
+  assert.equal(h.nodes().some(node => node.type === 'GlyphSpinner'), false, 'expired finished rows must stay invisible while polling')
+  finish()
+  const expiredResult = await expiredPoll
+  assert.equal(expiredResult.error, undefined)
+  assert.ok(expiredResult.data)
+  assert.doesNotMatch(h.text(), /진행 상황을 확인할 수 없습니다/)
+  assert.doesNotMatch(h.text(), /서브 에이전트 작업/)
+})
+
+test('verified running rows retain refresh loading and their real task timer', async () => {
+  const h = createHarness()
+  const rows = [job()]
+  h.setResponseBuilder(body => progress(baseScope(), rows, { parent_session_id: body.parent_session_id, ui_session_id: body.ui_session_id }))
+  h.setProcessBuilder(() => processSnapshot(rows))
+  await h.fetch()
+  let finish
+  h.setResponseBuilder(body => new Promise(resolve => { finish = () => resolve(progress(baseScope(), rows, { parent_session_id: body.parent_session_id, ui_session_id: body.ui_session_id })) }))
+  const pending = h.fetch()
+  assert.equal(h.nodes().some(node => node.type === 'GlyphSpinner'), true)
+  assert.match(h.text(), /Inspect routing scope/)
+  assert.equal(h.intervals.some(item => item.ms === 1_000), true)
+  let completed = false
+  pending.then(() => { completed = true })
+  await Promise.resolve()
+  assert.equal(completed, false)
+  finish()
+  const result = await pending
+  assert.equal(result.error, undefined)
+  assert.ok(result.data)
+  assert.match(h.text(), /Inspect routing scope/)
+  assert.doesNotMatch(h.text(), /진행 상황을 확인할 수 없습니다/)
+  assert.equal(h.nodes().some(node => node.type === 'GlyphSpinner'), false)
 })
 
 test('terminal UI time freezes and the finished row clears on the first poll after eight seconds', async () => {
