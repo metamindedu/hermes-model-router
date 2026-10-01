@@ -621,6 +621,7 @@ class Router:
                     title=display_title,
                     role=role,
                     model=selected["model"],
+                    reasoning=selected["reasoning"],
                     provider=selected["provider"],
                     profile=profile,
                 )

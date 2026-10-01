@@ -32,6 +32,7 @@ def test_route_registers_the_actual_worker_and_snapshots_parent(tmp_path, monkey
         "title": "기능 구현",
         "role": "LIGHTWEIGHT",
         "model": service.light["model"],
+        "reasoning": service.light["reasoning"],
         "provider": service.light["provider"],
         "profile": "claire",
     }

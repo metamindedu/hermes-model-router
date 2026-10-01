@@ -43,6 +43,7 @@ class RouteRuntime:
         model: str = "미지정",
         provider: str = "미지정",
         profile: str = "default",
+        reasoning: str | None = None,
     ) -> str:
         from . import task_presentation
 
@@ -71,6 +72,7 @@ class RouteRuntime:
             profile=profile,
             job_id=job_id,
             cwd_basename=cwd_basename,
+            reasoning=reasoning,
         )
         # Adoption has already transferred ownership of the live process. Seed
         # exactly once before announcing the native card; failures carry its ID

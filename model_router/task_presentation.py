@@ -11,6 +11,7 @@ from typing import Any
 
 MAX_TITLE_CHARS = 96
 MAX_TERMINAL_SEED_CHARS = 2048
+DISPLAY_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 SAFE_FALLBACK_TEXT = "민감정보 보호를 위해 표시하지 않습니다."
 _CREDENTIAL_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s]+@")
 
@@ -130,6 +131,7 @@ def terminal_seed(
     profile: Any,
     job_id: Any,
     cwd_basename: Any,
+    reasoning: Any = None,
 ) -> str:
     """One bounded safe output seed; includes no prompt, logs, or environment."""
     purpose_key = purpose if isinstance(purpose, str) else ""
@@ -140,10 +142,12 @@ def terminal_seed(
     safe_profile = safe_display(profile if isinstance(profile, str) else "default", 96)
     safe_job_id = safe_display(job_id if isinstance(job_id, str) else "미지정", 64)
     safe_cwd = safe_display(cwd_basename if isinstance(cwd_basename, str) else "미지정", 128)
+    # Literal launch setting, not a claim about provider-normalized wire effort.
+    effort = reasoning if isinstance(reasoning, str) and reasoning in DISPLAY_EFFORTS else "미지정"
     seed = (
-        f"{native_command(safe_title, role, safe_model, purpose_key)}\n"
+        f"{native_command(safe_title, role, safe_model, purpose_key)} ({effort})\n"
         f"작업 목적: {label}\n"
-        f"대상 모델: {safe_model} · 제공자: {safe_provider}\n"
+        f"대상 모델: {safe_model} ({effort}) · 제공자: {safe_provider}\n"
         f"프로필: {safe_profile}\n"
         f"작업 ID: {safe_job_id}\n"
         f"작업 폴더: {safe_cwd}\n"
