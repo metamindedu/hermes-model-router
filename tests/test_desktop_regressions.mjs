@@ -22,6 +22,17 @@ test('late reload after gateway switch does not replace draft or unlock state',a
  assert.deepEqual(changes,[])
 })
 
+test('native RPC timeout outlives the backend command instead of expiring at default 30s',async()=>{
+ const start=source.indexOf('export async function nativeBackendCall')
+ const end=source.indexOf('\nfunction RouterPage',start)
+ const body=source.slice(start,end).replace('export ','')
+ let recorded
+ const host={state:{profile:{get:()=> 'default'}},request:async(method,args,timeoutMs)=>{recorded={method,args,timeoutMs};return {blocked:false,code:0,output:'MODEL_ROUTER_JSON:'+JSON.stringify({revision:1})}}}
+ const call=new Function('host',body+'; return nativeBackendCall;')(host)
+ await call('/status')
+ assert.ok(recorded.timeoutMs > recorded.args.timeout*1000, 'outer RPC must outlive subprocess timeout and never silently use 30s default')
+})
+
 test('native backend uses explicit-profile argv and framed JSON, no shell',async()=>{
  const start=source.indexOf('export async function nativeBackendCall')
  const end=source.indexOf('\nfunction RouterPage',start)

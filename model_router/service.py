@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -216,6 +217,8 @@ class Service:
         self._root_override = Path(root).expanduser().resolve(strict=False) if root is not None else None
         self.writer = writer
         self._plans: dict[str, dict[str, Any]] = {}
+        # Exact bytes, not mtime: every read still sees external/config CLI edits.
+        self._config_reads: dict[str, tuple[bytes, Any]] = {}
 
     @property
     def root(self) -> Path:
@@ -411,17 +414,36 @@ class Service:
             raise ServiceError("Hermes CLI launcher is unavailable")
         return str(candidate)
 
+    @staticmethod
+    def _loaded_cli_paths() -> list[str]:
+        """Same loaded core/dependencies, never renderer paths or boot a new venv."""
+        try:
+            import hermes_cli
+            import yaml
+            import rich
+            import pydantic
+            modules = (hermes_cli, yaml, rich, pydantic)
+            return list(dict.fromkeys(str(Path(module.__file__).resolve().parents[1]) for module in modules))
+        except (ImportError, TypeError, OSError):
+            return []
+
     def _env(self, profile: str) -> dict[str, str]:
         env = dict(os.environ)
         env["HERMES_HOME"] = str(self._profile_home(profile))
         for key in ("HERMES_PROFILE", "HERMES_SESSION_ID", "HERMES_PARENT_SESSION_ID", "HERMES_CHILD_SESSION_SOURCE"):
             env.pop(key, None)
+        paths = self._loaded_cli_paths()
+        if paths:
+            env["PYTHONPATH"] = os.pathsep.join(paths)
+            env.pop("PYTHONHOME", None)
+            env.pop("VIRTUAL_ENV", None)
         return env
 
     def _command(self, profile: str, *args: str) -> list[str]:
-        command = [self._cli_path(), "--profile", profile]
-        command.extend(args)
-        return command
+        # Native cli.exec uses this same-interpreter entry point. Re-running the
+        # package-manager launcher for each key can spend seconds per setting.
+        prefix = [sys.executable, "-m", "hermes_cli.main"] if self._loaded_cli_paths() else [self._cli_path()]
+        return [*prefix, "--profile", profile, *args]
 
     def _read_key(self, profile: str, key: str) -> Any:
         # Reads are local and narrowly selected; launching 143 CLI processes per
@@ -429,19 +451,65 @@ class Service:
         import yaml
         self._require_profile(profile)
         try:
-            value = yaml.safe_load((self._profile_home(profile) / "config.yaml").read_text(encoding="utf-8")) or {}
+            raw = (self._profile_home(profile) / "config.yaml").read_bytes()
+            cached = self._config_reads.get(profile)
+            if cached is None or cached[0] != raw:
+                value = yaml.safe_load(raw.decode("utf-8")) or {}
+                self._config_reads[profile] = (raw, value)
+            else:
+                value = cached[1]
             for part in key.split("."):
                 if not isinstance(value, dict):
                     return None
                 value = value.get(part)
-            return value
+            return copy.deepcopy(value)
         except (OSError, UnicodeError, yaml.YAMLError) as exc:
             raise ServiceError(f"could not read config key {key}") from exc
+
+    @contextmanager
+    def _batch_writes(self):
+        # Reuse the native config CLI dispatcher without re-importing every
+        # Hermes command/plugin once per key. Isolate each profile's process.
+        from .config_writer import ConfigWriter
+        prior = getattr(self, "_config_workers", None)
+        prior_receipt = getattr(self, "_batch_receipt", None)
+        workers = {}
+        self._batch_receipt = None
+        self._config_workers = workers if self.writer is None and self._loaded_cli_paths() else None
+        try:
+            yield
+        finally:
+            receipt = self._batch_receipt
+            self._config_workers = prior
+            self._batch_receipt = prior_receipt
+            failed = []
+            for profile, worker in workers.items():
+                try:
+                    if worker.close() is False:
+                        failed.append(profile)
+                except Exception:
+                    failed.append(profile)
+            if failed and receipt is not None:
+                receipt["config_status"] = receipt["status"]
+                receipt["status"] = "unknown"
+                receipt["cleanup_failed_profiles"] = sorted(failed)
+                self._store_apply(receipt)
 
     def _write_key(self, profile: str, key: str, value: Any) -> None:
         if self.writer is not None:
             self.writer(profile, key, value)
             return
+        workers = getattr(self, "_config_workers", None)
+        if workers is not None:
+            from .config_writer import ConfigWriter, ConfigWriterError
+            self._require_profile(profile)
+            try:
+                if profile not in workers:
+                    workers[profile] = ConfigWriter(self._env(profile))
+                workers[profile].set(key, value)
+                return
+            except (OSError, ConfigWriterError) as exc:
+                raise ServiceError(f"could not write config key {key}") from exc
         rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         try:
             result = subprocess.run(
@@ -867,6 +935,8 @@ class Service:
 
     def _store_apply(self, receipt: dict[str, Any]) -> None:
         _atomic_write(self.root / STATE_RELATIVE, _json_bytes(receipt))
+        if getattr(self, "_config_workers", None) is not None:
+            self._batch_receipt = receipt
 
     def _recent_apply(self) -> dict[str, Any] | None:
         value = _read_json(self.root / STATE_RELATIVE)
@@ -1494,7 +1564,7 @@ class Service:
     def apply(self, plan_id: str) -> dict[str, Any]:
         if not isinstance(plan_id, str) or re.fullmatch(r"[0-9a-f]{32}", plan_id) is None:
             raise ValueError("valid plan_id is required")
-        with _FileLock(self._lock_path):
+        with _FileLock(self._lock_path), self._batch_writes():
             plan_path = self.store_path.parent / "plans" / (plan_id + ".json")
             if plan_path.is_symlink() or not _inside(plan_path, self.store_path.parent):
                 raise ServiceError("unsafe preview plan path")

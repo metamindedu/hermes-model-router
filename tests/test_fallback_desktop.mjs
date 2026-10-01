@@ -79,7 +79,7 @@ function harness(initial = statusFixture()) {
   const hooks = [], effects = [], calls = []
   const state = Object.fromEntries(Object.entries({ profile: 'claire', connectionId: 'local', gateway: 'open' })
     .map(([key, value]) => [key, { value, get() { return this.value } }]))
-  let responder = operation => operation === 'fallback-preview'
+  let responder = operation => (operation === 'fallback-preview' || operation === 'preview')
     ? { plan_id: 'fallback-plan', changes: [{ profile: 'claire', field: 'fallbacks.native', before: 'off', after: 'on' }], warnings: [] }
     : { status: 'applied', revision: 13 }
   const host = { state, request: async (method, args) => {
@@ -131,7 +131,7 @@ function harness(initial = statusFixture()) {
     return node
   }
   const byId = id => find(node => node.props?.id === id)
-  const flush = async () => { for (let index = 0; index < 10; index++) await Promise.resolve(); render() }
+  const flush = async () => { for (let index = 0; index < 20; index++) await Promise.resolve(); render() }
   const click = id => {
     const node = byId(id)
     assert.ok(!node.props.disabled, `${id} should be enabled`)
@@ -203,10 +203,10 @@ test('all four target groups default to every editable profile without enabling 
   assert.equal(h.byId('routing-profile-other').props.checked, false)
   assert.equal(h.calls.length, 0)
   h.setResponder(() => ({ plan_id: 'models-only', changes: [], warnings: [] }))
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
-  assert.equal('fallback_updates' in h.calls.at(-1).body, false)
-  assert.deepEqual(h.calls.at(-1).body.routing_profiles, ['default', 'claire'])
+  assert.equal('fallback_updates' in h.calls.find(c => c.operation === 'preview').body, false)
+  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_profiles, ['default', 'claire'])
 })
 
 test('initial selection excludes readonly or unsupported profiles without hiding explicit later invalid selections', () => {
@@ -252,9 +252,9 @@ test('edited fallback uses all initially selected targets and default target sel
   h.click('native-fallback-preset-audited-non-openai')
   h.check('native-fallback-enabled', true)
   h.setResponder(() => ({ plan_id: 'all-native', changes: [], warnings: [] }))
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
-  const body = h.calls.at(-1).body
+  const body = h.calls.find(c => c.operation === 'preview').body
   assert.deepEqual(body.fallback_updates.map(row => row.profile), ['default', 'claire', 'other'])
   assert.ok(body.fallback_updates.every(row => Object.keys(row).sort().join(',') === 'native_fallback,profile'))
   assert.deepEqual(body.fallback_confirmations.map(row => [row.profile, row.scope]), [['default', 'native'], ['claire', 'native'], ['other', 'native']])
@@ -342,9 +342,9 @@ test('native scope handler sends exact fallback-preview payload, uses notice ins
   h.click('native-fallback-target-source')
   h.click('native-fallback-preset-audited-non-openai')
   h.check('native-fallback-enabled', true)
-  assert.equal(h.byId('native-fallback-preview').props.disabled, false)
+  assert.equal(h.byId('native-fallback-save').props.disabled, false)
   assert.throws(() => h.byId('native-fallback-cost-consent'))
-  await h.click('native-fallback-preview')
+  await h.click('native-fallback-save')
   await h.flush()
   const request = h.calls.find(call => call.operation === 'fallback-preview')
   assert.deepEqual(request.body, {
@@ -358,10 +358,7 @@ test('native scope handler sends exact fallback-preview payload, uses notice ins
   assert.equal(h.calls.some(call => call.operation === 'preview'), false)
   assert.throws(() => h.byId('routing-fallback-apply'))
   assert.throws(() => h.byId('native-fallback-review'))
-  const applying = h.click('native-fallback-apply')
   assert.equal(h.calls.some(call => call.operation === 'apply'), true)
-  await applying
-  await h.flush()
   assert.deepEqual(h.calls.filter(call => call.operation === 'apply').map(call => call.body), [{ plan_id: 'fallback-plan' }])
   assert.equal(h.byId('native-fallback-enabled').props.disabled, true)
 })
@@ -371,10 +368,10 @@ test('coding fallback handler sends only routing scope with both cost and fresh-
   h.click('routing-fallback-target-source')
   h.click('routing-fallback-preset-openai-api')
   h.check('routing-fallback-enabled', true)
-  assert.equal(h.byId('routing-fallback-preview').props.disabled, false)
+  assert.equal(h.byId('routing-fallback-save').props.disabled, false)
   assert.throws(() => h.byId('routing-fallback-cost-consent'))
   assert.throws(() => h.byId('routing-fallback-rerun-consent'))
-  await h.click('routing-fallback-preview')
+  await h.click('routing-fallback-save')
   await h.flush()
   const request = h.calls.find(call => call.operation === 'fallback-preview')
   assert.deepEqual(request.body, {
@@ -396,11 +393,11 @@ test('native fallback preview cannot return after source-profile change and unsu
   h.click('native-fallback-preset-audited-non-openai')
   h.check('native-fallback-enabled', true)
   let resolvePreview
-  h.setResponder(operation => operation === 'fallback-preview'
+  h.setResponder(operation => (operation === 'fallback-preview' || operation === 'preview')
     ? new Promise(resolve => { resolvePreview = resolve })
     : { status: 'applied' })
-  const pending = h.click('native-fallback-preview')
-  h.selectProfile('default')
+  const pending = h.click('native-fallback-save')
+  h.state.connectionId.value = 'other-source'; h.render()
   resolvePreview({ plan_id: 'stale-plan', changes: [{ profile: 'claire', field: 'fallbacks.native' }] })
   await pending
   await h.flush()
@@ -416,8 +413,8 @@ test('routing details exposes readonly fallback summary/navigation; no legacy ed
   assert.match(source, /href: '#fallback-management'/)
   assert.doesNotMatch(source, /id: 'fallback-enabled'/)
   assert.doesNotMatch(source, /updateFallback\s*=/)
-  assert.match(source, /ctx\.rest\('\/fallback-preview', \{ method: 'POST', body \}\)/)
-  assert.match(source, /selectedProfileRef\.current !== capturedProfile/)
+  assert.match(source, /operation: '\/fallback-preview'/)
+  assert.match(source, /selectedProfileRef\.current === snapshot\.profile/)
   assert.match(source, /applyPendingRef\.current = true/)
   assert.match(source, /needsReloadRef\.current = true/)
   assert.match(source, /role: 'alert'/)
@@ -457,7 +454,7 @@ test('delegation DTO distinguishes default/off/custom and fails closed for older
   assert.ok(helpers.delegationFallbackValidation({ mode: 'custom', chain: Array(6).fill({ provider: 'x', model: 'm' }) }))
   const h = harness(statusFixture())
   assert.ok(text(h.tree).includes('위임 폴백 설정을 확인할 수 없어 편집을 잠갔습니다.'))
-  assert.ok(![...walk(h.tree)].some(n => n.props?.id === 'delegation-fallback-preview'))
+  assert.ok(![...walk(h.tree)].some(n => n.props?.id === 'delegation-fallback-save'))
   assert.equal(h.calls.length, 0)
 })
 
@@ -482,18 +479,18 @@ test('delegation custom draft/template preserves other scopes and uses cost noti
   selectDelegationMode(h, 'custom')
   h.click('delegation-fallback-template-non-openai')
   assert.equal(h.calls.length, 0)
-  assert.equal(h.byId('delegation-fallback-preview').props.disabled, false)
+  assert.equal(h.byId('delegation-fallback-save').props.disabled, false)
   assert.throws(() => h.byId('delegation-fallback-cost-consent'))
-  h.click('delegation-fallback-preview')
+  h.click('delegation-fallback-save')
   await h.flush()
-  assert.equal(h.calls.length, 1)
+  assert.equal(h.calls.length, 2)
   const call = h.calls[0]
   assert.equal(call.operation, 'fallback-preview')
   assert.deepEqual(call.body.updates.map(x => Object.keys(x).sort()), [['delegation_fallback', 'profile']])
   assert.equal(call.body.updates[0].profile, 'claire')
   assert.equal(call.body.updates[0].delegation_fallback.mode, 'custom')
   assert.equal(call.body.confirmations[0].allow_task_rerun, false)
-  assert.ok(!h.calls.some(call => call.operation === 'apply'))
+  assert.equal(h.calls.filter(call => call.operation === 'apply').length, 1)
 })
 
 test('delegation off preview needs no cost consent and stale response cannot follow a profile switch', async () => {
@@ -501,9 +498,9 @@ test('delegation off preview needs no cost consent and stale response cannot fol
   selectDelegationMode(h, 'off')
   let resolve
   h.setResponder(() => new Promise(r => { resolve = r }))
-  h.click('delegation-fallback-preview')
+  h.click('delegation-fallback-save')
   assert.deepEqual(h.calls[0].body.confirmations, [])
-  h.selectProfile('other')
+  h.state.connectionId.value = 'other-source'; h.render()
   resolve({ plan_id: 'obsolete-delegation-plan', changes: [], warnings: [] })
   await h.flush()
   assert.ok(!text(h.tree).includes('obsolete-delegation-plan'))
@@ -511,7 +508,8 @@ test('delegation off preview needs no cost consent and stale response cannot fol
 })
 
 function globalButton(h, label) {
-  const node = [...walk(h.tree)].find(node => node.type === 'Button' && text(node) === label)
+  const node = [...walk(h.tree)].find(node => node.type === 'Button' &&
+    (label === '저장' ? node.props.id === 'global-save' : text(node) === label))
   assert.ok(node, `Button ${label} exists`)
   assert.equal(Boolean(node.props.disabled), false, `${label} enabled`)
   node.props.onClick()
@@ -546,7 +544,7 @@ test('whole-page handler includes all three changed fallbacks with independent t
   h.click('model-target-none')
   h.check('delegation-fallback-target-claire', false)
   h.check('delegation-fallback-target-other', true)
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
   const request = h.calls.find(call => call.operation === 'preview')
   assert.deepEqual(request.body.model_targets, [])
@@ -560,10 +558,8 @@ test('whole-page handler includes all three changed fallbacks with independent t
   assert.match(text(h.tree), /일반 대화 폴백/)
   assert.match(text(h.tree), /코딩·검증 라우팅 폴백/)
   assert.match(text(h.tree), /네이티브 서브 에이전트 폴백/)
-  assert.equal(h.calls.some(x => x.operation === 'fallback-preview' || x.operation === 'apply'), false)
-  h.check('confirm-preview', true)
-  globalButton(h, '확인 후 적용')
-  await h.flush()
+  assert.equal(h.calls.some(x => x.operation === 'fallback-preview'), false)
+  assert.throws(() => h.byId('confirm-preview'))
   assert.deepEqual(h.calls.filter(x => x.operation === 'apply').map(x => x.body), [{ plan_id: 'combined-plan' }])
   assert.equal(h.byId('native-fallback-enabled').props.disabled, true)
 })
@@ -571,7 +567,7 @@ test('whole-page handler includes all three changed fallbacks with independent t
 test('whole-page model-only preview preserves untouched fallback policies', async () => {
   const h = harness(delegationStatus())
   edit(h, 'model-main-model', 'changed-main')
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
   const body = h.calls.find(call => call.operation === 'preview').body
   assert.equal('fallback_updates' in body, false)
@@ -583,7 +579,7 @@ test('target-only selection copies that fallback but does not widen model target
   h.click('native-fallback-target-source')
   h.click('model-target-none')
   h.check('native-fallback-target-other', true)
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
   const body = h.calls.find(call => call.operation === 'preview').body
   assert.deepEqual(body.model_targets, [])
@@ -597,26 +593,26 @@ test('changed fallback with empty targets blocks whole preview instead of silent
   const h = harness(delegationStatus())
   h.click('native-fallback-preset-audited-non-openai')
   h.click('native-fallback-target-none')
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
   assert.equal(h.calls.length, 0)
   assert.match(text(h.tree), /0개/)
 })
 
-test('combined preview response cannot survive a later fallback edit', async () => {
+test('single save locks fallback edits until its one apply completes', async () => {
   const h = harness(delegationStatus())
   setupAllFallbackChanges(h)
   let resolve
   h.setResponder(operation => operation === 'preview' ? new Promise(r => { resolve = r }) : { status: 'applied' })
-  globalButton(h, '변경 내용 미리보기')
-  h.check('native-fallback-enabled', false)
+  globalButton(h, '저장')
+  assert.equal(h.byId('native-fallback-enabled').props.disabled, true)
   resolve({ plan_id: 'obsolete-combined', changes: [{ profile: 'claire', field: 'native_fallback' }] })
   await h.flush()
   assert.throws(() => h.byId('confirm-preview'))
-  assert.equal(h.calls.some(x => x.operation === 'apply'), false)
+  assert.equal(h.calls.filter(x => x.operation === 'apply').length, 1)
 })
 
-test('all fallback consent/review checkboxes are absent; notices and final whole-page review remain', async () => {
+test('all consent and review checkboxes are absent; explicit single save remains', async () => {
   const h = harness(delegationStatus())
   setupAllFallbackChanges(h)
   for (const id of ['native-fallback-cost-consent', 'routing-fallback-cost-consent', 'routing-fallback-rerun-consent', 'delegation-fallback-cost-consent']) {
@@ -624,10 +620,12 @@ test('all fallback consent/review checkboxes are absent; notices and final whole
   }
   assert.match(text(h.tree), /추가 비용/)
   assert.match(text(h.tree), /delegate_task/)
-  h.click('routing-fallback-preview')
+  h.click('routing-fallback-save')
   await h.flush()
   assert.throws(() => h.byId('routing-fallback-review'))
-  assert.equal(h.byId('routing-fallback-apply').props.disabled, false)
+  assert.throws(() => h.byId('routing-fallback-apply'))
+  assert.throws(() => h.byId('confirm-preview'))
+  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
 })
 
 test('combined validation compares coding spare with draft final primary', async () => {
@@ -636,7 +634,7 @@ test('combined validation compares coding spare with draft final primary', async
   h.check('routing-fallback-enabled', true)
   edit(h, 'model-main-provider', 'openai-api')
   edit(h, 'model-main-model', 'gpt-6-astra')
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
   assert.equal(h.calls.length, 0)
   assert.match(text(h.tree), /Heavy 기본 경로/)
@@ -651,12 +649,10 @@ test('saved target copy is not repeated on later model-only save while selection
     : { status: 'applied', revision: 13 })
   h.click('model-target-none')
   h.check('native-fallback-target-other', true)
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
-  assert.ok(h.calls.at(-1).body.fallback_updates)
-  h.check('confirm-preview', true)
-  globalButton(h, '확인 후 적용')
-  await h.flush()
+  assert.ok(h.calls.find(c => c.operation === 'preview').body.fallback_updates)
+  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
   // Someone subsequently changed the former copy target. Do not replay the copy.
   data.revision = 13
   data.profiles.find(x => x.name === 'other').fallbacks.native = nativeState({
@@ -667,12 +663,13 @@ test('saved target copy is not repeated on later model-only save while selection
   await h.flush()
   assert.equal(h.byId('native-fallback-target-other').props.checked, true)
   edit(h, 'model-main-model', 'later-model-only')
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
   assert.equal('fallback_updates' in h.calls.filter(x => x.operation === 'preview').at(-1).body, false)
   // A new explicit target action does create a new one-time copy intent.
+  globalButton(h, '실제 상태 확인 후 편집 재개'); await h.flush()
   h.check('native-fallback-target-other', false)
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
   assert.ok(h.calls.filter(x => x.operation === 'preview').at(-1).body.fallback_updates)
 })
@@ -687,7 +684,7 @@ test('unchanged saved routing fallback is checked against changed main model in 
   const h = harness(data)
   edit(h, 'model-main-provider', 'api')
   edit(h, 'model-main-model', 'saved-heavy')
-  globalButton(h, '변경 내용 미리보기')
+  globalButton(h, '저장')
   await h.flush()
   assert.equal(h.calls.length, 0)
   assert.match(text(h.tree), /저장된 코딩·검증 라우팅 폴백/)

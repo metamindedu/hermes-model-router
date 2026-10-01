@@ -726,7 +726,7 @@ export async function nativeBackendCall(path, options = {}) {
     argv: ['--profile', profile, 'model-router', operation, '--body', JSON.stringify(options.body || {})],
     profile,
     timeout: 180
-  })
+  }, 210000)
   if (reply.blocked) throw new Error(reply.hint || '요청이 차단되었습니다.')
   const line = String(reply.output || '').split(/\r?\n/).find(value => value.startsWith('MODEL_ROUTER_JSON:'))
   if (!line) throw new Error('플러그인 응답을 확인할 수 없습니다. 활성화 상태를 확인하세요.')
@@ -768,6 +768,7 @@ function RouterPage({ ctx: pluginContext }) {
   const applyPendingRef = useRef(false)
   const needsReloadRef = useRef(false)
   const applyScopeRef = useRef(null)
+  const applyPhaseRef = useRef(null)
   const selectedProfileRef = useRef(null)
   selectedProfileRef.current = selectedProfile
 
@@ -799,12 +800,19 @@ function RouterPage({ ctx: pluginContext }) {
     setFallbackError('')
     setPageError('')
     if (applyPendingRef.current) {
+      const wasApplying = applyPhaseRef.current === 'apply'
+      const originalScope = applyScopeRef.current || readyScope
       applyPendingRef.current = false
+      applyPhaseRef.current = null
       setApplyPending(false)
-      needsReloadRef.scopeKey = applyScopeRef.current || readyScope
-      setApplyOutcome({ kind: 'unknown', message: '적용 도중 연결 또는 프로필이 바뀌어 결과를 확인할 수 없습니다. 다시 적용하지 마세요. 적용을 시작한 원래 프로필·연결로 돌아가 실제 상태를 새로고침하세요.' })
-      needsReloadRef.current = true
-      setNeedsReload(true)
+      if (wasApplying) {
+        needsReloadRef.scopeKey = originalScope
+        setApplyOutcome({ kind: 'unknown', message: '적용 도중 연결 또는 프로필이 바뀌어 결과를 확인할 수 없습니다. 다시 적용하지 마세요. 적용을 시작한 원래 프로필·연결로 돌아가 실제 상태를 새로고침하세요.' })
+        needsReloadRef.current = true
+        setNeedsReload(true)
+      } else if (!needsReloadRef.current) {
+        setApplyOutcome(null)
+      }
     } else if (!needsReloadRef.current) {
       setApplyOutcome(null)
     }
@@ -988,189 +996,144 @@ function RouterPage({ ctx: pluginContext }) {
     return !delegationFallbackError
   }
 
-  const handleFallbackPreview = async scope => {
+  const captureSaveSnapshot = () => freezeDeep({
+    scopeKey,
+    profile: selectedProfile,
+    revision: statusQuery.data.revision,
+    draft: deepClone(draft),
+    modelTargets: [...selectedTargets],
+    routingProfiles: [...routingProfiles],
+    fallbackDrafts: deepClone(fallbackDrafts),
+    fallbackBaselines: deepClone(fallbackBaselines),
+    fallbackTargets: deepClone(fallbackTargets),
+    fallbackTargetEdits: { ...fallbackTargetEdits },
+    profiles: deepClone(profiles),
+    fallbackSupported
+  })
+
+  const isSaveCurrent = (snapshot, token) => generationRef.current === token &&
+    selectedProfileRef.current === snapshot.profile &&
+    scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) === snapshot.scopeKey
+
+  const releaseSaveLock = token => {
+    if (generationRef.current !== token || !applyPendingRef.current) return
+    applyPendingRef.current = false
+    applyPhaseRef.current = null
+    setApplyPending(false)
+  }
+
+  const markApplyUnknown = (snapshot, message, result = null) => {
+    setApplyOutcome({ kind: 'unknown', message, result })
+    needsReloadRef.scopeKey = snapshot.scopeKey
+    needsReloadRef.current = true
+    setNeedsReload(true)
+  }
+
+  const recordApplyReceipt = (snapshot, receipt) => {
+    if (isPartialReceipt(receipt)) {
+      setApplyOutcome({ kind: 'partial', result: receipt })
+    } else if (receipt?.status === 'applied' || receipt?.status === 'no_change') {
+      setApplyOutcome({ kind: 'success', result: receipt })
+    } else {
+      markApplyUnknown(snapshot, receipt?.error || '적용 결과를 확인할 수 없습니다. 다시 저장하지 말고 실제 상태를 새로고침하세요.', receipt)
+      return
+    }
+    needsReloadRef.scopeKey = snapshot.scopeKey
+    needsReloadRef.current = true
+    setNeedsReload(true)
+  }
+
+  const runSave = async ({ operation, scope = null, snapshot, prepare }) => {
+    if (!snapshot || applyPendingRef.current || needsReloadRef.current) return
+    const token = ++generationRef.current
+    applyPendingRef.current = true
+    applyScopeRef.current = snapshot.scopeKey
+    applyPhaseRef.current = 'preview'
+    setApplyPending(true)
+    setPreview(null)
+    setFallbackPreview(null)
+    setPageError('')
+    setFallbackError('')
+    let applyStarted = false
+    try {
+      const prepared = prepare()
+      if (prepared.errors?.length) throw new Error(prepared.errors.join(' '))
+      const result = await ctx.rest(operation, { method: 'POST', body: prepared.body })
+      if (!isSaveCurrent(snapshot, token)) return
+      if (!result || typeof result.plan_id !== 'string' || !Array.isArray(result.changes)) {
+        throw new Error('저장 계획 응답이 올바르지 않습니다. 설정은 변경되지 않았습니다.')
+      }
+      const planId = result.plan_id
+      if (!isSaveCurrent(snapshot, token)) return
+      applyStarted = true
+      applyPhaseRef.current = 'apply'
+      const receipt = await ctx.rest('/apply', { method: 'POST', body: { plan_id: planId }, timeoutMs: 180000 })
+      if (!isSaveCurrent(snapshot, token)) {
+        markApplyUnknown(snapshot, '저장 도중 연결 또는 프로필이 바뀌어 결과를 확인할 수 없습니다. 다시 저장하지 마세요. 원래 연결·프로필로 돌아가 실제 상태를 새로고침하세요.')
+        return
+      }
+      recordApplyReceipt(snapshot, receipt)
+    } catch (error) {
+      if (applyStarted) {
+        markApplyUnknown(snapshot, error?.message || '저장 결과를 확인할 수 없습니다. 다시 저장하지 말고 실제 상태를 새로고침하세요.')
+      } else if (isSaveCurrent(snapshot, token)) {
+        const message = `저장되지 않았습니다. ${error?.message || '설정 검증에 실패했습니다.'}`
+        if (scope) setFallbackError({ scope, message })
+        else setPageError(message)
+      }
+    } finally {
+      if (applyStarted && !isSaveCurrent(snapshot, token)) {
+        markApplyUnknown(snapshot, '저장 도중 연결 또는 프로필이 바뀌어 결과를 확인할 수 없습니다. 다시 저장하지 마세요. 원래 연결·프로필로 돌아가 실제 상태를 새로고침하세요.')
+      }
+      releaseSaveLock(token)
+    }
+  }
+
+  const saveFallback = scope => {
     if (renderGeneration !== generationRef.current || applyPendingRef.current || needsReloadRef.current || !canPreviewFallback(scope)) return
-    const capturedScope = scopeKey
-    const capturedProfile = selectedProfile
+    const snapshot = captureSaveSnapshot()
     const targetNames = scope === 'native' ? [...nativeFallbackTargets] : scope === 'routing' ? [...routingFallbackTargets] : [...delegationFallbackTargets]
     const value = deepClone(scope === 'native' ? nativeFallbackDraft : scope === 'routing' ? routingFallbackDraft : delegationFallbackDraft)
-    const token = ++generationRef.current
-    setPreview(null)
-    setPreviewPending(false)
-    setReviewed(false)
-    setFallbackPreview(null)
-    setFallbackError('')
-    setPageError('')
-    setFallbackPreviewPending(true)
-    try {
-      const body = buildFallbackPreviewBody(statusQuery.data.revision, scope, targetNames, value, profiles)
-      const result = await ctx.rest('/fallback-preview', { method: 'POST', body })
-      if (generationRef.current !== token || selectedProfileRef.current !== capturedProfile ||
-        scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope) return
-      if (!result || typeof result.plan_id !== 'string' || !Array.isArray(result.changes)) {
-        throw new Error('대체 설정 미리보기 응답이 올바르지 않습니다. 설정은 변경되지 않았습니다.')
-      }
-      setFallbackPreview({ ...result, scopeKey: capturedScope, generation: token, profile: capturedProfile, scope })
-    } catch (error) {
-      if (generationRef.current === token && selectedProfileRef.current === capturedProfile) {
-        setFallbackError({ scope, message: error?.message || '대체 설정 미리보기를 만들지 못했습니다.' })
-      }
-    } finally {
-      if (generationRef.current === token) setFallbackPreviewPending(false)
-    }
+    return runSave({
+      operation: '/fallback-preview', scope, snapshot,
+      prepare: () => ({ body: buildFallbackPreviewBody(snapshot.revision, scope, targetNames, value, snapshot.profiles), errors: [] })
+    })
   }
 
-  const handleFallbackApply = async scope => {
-    if (!fallbackPreviewMatchesScope(fallbackPreview, scopeKey, generationRef.current, selectedProfile, scope) ||
-      applyPendingRef.current || needsReloadRef.current || disabled || !fallbackPreview?.plan_id) return
-    const token = generationRef.current
-    const capturedScope = scopeKey
-    const capturedProfile = selectedProfile
-    const planId = fallbackPreview.plan_id
-    applyPendingRef.current = true
-    applyScopeRef.current = capturedScope
-    setApplyPending(true)
-    setPreview(null)
-    setReviewed(false)
-    setFallbackPreview(null)
-    setPageError('')
-    setFallbackError('')
-    try {
-      const result = await ctx.rest('/apply', { method: 'POST', body: { plan_id: planId }, timeoutMs: 180000 })
-      if (scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope ||
-        selectedProfileRef.current !== capturedProfile) {
-        generationRef.current += 1
-        return
+
+  const saveAll = () => {
+    if (renderGeneration !== generationRef.current || !currentRow || !draft || !statusQuery.data || applyPendingRef.current || needsReloadRef.current) return
+    const snapshot = captureSaveSnapshot()
+    return runSave({
+      operation: '/preview', snapshot,
+      prepare: () => {
+        const combined = buildCombinedPreviewBody(
+          snapshot.revision,
+          snapshot.profile,
+          snapshot.draft,
+          snapshot.modelTargets,
+          snapshot.routingProfiles,
+          snapshot.fallbackDrafts,
+          snapshot.fallbackBaselines,
+          snapshot.fallbackTargets,
+          snapshot.profiles,
+          snapshot.fallbackSupported,
+          snapshot.fallbackTargetEdits
+        )
+        const routingUpdates = (combined.body.fallback_updates || [])
+          .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
+          .map(update => update.profile)
+        const projectedErrors = projectedRoutingFallbackErrors(snapshot.profiles, {
+          profile: snapshot.profile,
+          models: snapshot.draft.models,
+          routing: combined.body.routing,
+          model_targets: combined.body.model_targets
+        }, routingUpdates)
+        return { body: combined.body, errors: [...combined.errors, ...projectedErrors] }
       }
-      if (generationRef.current !== token) return
-      const partial = isPartialReceipt(result)
-      if (result?.ok === false || result?.status === 'failed' || result?.status === 'error') {
-        setApplyOutcome({ kind: 'unknown', message: result.error || '백엔드가 적용 실패를 보고했습니다. 다시 적용하지 말고 실제 상태를 새로고침하세요.', result })
-      } else {
-        setApplyOutcome({ kind: partial ? 'partial' : 'success', result })
-      }
-      needsReloadRef.scopeKey = capturedScope
-      needsReloadRef.current = true
-      setNeedsReload(true)
-    } catch (error) {
-      if (scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope ||
-        selectedProfileRef.current !== capturedProfile) {
-        generationRef.current += 1
-        return
-      }
-      if (generationRef.current === token) {
-        setApplyOutcome({ kind: 'unknown', message: error?.message || '적용 결과를 확인할 수 없습니다.' })
-        needsReloadRef.scopeKey = capturedScope
-        needsReloadRef.current = true
-        setNeedsReload(true)
-      }
-    } finally {
-      if (generationRef.current === token) {
-        applyPendingRef.current = false
-        setApplyPending(false)
-      }
-    }
+    })
   }
 
-  const handlePreview = async () => {
-    if (!currentRow || !draft || !statusQuery.data || disabled || applyPendingRef.current || needsReloadRef.current) return
-    const token = ++generationRef.current
-    const capturedScope = scopeKey
-    const capturedProfile = selectedProfile
-    setPreview(null)
-    setReviewed(false)
-    setFallbackPreview(null)
-    setFallbackPreviewPending(false)
-    setFallbackError('')
-    setPageError('')
-    setPreviewPending(true)
-    try {
-      const combined = buildCombinedPreviewBody(
-        statusQuery.data.revision,
-        capturedProfile,
-        draft,
-        selectedTargets,
-        routingProfiles,
-        fallbackDrafts,
-        fallbackBaselines,
-        fallbackTargets,
-        profiles,
-        fallbackSupported,
-        fallbackTargetEdits
-      )
-      if (combined.errors.length) throw new Error(combined.errors.join(' '))
-      const routingUpdates = (combined.body.fallback_updates || [])
-        .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
-        .map(update => update.profile)
-      const projectedErrors = projectedRoutingFallbackErrors(profiles, {
-        profile: capturedProfile,
-        models: draft.models,
-        routing: combined.body.routing,
-        model_targets: combined.body.model_targets
-      }, routingUpdates)
-      if (projectedErrors.length) throw new Error(projectedErrors.join(' '))
-      const result = await ctx.rest('/preview', { method: 'POST', body: combined.body })
-      if (generationRef.current !== token || scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope) return
-      if (!result || typeof result.plan_id !== 'string' || !Array.isArray(result.changes)) {
-        throw new Error('미리보기 응답이 올바르지 않습니다. 설정은 변경되지 않았습니다.')
-      }
-      setPreview({ ...result, scopeKey: capturedScope, generation: token, profile: capturedProfile })
-    } catch (error) {
-      if (generationRef.current === token) setPageError(error?.message || '변경 내용을 미리보지 못했습니다.')
-    } finally {
-      if (generationRef.current === token) setPreviewPending(false)
-    }
-  }
-
-  const handleApply = async () => {
-    if (!previewMatchesScope(preview, scopeKey, generationRef.current, selectedProfile) || !reviewed || applyPendingRef.current || needsReloadRef.current || disabled || !preview?.plan_id) return
-    const token = generationRef.current
-    const capturedScope = scopeKey
-    const capturedProfile = selectedProfile
-    const planId = preview.plan_id
-    applyPendingRef.current = true
-    applyScopeRef.current = capturedScope
-    setApplyPending(true)
-    setPreview(null)
-    setReviewed(false)
-    setFallbackPreview(null)
-    setFallbackPreviewPending(false)
-    setPageError('')
-    try {
-      const result = await ctx.rest('/apply', { method: 'POST', body: { plan_id: planId }, timeoutMs: 180000 })
-      if (scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope ||
-        selectedProfileRef.current !== capturedProfile) {
-        generationRef.current += 1
-        return
-      }
-      if (generationRef.current !== token) return
-      const partial = isPartialReceipt(result)
-      if (result?.ok === false || result?.status === 'failed' || result?.status === 'error') {
-        setApplyOutcome({ kind: 'unknown', message: result.error || '백엔드가 적용 실패를 보고했습니다. 다시 적용하지 말고 실제 상태를 새로고침하세요.', result })
-      } else {
-        setApplyOutcome({ kind: partial ? 'partial' : 'success', result })
-      }
-      needsReloadRef.scopeKey = capturedScope
-      needsReloadRef.current = true
-      setNeedsReload(true)
-    } catch (error) {
-      if (scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope) {
-        generationRef.current += 1
-        return
-      }
-      if (generationRef.current === token) {
-        setApplyOutcome({ kind: 'unknown', message: error?.message || '적용 결과를 확인할 수 없습니다.' })
-        needsReloadRef.scopeKey = capturedScope
-        needsReloadRef.current = true
-        setNeedsReload(true)
-      }
-    } finally {
-      if (generationRef.current === token) {
-        applyPendingRef.current = false
-        setApplyPending(false)
-      }
-    }
-  }
 
   const reloadStatus = async () => {
     if (applyPendingRef.current) return
@@ -1291,7 +1254,7 @@ function RouterPage({ ctx: pluginContext }) {
           jsx(Button, { id: 'model-target-none', size: 'sm', variant: 'secondary', disabled, onClick: selectNoTargets, children: '모두 해제' })
         ] })
       ] }),
-      allTargetsSelected ? jsx('p', { role: 'note', style: styles.warning, children: `모든 ${profileNames.length}개 프로필이 모델 적용 대상입니다. 넓은 범위이므로 미리보기에서 프로필별 변경을 확인한 뒤 적용하세요.` }) : null,
+      allTargetsSelected ? jsx('p', { role: 'note', style: styles.warning, children: `모든 ${profileNames.length}개 프로필이 모델 적용 대상입니다. 아래 초안 요약에서 적용 범위를 확인하세요.` }) : null,
       jsx('div', { style: styles.profileList, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${row.name}`, label: row.name, checked: selectedTargets.includes(row.name), disabled, onChange: checked => toggleModelTarget(row.name, checked) }) }, row.name)) })
     ]
   })
@@ -1353,22 +1316,6 @@ function RouterPage({ ctx: pluginContext }) {
     ]
   })
 
-  const fallbackPreviewPanel = scope => {
-    const current = fallbackPreviewMatchesScope(fallbackPreview, scopeKey, generationRef.current, selectedProfile, scope)
-    if (!current) return null
-    const changes = Array.isArray(fallbackPreview.changes) ? fallbackPreview.changes : []
-    return jsxs('div', { style: styles.section, children: [
-      jsxs('div', { style: styles.statusLine, children: [jsx(Badge, { variant: 'muted', children: `${changes.length}개 변경` }), fallbackPreview.expires_at ? jsx('span', { style: styles.hint, children: `만료: ${fallbackPreview.expires_at}` }) : null] }),
-      changes.length ? jsxs('div', { role: 'list', style: styles.changes, children: changes.map((change, index) => jsxs('div', { role: 'listitem', style: styles.change, children: [
-        jsx('div', { style: styles.changeLabel, children: `${change.profile || '—'} · ${previewFieldLabel(change.field)}` }),
-        jsxs('div', { style: styles.changeValue, children: [jsx('span', { style: styles.hint, children: '변경 전' }), jsx('code', { style: styles.value, children: readableValue(change.before) })] }),
-        jsxs('div', { style: styles.changeValue, children: [jsx('span', { style: styles.hint, children: '변경 후' }), jsx('code', { style: styles.value, children: readableValue(change.after) })] })
-      ] }, `${change.profile || ''}:${change.field || index}`)) }) : jsx('p', { style: styles.message, children: '변경 사항이 없습니다. 적용할 내용이 없습니다.' }),
-      Array.isArray(fallbackPreview.warnings) && fallbackPreview.warnings.length ? jsx('div', { style: styles.warning, children: fallbackPreview.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: readableValue(warning) }, index)) }) : null,
-      changes.length ? jsx('div', { style: styles.actions, children: jsx(Button, { id: `${scope}-fallback-apply`, size: 'sm', disabled: applyPending || needsReload, onClick: () => void handleFallbackApply(scope), children: applyPending ? '적용 중…' : `${fallbackScopeTitle(scope)} 적용` }) }) : null
-    ] })
-  }
-
   const nativeStatus = currentRow?.fallbacks?.native
   const routingFallbackStatus = currentRow?.fallbacks?.routing
   const nativeEditable = fallbackSupported && nativeStatus?.editable === true && Boolean(nativeFallbackDraft)
@@ -1413,8 +1360,7 @@ function RouterPage({ ctx: pluginContext }) {
       jsx('p', { role: 'note', style: styles.hint, children: '대체 모델 제공자의 요금 정책에 따라 추가 비용이 발생할 수 있습니다. 켜기나 모델 변경은 초안에만 반영되며, 미리보기 후 직접 적용해야 저장됩니다.' }),
       fallbackTargetGroup('native', nativeFallbackTargets, nativeEditable),
       fallbackError?.scope === 'native' ? jsx('p', { role: 'alert', style: styles.warning, children: fallbackError.message }) : null,
-      jsx(Button, { id: 'native-fallback-preview', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('native'), onClick: () => void handleFallbackPreview('native'), children: fallbackPreviewPending ? '미리보기 계산 중…' : '대화 전환만 미리보기' }),
-      fallbackPreviewPanel('native')
+      jsx(Button, { id: 'native-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('native'), onClick: () => void saveFallback('native'), children: applyPending ? '저장 중…' : '저장' })
     ] }) : null
   ] })
 
@@ -1442,8 +1388,7 @@ function RouterPage({ ctx: pluginContext }) {
       jsx('p', { role: 'note', style: styles.hint, children: '예비 모델 사용에는 추가 비용이 발생할 수 있습니다. 조건을 만족할 때 같은 Heavy/Light 등급의 새 작업을 최대 한 번 시도하며, 이전 작업의 부분 답변을 이어받지 않습니다.' }),
       fallbackTargetGroup('routing', routingFallbackTargets, routingEditable),
       fallbackError?.scope === 'routing' ? jsx('p', { role: 'alert', style: styles.warning, children: fallbackError.message }) : null,
-      jsx(Button, { id: 'routing-fallback-preview', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('routing'), onClick: () => void handleFallbackPreview('routing'), children: fallbackPreviewPending ? '미리보기 계산 중…' : '코딩·검증 폴백만 미리보기' }),
-      fallbackPreviewPanel('routing')
+      jsx(Button, { id: 'routing-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('routing'), onClick: () => void saveFallback('routing'), children: applyPending ? '저장 중…' : '저장' })
     ] }) : jsx('div', { role: 'note', style: styles.warning, children: routingFallbackStatus ? '현재 코딩 대체 정책은 표시만 가능합니다.' : '이 프로필의 코딩 fallback 상태를 사용할 수 없습니다. 기존 설정은 변경되지 않습니다.' })
   ] })
 
@@ -1498,8 +1443,7 @@ function RouterPage({ ctx: pluginContext }) {
       jsx('p', { role: 'note', style: styles.hint, children: '서브 에이전트의 예비 모델 사용에도 추가 비용이 발생할 수 있습니다. 기본 규칙을 사용하면 메인 대화의 이후 폴백 변경이 모델을 따로 지정하지 않은 서브 에이전트에도 반영될 수 있습니다.' }),
       fallbackTargetGroup('delegation', delegationFallbackTargets, delegationEditable),
       fallbackError?.scope === 'delegation' ? jsx('p', { role: 'alert', style: styles.warning, children: fallbackError.message }) : null,
-      jsx(Button, { id: 'delegation-fallback-preview', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('delegation'), onClick: () => void handleFallbackPreview('delegation'), children: fallbackPreviewPending ? '미리보기 계산 중…' : '네이티브 위임 폴백만 미리보기' }),
-      fallbackPreviewPanel('delegation')
+      jsx(Button, { id: 'delegation-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('delegation'), onClick: () => void saveFallback('delegation'), children: applyPending ? '저장 중…' : '저장' })
     ] }) : null
   ] })
 
@@ -1512,16 +1456,39 @@ function RouterPage({ ctx: pluginContext }) {
     jsx('div', { style: styles.roleGrid, children: [nativeFallbackPanel, routingFallbackPanel, delegationFallbackPanel] })
   ] }))
 
-  const previewChanges = validPreview ? (Array.isArray(preview.changes) ? preview.changes : []) : []
-  const canPreview = Boolean(currentRow && draft && statusQuery.data && !disabled && !previewPending)
+  const localCombinedSummary = currentRow && draft && statusQuery.data
+    ? buildCombinedPreviewBody(statusQuery.data.revision, selectedProfile, draft, selectedTargets, routingProfiles,
+      fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported, fallbackTargetEdits)
+    : null
+  const summaryRoutingUpdates = (localCombinedSummary?.body.fallback_updates || [])
+    .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
+    .map(update => update.profile)
+  const summaryProjectedErrors = localCombinedSummary && draft ? projectedRoutingFallbackErrors(profiles, {
+    profile: selectedProfile,
+    models: draft.models,
+    routing: localCombinedSummary.body.routing,
+    model_targets: localCombinedSummary.body.model_targets
+  }, summaryRoutingUpdates) : []
+  const modifiedFallbackSummary = [
+    { scope: 'native', label: '일반 대화', changed: nativeFallbackDraftChanged || fallbackTargetEdits.native, count: nativeFallbackTargets.length },
+    { scope: 'routing', label: '코딩·검증', changed: routingFallbackDraftChanged || fallbackTargetEdits.routing, count: routingFallbackTargets.length },
+    { scope: 'delegation', label: '네이티브 위임', changed: delegationFallbackDraftChanged || fallbackTargetEdits.delegation, count: delegationFallbackTargets.length }
+  ].filter(item => item.changed)
+  const scopeDraftErrors = [
+    [nativeFallbackDraftChanged || fallbackTargetEdits.native, nativeFallbackError],
+    [routingFallbackDraftChanged || fallbackTargetEdits.routing, routingFallbackError],
+    [delegationFallbackDraftChanged || fallbackTargetEdits.delegation, delegationFallbackError]
+  ].filter(([changed, error]) => changed && error).map(([, error]) => error)
+  const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors])]
+  const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled)
 
   return jsxs('main', {
     style: styles.page,
     children: [
-      jsxs('header', { style: styles.header, children: [jsxs('div', { children: [jsx('p', { style: { color: 'var(--ui-accent)', fontSize: '0.72rem', fontWeight: 650, letterSpacing: '0.08em', margin: '0 0 0.45rem' }, children: 'HERMES DESKTOP · 모델 제어' }), jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsx('p', { style: styles.subtitle, children: '프로필별 모델 값을 관리하고 작업 유형에 맞는 라우팅을 구성합니다. 설정은 미리보기와 별도 적용 단계를 거쳐 반영됩니다.' })] }), jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching || applyPending, onClick: () => void reloadStatus(), children: '상태 새로고침' })] }),
+      jsxs('header', { style: styles.header, children: [jsxs('div', { children: [jsx('p', { style: { color: 'var(--ui-accent)', fontSize: '0.72rem', fontWeight: 650, letterSpacing: '0.08em', margin: '0 0 0.45rem' }, children: 'HERMES DESKTOP · 모델 제어' }), jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsx('p', { style: styles.subtitle, children: '프로필별 모델 값을 관리하고 작업 유형에 맞는 라우팅을 구성합니다. 저장을 누르면 서버 검증 후 한 번에 적용됩니다.' })] }), jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching || applyPending, onClick: () => void reloadStatus(), children: '상태 새로고침' })] }),
       jsx('div', { role: 'note', style: styles.notice, children: '새 규칙은 이후에 시작하는 세션과 허용된 작업에 적용됩니다. 이미 진행 중인 세션의 모델은 자동으로 바뀌지 않습니다.' }),
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
-      profiles.length ? section('대상 프로필', '편집할 설정 프로필을 고릅니다. 현재 Desktop 연결·프로필 범위가 바뀌면 대기 중인 미리보기는 폐기됩니다.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `현재 Desktop 프로필: ${activeProfile || '확인 중'} · 연결: ${connectionId || 'local'} · 게이트웨이: ${gateway || 'idle'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
+      profiles.length ? section('대상 프로필', '편집할 설정 프로필을 고릅니다. 저장 검증 중 범위가 바뀌면 적용 전 요청은 안전하게 취소됩니다.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `현재 Desktop 프로필: ${activeProfile || '확인 중'} · 연결: ${connectionId || 'local'} · 게이트웨이: ${gateway || 'idle'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
       profiles.length ? section('모델 대상', '네 역할의 값을 한 번 편집하고, 아래 별도 선택 목록에 체크한 프로필에만 모델 값을 적용합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [modelFields, modelTargetGroup] })) : null,
       profiles.length ? section('작업 라우팅', '무거운 작업과 가벼운 작업은 각각 독립적으로 대상을 정합니다. 라우팅 활성 프로필 선택은 모델 설정 적용 대상과 별개입니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { style: styles.hint, children: routingSummary }),
@@ -1534,20 +1501,17 @@ function RouterPage({ ctx: pluginContext }) {
       pageError ? jsx('div', { role: 'alert', style: styles.warning, children: pageError }) : null,
       applyOutcome ? jsxs('div', { role: 'status', 'aria-live': 'polite', style: applyOutcome.kind === 'success' ? styles.message : styles.warning, children: [jsx('strong', { children: applyOutcome.kind === 'success' ? '적용 요청이 완료되었습니다.' : applyOutcome.kind === 'partial' ? '일부 설정만 적용되었을 수 있습니다.' : '적용 결과를 확인할 수 없습니다.' }), jsx('p', { style: styles.hint, children: applyOutcome.message || (applyOutcome.kind === 'success' ? '실제 상태를 새로고침해 확인하세요. 같은 계획을 다시 적용하지 않습니다.' : '다시 적용하지 마세요. 상태를 새로고침해 실제 반영 여부를 확인하세요.') }), applyOutcome.result ? jsx('p', { style: styles.value, children: readableValue(applyOutcome.result) }) : null] }) : null,
       needsReload ? jsx('div', { style: styles.actions, children: jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching, onClick: () => void reloadStatus(), children: statusQuery.isFetching ? '상태 확인 중…' : '실제 상태 확인 후 편집 재개' }) }) : null,
-      profiles.length && !needsReload ? section('전체 설정 미리보기 및 저장', '모델·라우팅과 수정한 폴백을 함께 확인하고 한 번에 저장합니다. 폴백은 각 카드에서 선택한 프로필에만 적용됩니다. 미리보기만으로 설정은 바뀌지 않습니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
-        jsx('p', { style: styles.hint, children: `설정 revision: ${statusQuery.data?.revision ?? '확인할 수 없음'} · 모델 대상 ${targetSummary} · 라우팅 활성 ${routingProfiles.length}개` }),
-        jsx(Button, { size: 'sm', variant: 'secondary', disabled: !canPreview, onClick: () => void handlePreview(), children: previewPending ? '미리보기 계산 중…' : '변경 내용 미리보기' }),
-        validPreview ? jsxs('div', { style: styles.section, children: [
-          jsxs('div', { style: styles.statusLine, children: [jsx(Badge, { variant: 'muted', children: `${previewChanges.length}개 변경` }), preview.expires_at ? jsx('span', { style: styles.hint, children: `만료: ${preview.expires_at}` }) : null] }),
-          allTargetsSelected && previewChanges.length ? jsx('div', { role: 'alert', style: styles.warning, children: `광범위한 변경: 모든 ${profileNames.length}개 프로필이 모델 적용 대상입니다. 각 프로필의 변경 전후를 확인하고, 아래 확인란을 선택해야 적용할 수 있습니다.` }) : null,
-          previewChanges.length ? jsxs('div', { role: 'list', style: styles.changes, children: previewChanges.map((change, index) => jsxs('div', { role: 'listitem', style: styles.change, children: [
-            jsx('div', { style: styles.changeLabel, children: `${change.profile || '—'} · ${change.field || '항목'}` }),
-            jsxs('div', { style: styles.changeValue, children: [jsx('span', { style: styles.hint, children: '변경 전' }), jsx('code', { style: styles.value, children: readableValue(change.before) })] }),
-            jsxs('div', { style: styles.changeValue, children: [jsx('span', { style: styles.hint, children: '변경 후' }), jsx('code', { style: styles.value, children: readableValue(change.after) })] })
-          ] }, `${change.profile || ''}:${change.field || index}`)) }) : jsx('p', { style: styles.message, children: '변경 사항이 없습니다. 적용할 내용이 없습니다.' }),
-          Array.isArray(preview.warnings) && preview.warnings.length ? jsx('div', { style: styles.warning, children: preview.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: readableValue(warning) }, index)) }) : null,
-          previewChanges.length ? jsxs('div', { style: styles.actions, children: [jsx(CheckRow, { id: 'confirm-preview', label: allTargetsSelected ? '모든 프로필 대상 변경 전후를 확인했습니다.' : '변경 전후 내용을 확인했습니다.', checked: reviewed, disabled: applyPending || needsReload, onChange: setReviewed }), jsx(Button, { size: 'sm', disabled: !reviewed || applyPending || !validPreview || needsReload, onClick: () => void handleApply(), children: applyPending ? '적용 중…' : '확인 후 적용' })] }) : null
-        ] }) : null
+      profiles.length && !needsReload ? section('전체 설정 저장', '모델·라우팅과 수정한 폴백을 한 번에 저장합니다. 저장하면 서버가 현재 revision을 검증한 뒤 같은 계획을 적용합니다. 각 폴백은 해당 카드에서 고른 대상에만 적용됩니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
+        jsx('div', { id: 'draft-reference-summary', role: 'note', style: styles.section, children: [
+          jsx('strong', { children: '현재 초안 요약 · 참고 정보' }),
+          jsx('p', { style: styles.hint, children: `설정 revision ${statusQuery.data?.revision ?? '확인할 수 없음'} · 모델 대상 ${targetSummary} · 라우팅 활성 ${routingProfiles.length}개` }),
+          jsx('p', { style: styles.hint, children: modifiedFallbackSummary.length
+            ? `수정한 폴백: ${modifiedFallbackSummary.map(item => `${item.label} ${item.count}개 대상`).join(' · ')}`
+            : '수정한 폴백 없음' }),
+          jsx('p', { style: styles.hint, children: '이 요약은 현재 초안에서 로컬로 계산한 참고 정보이며, 서버 검증 결과나 실제 저장 결과 또는 확정된 변경 내역을 보증하지 않습니다.' }),
+          summaryValidationErrors.length ? jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '확인할 항목' }), jsx('ul', { children: summaryValidationErrors.map((error, index) => jsx('li', { children: error }, index)) })] }) : jsx('p', { role: 'status', style: styles.hint, children: '현재 입력에서 감지된 오류가 없습니다. 서버 검증은 저장 과정에서 수행됩니다.' })
+        ] }),
+        jsx(Button, { id: 'global-save', size: 'sm', variant: 'secondary', disabled: !canSaveAll, onClick: () => void saveAll(), children: applyPending ? '저장 중…' : '저장' })
       ] })) : null
     ]
   })

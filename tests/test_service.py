@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -300,7 +301,8 @@ def test_default_writer_uses_supported_cli_shell_false_and_profile_bound_home(tm
     monkeypatch.setattr(service_module.subprocess, "run", fake_run)
     service._write_key("p1", "model.default", "provider/model:1")
 
-    assert seen["command"] == ["fake-hermes", "--profile", "p1", "config", "set", "model.default", "provider/model:1", "--force"]
+    assert seen["command"] == [service_module.sys.executable, "-m", "hermes_cli.main", "--profile", "p1", "config", "set", "model.default", "provider/model:1", "--force"]
+    assert seen["env"]["PYTHONPATH"] == os.pathsep.join(service._loaded_cli_paths())
     assert seen["shell"] is False
     assert seen["env"]["HERMES_HOME"] == str(root / "profiles" / "p1")
 

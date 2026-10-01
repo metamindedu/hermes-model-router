@@ -211,17 +211,16 @@ test('form exposes four model roles, distinct application scopes, and accessible
   assert.match(source, /차이 \$\{drift.length\}건/)
 })
 
-test('preview and apply are separate, scope-guarded requests with no retry affordance after ambiguity', () => {
+test('single save internally validates and applies with scope guards and no confirmation gate', () => {
   assert.match(source, /ctx\.rest\('\/status'\)/)
-  assert.match(source, /ctx\.rest\('\/preview', \{ method: 'POST', body: combined\.body \}\)/)
+  assert.match(source, /ctx\.rest\(operation, \{ method: 'POST', body: prepared\.body \}\)/)
   assert.match(source, /ctx\.rest\('\/apply', \{ method: 'POST', body: \{ plan_id: planId \}, timeoutMs: 180000 \}\)/)
-  assert.match(source, /const planId = preview\.plan_id/)
-  assert.match(source, /미리보기만으로 설정은 바뀌지 않습니다/)
-  assert.match(source, /확인 후 적용/)
+  assert.match(source, /const planId = result\.plan_id/)
+  assert.doesNotMatch(source, /id: 'confirm-preview'/)
+  assert.match(source, /id: 'global-save'/)
   assert.match(source, /다시 적용하지 마세요/)
-  assert.match(source, /setPreview\(null\)/)
-  assert.match(source, /generationRef\.current !== token/)
-  assert.match(source, /isPartialReceipt\(result\)/)
+  assert.match(source, /isSaveCurrent\(snapshot, token\)/)
+  assert.match(source, /isPartialReceipt\(receipt\)/)
   assert.match(source, /실제 상태 확인 후 편집 재개/)
 })
 

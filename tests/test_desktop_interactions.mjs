@@ -88,7 +88,7 @@ function harness() {
   }
   const find = predicate => { const node = [...walk(tree)].find(predicate); assert.ok(node, 'Control not found'); return node }
   const byId = id => find(node => node.props?.id === id)
-  const flush = async () => { for (let at = 0; at < 8; at++) await Promise.resolve(); render() }
+  const flush = async () => { for (let at = 0; at < 20; at++) await Promise.resolve(); render() }
   const click = id => { const node = byId(id); assert.ok(!node.props.disabled); node.props.onClick(); render() }
   const button = label => find(node => node.type === 'Button' && text(node).includes(label))
   const clickLabel = label => { const node = button(label); assert.ok(!node.props.disabled); node.props.onClick(); render() }
@@ -120,17 +120,18 @@ test('preset click fills exact BAT models in draft only and does not alter custo
   assert.equal(h.byId('model-title-model').props.value, 'deepseek-flash')
   assert.equal(h.byId('model-title-reasoning').props.value, 'none')
   assert.equal(h.calls.length, 0)
-  h.clickLabel('변경 내용 미리보기'); await h.flush()
-  const payload = h.calls.at(-1).body
+  h.click('global-save'); await h.flush()
+  const payload = h.calls.find(c => c.operation === 'preview').body
   assert.deepEqual(payload.routing, routing)
   assert.deepEqual(payload.routing_profiles, ['claire'])
   assert.deepEqual([...payload.model_targets].sort(), ['claire', 'default', 'other'])
   assert.equal(payload.models.delegation.reasoning, 'max')
   assert.equal(payload.models.compression.reasoning, 'medium')
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
   h.click('preset-openai')
   for (const [role, fields] of Object.entries(models)) for (const [field, value] of Object.entries(fields))
     assert.equal(h.byId(`model-${role}-${field}`).props.value, value)
-  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 0)
+  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
 })
 
 test('none and explicit subset survive source changes and refresh; removed profiles are filtered', async () => {
@@ -148,62 +149,87 @@ test('none and explicit subset survive source changes and refresh; removed profi
   assert.deepEqual(h.selected('model-target-'), [])
 })
 
-test('bulk target and preset changes discard an already reviewed preview', async () => {
-  for (const control of ['model-target-all', 'model-target-none', 'preset-non-openai']) {
-    const h = harness()
-    h.clickLabel('변경 내용 미리보기'); await h.flush()
-    h.check('confirm-preview', true)
-    h.click(control)
-    assert.throws(() => h.byId('confirm-preview'), /Control not found/)
-    assert.equal(h.calls.filter(c => c.operation === 'apply').length, 0)
-    assert.deepEqual(h.selected('routing-profile-'), ['claire'])
-  }
-})
-
-test('an in-flight preview cannot revive after a preset edit', async () => {
-  const h = harness(); let resolve
-  h.setResponder(() => new Promise(done => { resolve = done }))
-  h.clickLabel('변경 내용 미리보기')
-  h.click('preset-non-openai')
-  resolve({ plan_id: 'stale', changes: [{ profile: 'claire', field: 'models' }], warnings: [] })
-  await h.flush()
-  assert.throws(() => h.byId('confirm-preview'), /Control not found/)
-  assert.equal(h.byId('model-main-model').props.value, 'mimo-v2.6-pro')
-})
-
-test('confirmation remains mandatory before any apply request', async () => {
+test('single save validates then applies once without a preview or confirmation control', async () => {
   const h = harness()
   h.click('preset-non-openai')
-  h.clickLabel('변경 내용 미리보기'); await h.flush()
-  assert.equal(h.button('확인 후 적용').props.disabled, true)
-  h.check('confirm-preview', true)
-  h.clickLabel('확인 후 적용'); await h.flush()
-  assert.deepEqual(h.calls.filter(c => c.operation === 'apply').map(c => c.body), [{ plan_id: 'test-plan' }])
+  assert.equal(h.calls.length, 0)
+  assert.throws(() => h.byId('confirm-preview'))
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.map(c => c.operation), ['preview', 'apply'])
+  assert.deepEqual(h.calls[1].body, { plan_id: 'test-plan' })
+  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  assert.equal(h.byId('preset-non-openai').props.disabled, false)
 })
 
-test('refresh invalidates a pending preview immediately and never leaves preview loading stuck', async () => {
-  const h = harness(); let finishPreview, finishRefresh
-  h.setResponder(() => new Promise(resolve => { finishPreview = resolve }))
-  h.setRefetcher(() => new Promise(resolve => { finishRefresh = resolve }))
-  h.clickLabel('변경 내용 미리보기')
-  h.clickLabel('상태 새로고침')
-  finishRefresh({ data: h.data() }); await h.flush()
-  finishPreview({ plan_id: 'obsolete', changes: [{ profile: 'claire', field: 'models' }], warnings: [] }); await h.flush()
-  assert.throws(() => h.byId('confirm-preview'), /Control not found/)
-  assert.equal(h.button('변경 내용 미리보기').props.disabled, false)
+test('save locks editing and duplicate clicks even while validation is pending', async () => {
+  const h = harness(); let finish
+  h.setResponder(op => op === 'preview' ? new Promise(r => { finish = r }) : { status: 'applied' })
+  const click = h.byId('global-save').props.onClick
+  click(); h.render(); click(); h.render()
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  assert.equal(h.byId('model-main-model').props.disabled, true)
+  assert.equal(h.button('상태 새로고침').props.disabled, true)
+  finish({ plan_id: 'only-once', changes: [] }); await h.flush()
+  assert.deepEqual(h.calls.filter(c => c.operation === 'apply').map(c => c.body), [{ plan_id: 'only-once' }])
 })
 
-test('refresh immediately retires a confirmed plan and a stale apply handler cannot send it', async () => {
-  const h = harness(); let finishRefresh
-  h.clickLabel('변경 내용 미리보기'); await h.flush()
-  h.check('confirm-preview', true)
-  const staleApply = h.button('확인 후 적용').props.onClick
-  h.setRefetcher(() => new Promise(resolve => { finishRefresh = resolve }))
-  h.clickLabel('상태 새로고침')
-  staleApply(); await h.flush()
-  assert.equal(h.calls.filter(call => call.operation === 'apply').length, 0)
-  assert.throws(() => h.byId('confirm-preview'), /Control not found/)
-  finishRefresh({ data: h.data() }); await h.flush()
+test('validation rejection unlocks safely and never applies', async () => {
+  const h = harness()
+  h.setResponder(() => { throw new Error('validation timeout') })
+  h.click('global-save'); await h.flush()
+  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 0)
+  assert.equal(h.byId('preset-non-openai').props.disabled, false)
+  assert.equal(h.byId('global-save').props.disabled, false)
+})
+
+test('scope change during validation cancels before writes and old failure cannot lock a new save', async () => {
+  const h = harness(); let oldReject
+  h.setResponder(() => new Promise((r, reject) => { oldReject = reject }))
+  h.click('global-save')
+  h.state.connectionId.value = 'new-connection'; h.render()
+  let newResolve
+  h.setResponder(op => op === 'preview' ? { plan_id: 'new-plan', changes: [] } : new Promise(r => { newResolve = r }))
+  h.click('global-save'); await h.flush()
+  oldReject(new Error('old validation timed out')); await h.flush()
+  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  newResolve({ status: 'applied' }); await h.flush()
+  assert.deepEqual(h.calls.filter(c => c.operation === 'apply').map(c => c.body), [{ plan_id: 'new-plan' }])
+  assert.ok(!JSON.stringify(h.data()).includes('old validation'))
+})
+
+test('late validation success after scope change cannot apply its token', async () => {
+  const h = harness(); let finish
+  h.setResponder(() => new Promise(r => { finish = r }))
+  h.click('global-save')
+  h.state.connectionId.value = 'other-source'; h.render()
+  finish({ plan_id: 'obsolete', changes: [] }); await h.flush()
+  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 0)
+  assert.equal(h.byId('global-save').props.disabled, false)
+})
+
+test('a stale save callback is invalidated by refresh before making any request', async () => {
+  const h = harness()
+  const stale = h.byId('global-save').props.onClick
+  h.clickLabel('상태 새로고침'); await h.flush()
+  stale(); await h.flush()
+  assert.equal(h.calls.length, 0)
+})
+
+test('scope change during apply locks until original scope is reloaded', async () => {
+  const h = harness(); let finish
+  h.setResponder(op => op === 'preview' ? { plan_id: 'pending-apply', changes: [] } : new Promise(r => { finish = r }))
+  h.click('global-save'); await h.flush()
+  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
+  h.state.connectionId.value = 'other-connection'; h.render()
+  finish({ status: 'applied' }); await h.flush()
+  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  h.state.connectionId.value = 'local'; h.render()
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  assert.equal(h.byId('preset-non-openai').props.disabled, false)
 })
 
 test('refresh failure with cached data does not unlock an ambiguous apply', async () => {
@@ -212,9 +238,7 @@ test('refresh failure with cached data does not unlock an ambiguous apply', asyn
     if (operation === 'apply') throw new Error('unknown transport outcome')
     return { plan_id: 'test-plan', changes: [{ profile: 'claire', field: 'models' }], warnings: [] }
   })
-  h.clickLabel('변경 내용 미리보기'); await h.flush()
-  h.check('confirm-preview', true)
-  h.clickLabel('확인 후 적용'); await h.flush()
+  h.click('global-save'); await h.flush()
   h.setRefetcher(async () => ({ data: h.data(), error: new Error('refresh failed') }))
   h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
   assert.equal(h.byId('preset-non-openai').props.disabled, true)
