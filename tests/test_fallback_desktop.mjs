@@ -12,7 +12,7 @@ const helpers = new Function(`${helperSource}\nreturn {
   deepClone, sameValue, applyModelPresetDraft, copyProfileDraft,
   fallbackCapabilitiesSupported, copyNativeFallbackDraft, copyRoutingFallbackDraft,
   applyNativeFallbackPresetDraft, applyRoutingFallbackPresetDraft,
-  selectFallbackTargets, selectFallbackSourceTarget, reconcileFallbackTargets,
+  selectFallbackTargets, selectFallbackSourceTarget, reconcileFallbackTargets, editableFallbackTargets,
   fallbackConsentReady, fallbackTargetNeedsConsent, nativeFallbackValidation,
   routeIdentity, primaryRouteForFallback, routingFallbackValidation,
   buildFallbackPreviewBody, fallbackPreviewMatchesScope, buildCombinedPreviewBody, previewFieldLabel,
@@ -182,14 +182,100 @@ test('phase1 presets remain exact while fallback presets only fill drafts and ne
   assert.equal(helpers.applyRoutingFallbackPresetDraft(routeOff, 'openai-api').light.model, 'gpt-5.6-luna')
 })
 
-test('fallback targets start with the source only and preserve explicit all, subset, or empty selection', () => {
+test('fallback targets start with all and preserve explicit subset or empty selection', () => {
   const names = ['default', 'claire', 'other', 'claire']
-  assert.deepEqual(helpers.selectFallbackTargets(null, 'claire', names), ['claire'])
+  assert.deepEqual(helpers.selectFallbackTargets(null, 'claire', names), ['default', 'claire', 'other'])
+  assert.deepEqual(helpers.selectFallbackTargets(null, 'claire', names, ['other']), ['other'])
   assert.deepEqual(helpers.selectFallbackTargets([], 'other', names), [])
   assert.deepEqual(helpers.selectFallbackTargets(['other', 'removed', 'other'], 'claire', names), ['other'])
   assert.deepEqual(helpers.selectFallbackSourceTarget('default', names), ['default'])
   assert.deepEqual(helpers.reconcileFallbackTargets(['claire', 'removed'], names), ['claire'])
   assert.equal(helpers.reconcileFallbackTargets(null, names), null)
+})
+
+test('all four target groups default to every editable profile without enabling or saving routing', async () => {
+  const data = delegationStatus()
+  data.profiles.find(row => row.name === 'other').routing.enabled = false
+  const h = harness(data)
+  for (const prefix of ['model-target', 'native-fallback-target', 'routing-fallback-target', 'delegation-fallback-target']) {
+    for (const name of ['default', 'claire', 'other']) assert.equal(h.byId(`${prefix}-${name}`).props.checked, true)
+  }
+  assert.equal(h.byId('routing-profile-other').props.checked, false)
+  assert.equal(h.calls.length, 0)
+  h.setResponder(() => ({ plan_id: 'models-only', changes: [], warnings: [] }))
+  globalButton(h, '변경 내용 미리보기')
+  await h.flush()
+  assert.equal('fallback_updates' in h.calls.at(-1).body, false)
+  assert.deepEqual(h.calls.at(-1).body.routing_profiles, ['default', 'claire'])
+})
+
+test('initial selection excludes readonly or unsupported profiles without hiding explicit later invalid selections', () => {
+  const data = delegationStatus()
+  const other = data.profiles.find(row => row.name === 'other')
+  other.fallbacks.native.editable = false
+  other.fallbacks.routing.readonly = true
+  other.fallbacks.delegation.editable = false
+  const h = harness(data)
+  for (const scope of ['native', 'routing', 'delegation']) {
+    assert.equal(h.byId(`${scope}-fallback-target-other`).props.checked, false)
+    assert.equal(h.byId(`${scope}-fallback-target-other`).props.disabled, true)
+    assert.deepEqual(helpers.editableFallbackTargets(scope, data.profiles), ['default', 'claire'])
+    assert.deepEqual(helpers.selectFallbackTargets(['other'], 'claire', ['default', 'claire', 'other'], ['default', 'claire']), ['other'])
+  }
+  assert.equal(h.byId('model-target-other').props.checked, true)
+})
+
+test('source-only button narrows selection without saving and manual subsets survive source change and refresh', async () => {
+  const h = harness(delegationStatus())
+  h.selectProfile('other')
+  for (const scope of ['native', 'routing', 'delegation']) {
+    h.click(`${scope}-fallback-target-source`)
+    assert.equal(text(h.byId(`${scope}-fallback-target-source`)), '불러온 프로필만')
+    for (const name of ['default', 'claire', 'other']) assert.equal(h.byId(`${scope}-fallback-target-${name}`).props.checked, name === 'other')
+  }
+  assert.equal(h.calls.length, 0)
+  h.selectProfile('claire')
+  for (const scope of ['native', 'routing', 'delegation']) {
+    assert.equal(h.byId(`${scope}-fallback-target-other`).props.checked, true)
+    assert.equal(h.byId(`${scope}-fallback-target-claire`).props.checked, false)
+  }
+  h.click('native-fallback-target-none')
+  globalButton(h, '상태 새로고침')
+  await h.flush()
+  for (const name of ['default', 'claire', 'other']) assert.equal(h.byId(`native-fallback-target-${name}`).props.checked, false)
+  assert.equal(h.byId('delegation-fallback-target-other').props.checked, true)
+  assert.equal(h.byId('delegation-fallback-target-default').props.checked, false)
+})
+
+test('edited fallback uses all initially selected targets and default target selection never replays a copy', async () => {
+  const h = harness(delegationStatus())
+  h.click('native-fallback-preset-audited-non-openai')
+  h.check('native-fallback-enabled', true)
+  h.setResponder(() => ({ plan_id: 'all-native', changes: [], warnings: [] }))
+  globalButton(h, '변경 내용 미리보기')
+  await h.flush()
+  const body = h.calls.at(-1).body
+  assert.deepEqual(body.fallback_updates.map(row => row.profile), ['default', 'claire', 'other'])
+  assert.ok(body.fallback_updates.every(row => Object.keys(row).sort().join(',') === 'native_fallback,profile'))
+  assert.deepEqual(body.fallback_confirmations.map(row => [row.profile, row.scope]), [['default', 'native'], ['claire', 'native'], ['other', 'native']])
+})
+
+test('new profiles after initial load do not widen fallback targets; new connection starts all selected', async () => {
+  const data = delegationStatus()
+  const h = harness(data)
+  const added = profile('added')
+  added.fallbacks.delegation = delegationState()
+  data.profiles.push(added)
+  globalButton(h, '상태 새로고침')
+  await h.flush()
+  for (const scope of ['native', 'routing', 'delegation']) assert.equal(h.byId(`${scope}-fallback-target-added`).props.checked, false)
+  h.click('native-fallback-target-none')
+  h.state.connectionId.value = 'new-connection'
+  h.render()
+  for (const scope of ['native', 'routing', 'delegation']) {
+    for (const row of data.profiles) assert.equal(h.byId(`${scope}-fallback-target-${row.name}`).props.checked, true)
+  }
+  assert.equal(h.calls.length, 0)
 })
 
 test('new/changed, external-ownership, legacy-approved, and off changes get exact consent behavior', () => {
@@ -253,6 +339,7 @@ test('native scope handler sends exact fallback-preview payload, uses notice ins
   const h = harness()
   assert.equal(h.calls.length, 0)
   assert.deepEqual(h.selected ? h.selected('model-target-') : [], [])
+  h.click('native-fallback-target-source')
   h.click('native-fallback-preset-audited-non-openai')
   h.check('native-fallback-enabled', true)
   assert.equal(h.byId('native-fallback-preview').props.disabled, false)
@@ -281,6 +368,7 @@ test('native scope handler sends exact fallback-preview payload, uses notice ins
 
 test('coding fallback handler sends only routing scope with both cost and fresh-task consent', async () => {
   const h = harness()
+  h.click('routing-fallback-target-source')
   h.click('routing-fallback-preset-openai-api')
   h.check('routing-fallback-enabled', true)
   assert.equal(h.byId('routing-fallback-preview').props.disabled, false)
@@ -388,7 +476,8 @@ test('delegation consent binds non-off modes, has no fresh-task flag, and payloa
 test('delegation custom draft/template preserves other scopes and uses cost notice and an explicit preview action', async () => {
   const h = harness(delegationStatus())
   assert.equal(h.byId('delegation-fallback-target-claire').props.checked, true)
-  assert.equal(h.byId('delegation-fallback-target-default').props.checked, false)
+  assert.equal(h.byId('delegation-fallback-target-default').props.checked, true)
+  h.click('delegation-fallback-target-source')
   assert.equal(h.byId('model-target-default').props.checked, true)
   selectDelegationMode(h, 'custom')
   h.click('delegation-fallback-template-non-openai')
@@ -435,6 +524,7 @@ function edit(h, id, value) {
 }
 
 function setupAllFallbackChanges(h) {
+  for (const scope of ['native', 'routing', 'delegation']) h.click(`${scope}-fallback-target-source`)
   h.click('native-fallback-preset-audited-non-openai')
   h.check('native-fallback-enabled', true)
   h.click('routing-fallback-preset-openai-api')
@@ -490,6 +580,7 @@ test('whole-page model-only preview preserves untouched fallback policies', asyn
 
 test('target-only selection copies that fallback but does not widen model targets or other scopes', async () => {
   const h = harness(delegationStatus())
+  h.click('native-fallback-target-source')
   h.click('model-target-none')
   h.check('native-fallback-target-other', true)
   globalButton(h, '변경 내용 미리보기')

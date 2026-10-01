@@ -348,9 +348,13 @@ export function reconcileFallbackTargets(selected, profileNames) {
   return [...new Set(selected.filter(name => valid.has(name)))]
 }
 
-export function selectFallbackTargets(selected, sourceProfile, profileNames) {
+export function selectFallbackTargets(selected, sourceProfile, profileNames, initialTargets = profileNames) {
   if (Array.isArray(selected)) return reconcileFallbackTargets(selected, profileNames)
-  return sourceProfile && uniqueProfileNames(profileNames).includes(sourceProfile) ? [sourceProfile] : []
+  return reconcileFallbackTargets(initialTargets, profileNames) || []
+}
+
+export function editableFallbackTargets(scope, profiles) {
+  return (Array.isArray(profiles) ? profiles : []).filter(row => fallbackScopeEditable(scope, row)).map(row => row.name)
 }
 
 export function selectFallbackSourceTarget(sourceProfile, profileNames) {
@@ -540,7 +544,7 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
       errors.push(`${title}의 편집 가능한 설정을 확인할 수 없습니다. 상태를 새로고침하세요.`)
       continue
     }
-    const targets = selectFallbackTargets(fallbackTargets?.[scope], profile, rows.map(row => row.name))
+    const targets = selectFallbackTargets(fallbackTargets?.[scope], profile, rows.map(row => row.name), editableFallbackTargets(scope, rows))
     if (!targets.length) {
       errors.push(`${title} 변경 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.`)
       continue
@@ -820,6 +824,7 @@ function RouterPage({ ctx: pluginContext }) {
     setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
     setFallbackTargetEdits({ native: false, routing: false, delegation: false })
     setModelTargets(current => reconcileModelTargets(current, profiles.map(item => item.name)))
+    setFallbackTargets(current => Object.fromEntries(['native', 'routing', 'delegation'].map(scope => [scope, selectFallbackTargets(current[scope], row.name, profiles.map(item => item.name), editableFallbackTargets(scope, profiles))])))
     setRoutingProfiles(profiles.filter(item => item.routing?.enabled === true).map(item => item.name))
   }, [readyScope, scopeKey, statusQuery.data, selectedProfile, profiles])
 
@@ -841,9 +846,9 @@ function RouterPage({ ctx: pluginContext }) {
   }
   const currentRow = profiles.find(item => item.name === selectedProfile) || null
   const profileNames = profiles.map(item => item.name)
-  const nativeFallbackTargets = selectFallbackTargets(fallbackTargets.native, selectedProfile, profileNames)
-  const routingFallbackTargets = selectFallbackTargets(fallbackTargets.routing, selectedProfile, profileNames)
-  const delegationFallbackTargets = selectFallbackTargets(fallbackTargets.delegation, selectedProfile, profileNames)
+  const nativeFallbackTargets = selectFallbackTargets(fallbackTargets.native, selectedProfile, profileNames, editableFallbackTargets('native', profiles))
+  const routingFallbackTargets = selectFallbackTargets(fallbackTargets.routing, selectedProfile, profileNames, editableFallbackTargets('routing', profiles))
+  const delegationFallbackTargets = selectFallbackTargets(fallbackTargets.delegation, selectedProfile, profileNames, editableFallbackTargets('delegation', profiles))
   const nativeFallbackRows = nativeFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
   const routingFallbackRows = routingFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
   const delegationFallbackRows = delegationFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
@@ -956,11 +961,7 @@ function RouterPage({ ctx: pluginContext }) {
     let selected = scope === 'native' ? nativeFallbackTargets : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
     if (mode === 'source') selected = selectFallbackSourceTarget(selectedProfile, profileNames)
     if (mode === 'all') {
-      const eligible = scope === 'native'
-        ? profiles.filter(row => row.fallbacks?.native?.editable === true).map(row => row.name)
-        : scope === 'delegation'
-          ? profiles.filter(row => validDelegationFallbackState(row.fallbacks?.delegation) && row.fallbacks.delegation.editable === true).map(row => row.name)
-          : profileNames
+      const eligible = editableFallbackTargets(scope, profiles)
       selected = selectAllModelTargets(eligible)
     }
     if (mode === 'none') selected = selectNoModelTargets()
@@ -1324,12 +1325,12 @@ function RouterPage({ ctx: pluginContext }) {
     style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: `${fallbackScopeTitle(scope)} 적용 대상` }),
-      jsx('p', { style: styles.hint, children: '처음에는 위 프로필 하나만 선택됩니다. 다른 프로필을 선택하면 이 카드 설정을 해당 프로필에 복사합니다. 모델 적용 대상과는 별개입니다.' }),
+      jsx('p', { style: styles.hint, children: '처음 열면 편집 가능한 모든 프로필이 선택됩니다. 선택한 프로필에 이 카드 설정을 적용합니다. 체크만으로 저장되지는 않으며, 모델 적용 대상과는 별개입니다. ‘불러온 프로필만’은 위에서 설정을 불러온 프로필 하나만 남깁니다.' }),
       jsxs('div', { style: styles.selectionToolbar, children: [
         jsx('span', { style: styles.hint, children: `${selected.length}/${profileNames.length}개 프로필 선택` }),
         jsxs('div', { style: styles.actions, children: [
-          jsx(Button, { id: `${scope}-fallback-target-source`, size: 'sm', variant: 'secondary', disabled, onClick: () => chooseFallbackTargets(scope, 'source'), children: '원본 프로필만' }),
-          jsx(Button, { id: `${scope}-fallback-target-all`, size: 'sm', variant: 'secondary', disabled, onClick: () => chooseFallbackTargets(scope, 'all'), children: scope === 'native' || scope === 'delegation' ? '편집 가능 모두' : '모두 선택' }),
+          jsx(Button, { id: `${scope}-fallback-target-source`, size: 'sm', variant: 'secondary', disabled, onClick: () => chooseFallbackTargets(scope, 'source'), children: '불러온 프로필만' }),
+          jsx(Button, { id: `${scope}-fallback-target-all`, size: 'sm', variant: 'secondary', disabled, onClick: () => chooseFallbackTargets(scope, 'all'), children: '전체 선택' }),
           jsx(Button, { id: `${scope}-fallback-target-none`, size: 'sm', variant: 'secondary', disabled, onClick: () => chooseFallbackTargets(scope, 'none'), children: '모두 해제' })
         ] })
       ] }),
