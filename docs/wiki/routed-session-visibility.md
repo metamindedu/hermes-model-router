@@ -36,7 +36,17 @@
 - `coding_route.start`의 짧은 `title`은 공개 표시 메타데이터다. 비밀·개인 프롬프트·고객 자료를 넣지 않는다. 96자 제한과 제어문자 검증은 spawn 전에 수행하며, 제목은 실행 권한·모델 관측·runner identity에 쓰지 않는다.
 - Background의 기본 이름은 `서브 에이전트 작업: <작업명> · Heavy/Light · <대상 모델>`이다. UUID는 기본 제목에서 빼고 터미널 안내에 남긴다. 제목을 생략한 예전 호출은 고정 한국어 용도 이름을 사용하며 프롬프트를 자동 요약하지 않는다.
 - 파일 기반 private 로그를 터미널에 복사하지 않는다. 실제 채택된 process의 공개 output buffer에 정제된 안내만 한 번 넣는다. 대상 모델과 실제 관측 모델은 별개이며, 프로세스 종료는 의미적 검수 GO가 아니다.
-- 별도 카드 UI는 이번 slice에 포함하지 않는다. UI stored/runtime ID 매핑·프로필 소유권·전환 시 오래된 응답 폐기를 실제 SDK 계약으로 검증하기 전에는 전체 process 목록이나 다른 session ID로 fallback하지 않는다. 네이티브 Background 중지 계약은 그대로 둔다.
+- 이전 Background 표시 slice는 별도 카드 UI를 포함하지 않았다. 실시간 공개 진행 목록은 아래의 부모/runtime·프로필 소유권·단일 가시 composer 검증을 거친 별도 확장이다. 전체 process 목록이나 다른 session ID로 fallback하지 않고 네이티브 Background 중지 계약은 그대로 둔다.
+
+## 실시간 공개 진행 표시
+
+- 기존 process registry를 lifecycle 권위로 유지하면서 `composer.top` 슬롯에 플러그인 전용 목록을 추가한다. 네이티브 subagent 이벤트/내부 store를 위조하거나 코어를 수정하지 않는다.
+- 신규 작업의 durable 부모 ID와 Desktop runtime ID를 실제 ContextVars에서 각각 고정한다. 프로필별·부모별 원자적 인덱스와 public progress만 읽고, legacy 작업을 전체 프로필/제목으로 보충하지 않는다. 인덱스는 조회 최적화이지 실행·권한·모델 identity 증거가 아니다.
+- 활동 수집은 기존 observer 부작용을 보존한다. 도구 이름 및 완결 공개 중간 메시지를 먼저 정제하고 제한한다. 스트림 조각·숨겨진 추론·원본 로그·도구 인자·프롬프트·최종 결과 전문은 이 목록으로 전달하지 않는다.
+- 현재 SDK의 composer render 함수는 대화별 인자를 받지 않는다. 전역 focused 상태만 읽으면 다른 tile에도 같은 작업이 나타날 수 있다. 정확한 source/profile/parent/runtime 대응과 소유한 단일 가시 composer가 확인될 때만 렌더링/조회한다. 다중 가시 composer는 숨기는 보수적 경계로 유지하며 private React context/DOM 주입으로 우회하지 않는다.
+- 공개 진행 인덱스는 부모/runtime별 하나의 크기 제한 문서로 유지하며 기존 교차 프로세스 잠금 아래에서 최신 등록을 앞에 넣는다. 디렉터리 열거를 먼저 잘라 나중에 정렬하면 최신 실행 작업이 영구 누락될 수 있다. 손상·foreign scope 인덱스는 덮어쓰지 않고 표시를 보수적으로 중단한다.
+- UI 상태 조회는 지원되는 명시적 프로필 CLI와 session-scoped native process.list/kill을 사용한다. private 메타데이터보다 native process 종료 상태를 우선하고, 종료 시 타이머를 고정하며 identity 불명확/분실 시 실행·재개·재시작하지 않는다.
+- Windows profile 깊이에서는 긴 digest 디렉터리와 파일명을 반복한 atomic temp 이름이 MAX_PATH를 넘을 수 있다. 범위 digest는 충분한 길이로 유지하고 metadata를 재검증하며, 임시 파일 basename은 짧고 고유하게 만든다.
 
 ## 설치 및 검증
 

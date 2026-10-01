@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-01 | public-progress-ui
+- 입력창 위 실제 라우팅 작업의 경과 시간·최신 공개 활동 표시와 프로필/durable/runtime 부모 범위 고정을 기록.
+- per-composer SDK context 부재에 따른 다중 가시 입력창 표시 억제, 완결 공개 메시지/도구 이름만 전달하는 privacy 경계, Windows atomic 인덱스 경로 길이 함정을 기록. 설치와 live 검증은 별도의 증거로 판단한다.
+
 ## 2026-10-01 | routed-resume-lineage
 - `subagent` source만으로 메인 세션 재개 탐색에서 제외되지 않는 Hermes 호환성 함정을 기록. 네이티브 위임 생성 메타데이터를 첫 저장 전에 설정하고 지원되지 않는 런타임은 호출 전에 거부한다.
 - 목록 표시 테스트와 재개 계보 검증을 분리하고, 실제 SessionDB 기반 부모/자식/정상 후속 대화 회귀 검증을 추가한다. 설치 hotfix와 정식 소스가 같은 내용을 유지해야 한다.

@@ -261,6 +261,55 @@ def _dependency(dependencies: Any, name: str, default: Any = None) -> Any:
     return getattr(dependencies, name, default)
 
 
+def _public_progress_class() -> Any:
+    """Load this plugin's writer while supporting the runner's direct-file import."""
+    if __package__:
+        from .public_progress import PublicProgress
+
+        return PublicProgress
+
+    plugin_root = Path(__file__).resolve(strict=True).parents[1]
+    package_root = (plugin_root / "model_router").resolve(strict=True)
+    expected_init = (package_root / "__init__.py").resolve(strict=True)
+    if Path(__file__).resolve(strict=True) != (package_root / "scoped_agent.py").resolve(strict=True):
+        raise ImportError("scoped agent is outside its trusted model-router package")
+
+    package_name = "_model_router_direct_" + uuid.uuid5(uuid.NAMESPACE_URL, str(package_root)).hex[:16]
+    package = sys.modules.get(package_name)
+    if package is None:
+        spec = importlib.util.spec_from_file_location(
+            package_name,
+            expected_init,
+            submodule_search_locations=[str(package_root)],
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("trusted model-router package could not be loaded")
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[package_name] = package
+        try:
+            spec.loader.exec_module(package)
+        except Exception:
+            for name in tuple(sys.modules):
+                if name == package_name or name.startswith(package_name + "."):
+                    sys.modules.pop(name, None)
+            raise
+
+    if (
+        Path(getattr(package, "__file__", "")).resolve(strict=True) != expected_init
+        or [Path(item).resolve(strict=True) for item in getattr(package, "__path__", ())] != [package_root]
+    ):
+        raise ImportError("model-router package namespace is not bound to this plugin root")
+
+    progress_module = importlib.import_module(package_name + ".public_progress")
+    expected_progress = (package_root / "public_progress.py").resolve(strict=True)
+    if Path(getattr(progress_module, "__file__", "")).resolve(strict=True) != expected_progress:
+        raise ImportError("public progress writer is outside this plugin root")
+    writer = getattr(progress_module, "PublicProgress", None)
+    if not callable(writer):
+        raise ImportError("trusted public progress writer is unavailable")
+    return writer
+
+
 def _trusted_core_root() -> Path:
     """Find the runtime's Hermes source root without trusting cwd or project modules."""
     plugin_root = Path(__file__).resolve().parents[1]
@@ -667,6 +716,7 @@ def _result_error_kind(result: dict[str, Any], observer_snapshot: dict[str, Any]
 
 def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
     """Run one isolated Hermes attempt and return the frozen schema-1 result envelope."""
+    source_request = request
     try:
         request, request_path, _result_path = _validate_request(request)
     except AttemptError as exc:
@@ -675,6 +725,14 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
     except Exception:
         safe_request = request if isinstance(request, dict) else {}
         return _empty_result(safe_request, kind="initialization_error", message="request validation failed", dependencies=dependencies)
+
+    public_progress = None
+    try:
+        public_progress = _public_progress_class()(source_request, request_path)
+    except Exception:
+        # Public progress is observational only; a writer setup failure cannot
+        # prevent the validated attempt or its evidence hooks from running.
+        public_progress = None
 
     observer = _dependency(dependencies, "observer")
     agent = None
@@ -720,6 +778,24 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
             if session_db is None:
                 raise AttemptError("initialization_error", "Hermes session store could not be acquired")
             options = dict(prepared.get("agent_options") or {})
+
+            def interim_assistant_callback(text: Any, **_kw: Any) -> None:
+                if isinstance(text, str) and text:
+                    observer.mark_partial_output()
+                    if public_progress is not None:
+                        try:
+                            public_progress.interim(text)
+                        except Exception:
+                            pass
+
+            def tool_start_callback(_call_id: Any, function_name: Any = None, _display_args: Any = None) -> None:
+                observer.mark_tool_seen()
+                if public_progress is not None:
+                    try:
+                        public_progress.tool_start(function_name)
+                    except Exception:
+                        pass
+
             options.update({
                 "api_key": runtime.get("api_key"),
                 "base_url": runtime.get("base_url"),
@@ -743,8 +819,8 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
                 "skip_memory": False,
                 "skip_background_review": True,
                 "stream_delta_callback": lambda text: observer.mark_partial_output() if isinstance(text, str) and text else None,
-                "interim_assistant_callback": lambda text, **_kw: observer.mark_partial_output() if isinstance(text, str) and text else None,
-                "tool_start_callback": lambda *_args, **_kwargs: observer.mark_tool_seen(),
+                "interim_assistant_callback": interim_assistant_callback,
+                "tool_start_callback": tool_start_callback,
             })
             agent = agent_type(**options)
             # Match native delegate_tool before the first lazy session-row write.
@@ -782,6 +858,11 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
                     release_db(session_db)
                 except Exception:
                     closure_complete = False
+            if public_progress is not None:
+                try:
+                    public_progress.close()
+                except Exception:
+                    pass
         try:
             evidence = observer.snapshot() if observer is not None else {}
         except Exception:

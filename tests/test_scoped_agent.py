@@ -600,6 +600,7 @@ def test_empty_fallback_chain_is_explicit_and_result_artifact_is_allowlisted(att
         for secret in (
             attempt["request"]["prompt"],
             tool_argument,
+            "TOOL_CALL_ID_PRIVATE_CANARY",
             config_value,
             api_key,
             endpoint,
@@ -619,7 +620,9 @@ def test_empty_fallback_chain_is_explicit_and_result_artifact_is_allowlisted(att
             provider="requested-provider",
             model="requested/model",
             between_events=lambda: agent.kwargs["tool_start_callback"](
-                "shell", {"command": tool_argument}
+                "TOOL_CALL_ID_PRIVATE_CANARY",
+                "shell",
+                {"command": tool_argument},
             ),
         )
         agent.kwargs["stream_delta_callback"](tool_argument)
@@ -669,10 +672,16 @@ def test_empty_fallback_chain_is_explicit_and_result_artifact_is_allowlisted(att
     assert set(path.name for path in attempt["attempt_dir"].iterdir()) == {
         "attempt-request.json",
         "attempt-result.json",
+        "public-progress.json",
     }
+    progress_text = (attempt["attempt_dir"] / "public-progress.json").read_text(encoding="utf-8")
+    assert json.loads(progress_text)["activity"] == "Shell 실행 중"
+    assert "TOOL_CALL_ID_PRIVATE_CANARY" not in progress_text
+    assert tool_argument not in progress_text
     for private_value in (
         attempt["request"]["prompt"],
         tool_argument,
+        "TOOL_CALL_ID_PRIVATE_CANARY",
         config_value,
         api_key,
         endpoint,
@@ -900,3 +909,113 @@ def test_observer_rejects_events_from_a_foreign_attempt_and_binds_events_to_its_
         "HOOK_RESPONSE_CANARY",
     ):
         assert private_value not in serialized_evidence
+
+
+def test_public_progress_uses_only_complete_interim_and_tool_name(attempt):
+    def on_run(agent: Any, _prompt: str, _task_id: str) -> dict[str, Any]:
+        _emit_api_events(attempt)
+        callbacks = agent.kwargs
+        callbacks["interim_assistant_callback"]("Complete interim status")
+        callbacks["stream_delta_callback"]("STREAM_SPLIT_SECRET_CANARY")
+        callbacks["tool_start_callback"](
+            "TOOL_CALL_ID_PRIVATE_CANARY",
+            "read_file",
+            {"path": "C:/private/customer-record.json", "secret": "TOOL_ARGUMENT_CANARY"},
+        )
+        return {"completed": True, "failed": False, "partial": False, "final_response": "done"}
+
+    dependencies, _stats = _fake_dependencies(attempt, on_run=on_run)
+    result = scoped_agent.run_attempt(attempt["request"], dependencies=dependencies)
+    progress_path = attempt["attempt_dir"] / "public-progress.json"
+    progress_text = progress_path.read_text(encoding="utf-8")
+    progress = json.loads(progress_text)
+
+    assert result["completed"] is True
+    assert result["partial_output"] is True
+    assert result["tool_seen"] is True
+    assert progress["activity"] == "Read File 실행 중"
+    assert "STREAM_SPLIT_SECRET_CANARY" not in progress_text
+    assert "TOOL_CALL_ID_PRIVATE_CANARY" not in progress_text
+    assert "customer-record" not in progress_text
+    assert "TOOL_ARGUMENT_CANARY" not in progress_text
+    assert attempt["request"]["prompt"] not in progress_text
+
+
+def test_direct_file_route_publishes_private_safe_progress(attempt, monkeypatch):
+    import runpy
+
+    direct = runpy.run_path(scoped_agent.__file__, run_name="route_direct_fixture")
+    run_direct_attempt = direct["run_attempt"]
+
+    interim_text = "DIRECT_INTERIM_PRIVATE_CANARY"
+    stream_delta = "DIRECT_STREAM_PRIVATE_CANARY"
+    call_id = "DIRECT_TOOL_CALL_ID_PRIVATE_CANARY"
+    tool_path = "C:/private/DIRECT_CUSTOMER_PATH_CANARY.json"
+    tool_args = "DIRECT_TOOL_ARGUMENT_PRIVATE_CANARY"
+
+    def on_run(agent: Any, _prompt: str, _task_id: str) -> dict[str, Any]:
+        _emit_api_events(attempt)
+        callbacks = agent.kwargs
+        callbacks["interim_assistant_callback"](interim_text)
+        callbacks["stream_delta_callback"](stream_delta)
+        callbacks["tool_start_callback"](
+            call_id,
+            "read_file",
+            {"path": tool_path, "secret": tool_args},
+        )
+        return {"completed": True, "failed": False, "partial": False, "final_response": "done"}
+
+    dependencies, stats = _fake_dependencies(attempt, on_run=on_run)
+    previous_sys_path = list(sys.path)
+    previous_env = {key: os.environ.get(key) for key in ("HERMES_HOME", "HERMES_PROFILE")}
+
+    result = run_direct_attempt(attempt["request"], dependencies=dependencies)
+
+    progress_path = attempt["attempt_dir"] / "public-progress.json"
+    progress_text = progress_path.read_text(encoding="utf-8")
+    progress = json.loads(progress_text)
+    assert result["completed"] is True
+    assert result["partial_output"] is True
+    assert result["tool_seen"] is True
+    assert progress["activity"] == "Read File 실행 중"
+    assert set(progress) == {
+        "schema", "job_id", "attempt_id", "profile", "parent_session_id",
+        "session_id", "activity", "updated_at",
+    }
+    for private_value in (
+        attempt["request"]["prompt"], interim_text, stream_delta,
+        call_id, tool_path, tool_args,
+    ):
+        assert private_value not in progress_text
+    assert stats["close_calls"] == stats["release_calls"] == 1
+    assert sys.path == previous_sys_path
+    assert {key: os.environ.get(key) for key in previous_env} == previous_env
+
+
+def test_public_progress_io_failure_does_not_break_observer_or_attempt(attempt, monkeypatch):
+    from model_router import public_progress
+
+    def fail_replace(_source: Any, _destination: Any) -> None:
+        raise OSError("PRIVATE_IO_FAILURE_CANARY")
+
+    monkeypatch.setattr(public_progress.os, "replace", fail_replace)
+
+    def on_run(agent: Any, _prompt: str, _task_id: str) -> dict[str, Any]:
+        _emit_api_events(attempt)
+        agent.kwargs["stream_delta_callback"]("stream chunk")
+        agent.kwargs["interim_assistant_callback"]("safe complete interim")
+        agent.kwargs["tool_start_callback"](
+            "TOOL_CALL_ID_PRIVATE_CANARY",
+            "read_file",
+            {"path": "PRIVATE_PATH_CANARY"},
+        )
+        return {"completed": True, "failed": False, "partial": False, "final_response": "done"}
+
+    dependencies, _stats = _fake_dependencies(attempt, on_run=on_run)
+    result = scoped_agent.run_attempt(attempt["request"], dependencies=dependencies)
+
+    assert result["completed"] is True
+    assert result["partial_output"] is True
+    assert result["tool_seen"] is True
+    assert not (attempt["attempt_dir"] / "public-progress.json").exists()
+    assert "PRIVATE_IO_FAILURE_CANARY" not in json.dumps(result)

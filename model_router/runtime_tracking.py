@@ -29,6 +29,7 @@ class RouteRuntime:
     task_id: str
     registry: Any
     emit: Callable
+    ui_session_id: str = ""
 
     def track(
         self,
@@ -132,4 +133,4 @@ def capture_runtime(*, task_id: str = "", expected_profile: str = "", get_env=No
         raise RuntimeError("Hermes background process adoption is unavailable")
     if emit is None:
         from tools.desktop_ui import emit
-    return RouteRuntime(parent, key, owner, registry, emit)
+    return RouteRuntime(parent, key, owner, registry, emit, ui_session_id=ui_session)

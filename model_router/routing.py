@@ -466,6 +466,7 @@ class Router:
             "route_class": role,
             "runner_mode": mode,
             "parent_session_id": self.runtime.parent_session_id if self.runtime is not None else None,
+            "ui_session_id": getattr(self.runtime, "ui_session_id", "") if self.runtime is not None else "",
             "verification_kind": verification_kind,
             "cwd": str(working_dir),
             "timeout_seconds": bounded_timeout,
@@ -640,6 +641,12 @@ class Router:
             # The worker records its own PID in state.json as soon as it starts;
             # avoid returning an ambiguous failure after the process was spawned.
             pass
+        try:
+            from .job_progress import index_job
+            index_job(home, snapshot, {"process_id": tracking.get("process_id")})
+        except (OSError, ValueError, RuntimeError):
+            # Presentation only. The worker is already owned: never relaunch it.
+            tracking["progress_tracking_error"] = True
         return {
             "job_id": job_id,
             "status": "running",
