@@ -556,7 +556,7 @@ test('whole-page handler includes all three changed fallbacks with independent t
     ['claire', 'native', false], ['claire', 'routing', true], ['other', 'delegation', false]
   ])
   assert.match(text(h.tree), /일반 대화 폴백/)
-  assert.match(text(h.tree), /코딩·검증 라우팅 폴백/)
+  assert.match(text(h.tree), /작업·검증 라우팅 폴백/)
   assert.match(text(h.tree), /네이티브 서브 에이전트 폴백/)
   assert.equal(h.calls.some(x => x.operation === 'fallback-preview'), false)
   assert.throws(() => h.byId('confirm-preview'))
@@ -687,5 +687,5 @@ test('unchanged saved routing fallback is checked against changed main model in 
   globalButton(h, '저장')
   await h.flush()
   assert.equal(h.calls.length, 0)
-  assert.match(text(h.tree), /저장된 코딩·검증 라우팅 폴백/)
+  assert.match(text(h.tree), /저장된 작업·검증 라우팅 폴백/)
 })

@@ -1,12 +1,12 @@
 ---
 name: adaptive-coding-orchestration
-description: Use for nearly all coding tasks—implementation, debugging, tests, architecture and code review. Load the Model Router bundled policy and obey the active profile's routing gate.
+description: Use for coding or complex non-coding judgment.
 version: 1.0.0
 ---
 
 # Adaptive Coding Orchestration
 
-This compatibility entry preserves automatic coding-skill discovery and the existing slash name. The canonical policy and executable routing are owned by the **model-router** plugin.
+This compatibility entry covers coding and complex non-coding judgment (ambiguous evidence, consequential content errors or repeated conceptual failure), not routine writing/extraction. It preserves the existing slash name. The canonical policy and executable routing are owned by the **model-router** plugin.
 
 1. Load `skill_view(name="model-router:adaptive-coding-orchestration")`.
 2. Query `coding_route(action="config")` (discover the tool if deferred).

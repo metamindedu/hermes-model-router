@@ -1,5 +1,11 @@
 # Model Router implementation contract
 
+## Common policy scope: complex non-coding work
+
+User requests the same routing guidance for every installed profile and matching settings-page copy, published to GitHub. Extend policy only for ambiguity, interdependent evidence, consequential content errors or repeated conceptual failure; do not route routine writing, translation or simple extraction to Heavy merely because of length. Preserve tool/skill names, purpose enums, model choices, fallback consent and per-profile opt-in. All-profile policy distribution is not permission to enable routing everywhere.
+
+Keep the change to bundled policy, discovery shims, explanatory UI/tool copy, docs and focused regression tests. Parent installs only the reviewed changed files after checking each installed baseline; synchronize existing default/named-profile shims and the shared legacy entry to the canonical plugin shim so stale non-coding exclusions cannot override it. Do not run initial-install activation/config migration or replace unrelated installed hotfixes. Record before/after config and settings hashes, verify identical policy/UI payloads and unchanged settings across discovered profiles, and confirm exact GitHub commit after push. Existing Git rollback is sufficient for these routine tracked changes; do not create whole-profile backups.
+
 ## 2026-10-02: Heavy/Light 다중 프로필 적용
 
 사용자가 전체 프로필 선택 후 저장해도 불러온 프로필만 바뀌는 문제를 보고했다. 활성 목록과 경로 복사 범위를 분리한다. 선택적 `routing_targets`가 없으면 기존 `[profile]`, 명시적 빈 배열이면 경로 미변경, 지정한 목록에는 Heavy/Light 선언만 복사한다. enabled는 `routing_profiles`, 모델은 `model_targets`, 폴백·비용 허용은 기존 별도 경로를 유지한다. 각 대상의 따라가기는 그 대상의 최종 모델로 해석하고 최종 충돌 검사를 유지한다.

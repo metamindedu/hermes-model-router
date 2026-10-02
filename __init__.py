@@ -51,7 +51,7 @@ def register(ctx):
             print("MODEL_ROUTER_JSON:" + json.dumps({"error": type(exc).__name__, "message": "작업이 완료되지 않았습니다. 상태를 확인한 후 다시 미리보기 하세요."}, ensure_ascii=False))
             return 2
 
-    ctx.register_cli_command("model-router", "Profile model settings and coding routing", cli_setup, cli_handler)
+    ctx.register_cli_command("model-router", "Profile model settings and task routing", cli_setup, cli_handler)
 
     # Observers are inert outside a validated plugin-owned attempt. Registration
     # does not change profile settings or make ordinary requests route-scoped.
@@ -81,14 +81,14 @@ def register(ctx):
     ctx.register_skill(
         "adaptive-coding-orchestration",
         Path(__file__).parent / "skills/adaptive-coding-orchestration/SKILL.md",
-        "Profile-enabled coding orchestration: Light implementation, verified Heavy semantic review.",
+        "Profile-enabled coding and complex non-coding orchestration: Light bounded work, verified Heavy semantic review.",
     )
 
     def handler(args, **kwargs):
         try:
             def run(service):
                 if not service.routing_config(service.active_profile())["enabled"]:
-                    return {"error": "routing_disabled", "message": "현재 프로필의 코딩 라우팅이 꺼져 있습니다."}
+                    return {"error": "routing_disabled", "message": "현재 프로필의 작업 라우팅이 꺼져 있습니다."}
                 action = args.get("action")
                 if action == "config":
                     return service.routing_config(service.active_profile())
@@ -114,7 +114,7 @@ def register(ctx):
 
     schema = {
         "name": "coding_route",
-        "description": "Run profile-approved coding routes. Read model-router:adaptive-coding-orchestration first. config reads effective roles; start launches one bounded job; status reads its evidence. implementation/mechanical/preliminary-review use Light; plan/semantic-final/independent-review use Heavy. Disabled profiles are denied. This tool never changes model settings. A verified model identity is not itself a semantic GO.",
+        "description": "Run profile-approved task and verification routes for coding and complex non-coding judgment. Read model-router:adaptive-coding-orchestration first. Heavy planning and semantic review apply to complex judgment; routine writing, translation, and simple extraction do not need Heavy. config reads effective roles; start launches one bounded job; status reads its evidence. implementation/mechanical/preliminary-review use Light; plan/semantic-final/independent-review use Heavy. Disabled profiles are denied. This tool never changes model settings. A verified model identity is not itself a semantic GO.",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {

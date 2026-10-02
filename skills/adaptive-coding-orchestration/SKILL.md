@@ -1,6 +1,6 @@
 ---
 name: adaptive-coding-orchestration
-description: Use for coding implementation, debugging, architecture and review in profiles where Model Router enables coding routes.
+description: Use for coding or complex non-coding judgment.
 version: 1.0.0
 ---
 
@@ -13,6 +13,14 @@ This policy is bundled with the model-router plugin. Model choices and profile e
 Load coding_route via tool discovery when absent from the current tool list. Query action=config. If the plugin/profile is disabled or the tool is unavailable, do not bypass the gate through an old script or global config change. Explain that a new session or plugin activation is needed. Safe local work may continue, but required Heavy review is unmet.
 
 Models are operator-assigned roles, not a claim about benchmark capability. Main may be Light or Heavy; do not infer class from a model name or reasoning effort. Heavy/Light may follow Main/Delegation or use separate overrides. The plugin resolves the actual profile setting at execution.
+
+## Scope: coding and complex non-coding judgment
+
+Apply this same role policy to non-coding work only when it involves substantial ambiguity, interdependent evidence, consequential content errors, or repeated conceptual failure: for example textbook-to-exam/card production with OCR, answer/explanation alignment and law-year differences. Do not route ordinary writing, translation, summaries, simple extraction or one-step lookups to Heavy just because they are non-coding or long.
+
+Heavy owns the difficult planning/diagnosis and semantic acceptance; bounded workers may extract, draft or apply explicit corrections. Divide large content work by nonoverlapping subject/item ranges with saved checkpoints and a concrete time/retry budget. Pilot the output before scaling. Keep external writes serialized under existing approvals; do not shrink learning coverage to fit a draft quota or treat schema validation as content verification. On unresolved OCR or source conflicts, return the exact blocked items rather than an unchecked substitute format.
+
+Use the existing approved tool purposes without changing the plugin implementation, global model settings, fallback consent or profile gates. Native delegation wording does not select Heavy. The parent checks actual route evidence and owns final acceptance.
 
 ## Classify work
 

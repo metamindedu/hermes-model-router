@@ -439,7 +439,7 @@ export function primaryRouteForFallback(row, role, projection = null) {
 }
 
 export function routingFallbackValidation(draft, targetRows = [], projection = null) {
-  if (!draft || typeof draft.enabled !== 'boolean') return '코딩·검증 라우팅 폴백 설정을 확인할 수 없습니다.'
+  if (!draft || typeof draft.enabled !== 'boolean') return '작업·검증 라우팅 폴백 설정을 확인할 수 없습니다.'
   if (!draft.enabled) return ''
   for (const role of ['heavy', 'light']) {
     const route = draft[role]
@@ -459,7 +459,7 @@ export function routingFallbackValidation(draft, targetRows = [], projection = n
 }
 
 export function fallbackScopeTitle(scope) {
-  return ({ native: '일반 대화 폴백', routing: '코딩·검증 라우팅 폴백', delegation: '네이티브 서브 에이전트 폴백' })[scope] || '폴백'
+  return ({ native: '일반 대화 폴백', routing: '작업·검증 라우팅 폴백', delegation: '네이티브 서브 에이전트 폴백' })[scope] || '폴백'
 }
 
 function fallbackValueForScope(scope, value) {
@@ -596,7 +596,7 @@ export function projectedRoutingFallbackErrors(profiles, projection, updatedFall
     )
     if (!primaryChanged) continue
     const error = routingFallbackValidation(value, [row], projection)
-    if (error) errors.push(`프로필 ${row.name}의 저장된 코딩·검증 라우팅 폴백: ${error}`)
+    if (error) errors.push(`프로필 ${row.name}의 저장된 작업·검증 라우팅 폴백: ${error}`)
   }
   return errors
 }
@@ -606,11 +606,11 @@ export function previewFieldLabel(field) {
     native_fallback: '일반 대화 폴백',
     fallback_providers: '일반 대화 폴백 목록',
     fallback_model: '이전 대화 폴백 설정',
-    'routing.fallback': '코딩·검증 라우팅 폴백',
+    'routing.fallback': '작업·검증 라우팅 폴백',
     delegation_fallback: '네이티브 서브 에이전트 폴백',
     'delegation.fallback_providers': '네이티브 서브 에이전트 폴백 목록',
     'fallback_consent.native': '일반 대화 폴백 승인 기록',
-    'fallback_consent.routing': '코딩·검증 라우팅 폴백 승인 기록',
+    'fallback_consent.routing': '작업·검증 라우팅 폴백 승인 기록',
     'fallback_consent.delegation': '네이티브 서브 에이전트 폴백 승인 기록'
   }
   return labels[field] || field || '설정 항목'
@@ -895,7 +895,7 @@ function RouterPage({ ctx: pluginContext }) {
   const routingFallbackDraftChanged = Boolean(routingFallbackDraft && fallbackBaselines.routing && !sameValue(routingFallbackDraft, fallbackBaselines.routing))
   const delegationFallbackDraftChanged = Boolean(delegationFallbackDraft && fallbackBaselines.delegation && !sameValue(delegationFallbackDraft, fallbackBaselines.delegation))
   const nativeFallbackError = nativeFallbackDraft ? nativeFallbackValidation(nativeFallbackDraft) : '이 프로필의 대화 fallback 상태를 지원하지 않습니다.'
-  const routingFallbackError = routingFallbackDraft ? routingFallbackValidation(routingFallbackDraft, routingFallbackRows) : '이 프로필의 코딩 fallback 상태를 지원하지 않습니다.'
+  const routingFallbackError = routingFallbackDraft ? routingFallbackValidation(routingFallbackDraft, routingFallbackRows) : '이 프로필의 작업 라우팅 폴백 상태를 지원하지 않습니다.'
   const delegationFallbackError = delegationFallbackDraft ? delegationFallbackValidation(delegationFallbackDraft) : '네이티브 서브 에이전트 폴백 설정을 확인할 수 없습니다. 상태를 새로고침하세요.'
   const selectedRoutingTargets = reconcileModelTargets(routingTargets, profileNames)
   const routingDraftChanged = Boolean(draft && routingBaseline && !sameValue({ heavy: draft.routing.heavy, light: draft.routing.light }, routingBaseline))
@@ -1318,7 +1318,7 @@ function RouterPage({ ctx: pluginContext }) {
     id: 'routing-targets', style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: 'Heavy/Light 설정 적용 대상' }),
-      jsx('p', { style: styles.hint, children: '처음에는 모든 프로필이 선택됩니다. Heavy/Light 값을 수정하거나 이 대상 목록을 직접 선택한 뒤 저장하면, 선택한 프로필에 설정을 복사합니다. 따라가기는 각 대상의 모델을 사용하며, 라우팅 활성 상태와 폴백은 복사하지 않습니다.' }),
+      jsx('p', { style: styles.hint, children: '처음에는 모든 프로필이 선택됩니다. 이 목록은 Heavy/Light 설정 복사 대상이며 라우팅 활성 프로필을 바꾸지 않습니다. 값을 수정하거나 대상을 직접 선택한 뒤 저장하면 선택한 프로필에 설정을 복사합니다. 따라가기는 각 대상의 모델을 사용하며, 폴백은 복사하지 않습니다.' }),
       jsxs('div', { style: styles.selectionToolbar, children: [
         jsx('span', { style: styles.hint, children: `${selectedRoutingTargets.length}/${profileNames.length}개 선택 · 이번 저장 적용 ${routingWriteTargets.length}개` }),
         jsxs('div', { style: styles.actions, children: [
@@ -1335,7 +1335,7 @@ function RouterPage({ ctx: pluginContext }) {
     style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '라우팅 활성 프로필' }),
-      jsx('p', { style: styles.hint, children: '여기는 라우팅을 켜고 끄는 목록입니다. Heavy/Light 모델 복사 대상은 위의 별도 목록에서 선택합니다. 새 프로필은 기본적으로 활성화되지 않습니다.' }),
+      jsx('p', { style: styles.hint, children: '공통 정책은 모든 프로필에서 같지만, 라우팅은 여기서 활성화한 프로필에서만 사용합니다. Heavy/Light 모델 복사 대상은 위의 별도 목록에서 선택하며 활성 멤버십은 복사하지 않습니다. 새 프로필은 기본적으로 활성화되지 않습니다.' }),
       jsx('div', { style: styles.profileList, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `routing-profile-${row.name}`, label: row.name, checked: routingProfiles.includes(row.name), disabled, onChange: checked => toggleRoutingProfile(row.name, checked) }) }, row.name)) })
     ]
   })
@@ -1349,7 +1349,7 @@ function RouterPage({ ctx: pluginContext }) {
         jsxs('article', { style: styles.roleCard, children: [jsx('h3', { style: styles.roleTitle, children: '가벼운 작업' }), jsx(ChoiceField, { id: 'light-follow', label: '대상 기준', value: activeRoutes.light?.follow || 'delegation', disabled, onChange: value => changeFollow('light', value), options: [{ value: 'delegation', label: '작업 위임 모델 따라가기' }, { value: 'custom', label: '별도 모델 지정' }] }), activeRoutes.light?.follow === 'custom' ? jsx(RoleRouteFields, { prefix: 'light-custom', route: activeRoutes.light.custom, disabled, onChange: (field, value) => updateRoutingRoute('light', field, value) }) : jsx('p', { style: styles.hint, children: '선택한 프로필의 작업 위임 모델을 사용합니다.' })] })
       ] }),
       jsxs('div', { id: 'legacy-routing-fallback-summary', style: { borderTop: '1px solid var(--ui-stroke-tertiary)', paddingTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.45rem' }, children: [
-        jsx('strong', { children: '코딩 대체 설정 · 읽기 전용' }),
+        jsx('strong', { children: '작업 라우팅 대체 설정 · 읽기 전용' }),
         jsx('p', { style: styles.hint, children: currentRow?.fallbacks?.routing ? `${currentRow.fallbacks.routing.enabled === true ? '사용' : '미사용'} · Heavy ${readableValue(currentRow.fallbacks.routing.heavy)} · Light ${readableValue(currentRow.fallbacks.routing.light)}` : '상태를 확인할 수 없습니다.' }),
         jsx('a', { href: '#fallback-management', style: { color: 'var(--ui-accent)', fontSize: '0.84rem' }, children: '대체 실행 관리 열기' })
       ] })
@@ -1437,10 +1437,10 @@ function RouterPage({ ctx: pluginContext }) {
   ] })
 
   const routingFallbackPanel = jsxs('article', { style: styles.roleCard, children: [
-    jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '코딩·검증 라우팅 폴백' }), jsx(Badge, { variant: routingFallbackStatus?.enabled ? 'warn' : 'muted', children: routingFallbackStatus?.enabled ? '현재 사용' : routingFallbackStatus ? '현재 꺼짐' : '상태 미지원' }), routingFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null] }),
-    jsx('p', { style: styles.hint, children: '이 플러그인이 Heavy/Light로 배정한 코딩·검증 작업의 예비 모델입니다. 구독 사용량 소진 때문에 작업을 시작하지 못한 경우, 같은 등급의 예비 모델로 새 작업을 최대 한 번 시도합니다. 일반 대화나 네이티브 위임 폴백과는 별개입니다.' }),
+    jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '작업·검증 라우팅 폴백' }), jsx(Badge, { variant: routingFallbackStatus?.enabled ? 'warn' : 'muted', children: routingFallbackStatus?.enabled ? '현재 사용' : routingFallbackStatus ? '현재 꺼짐' : '상태 미지원' }), routingFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null] }),
+    jsx('p', { style: styles.hint, children: '이 플러그인이 Heavy/Light로 배정한 작업의 예비 모델입니다. 구독 사용량 소진 때문에 작업을 시작하지 못한 경우, 같은 등급의 예비 모델로 새 작업을 최대 한 번 시도합니다. 일반 대화나 네이티브 위임 폴백과는 별개입니다.' }),
     jsx('p', { style: styles.warning, children: '실패 문구만으로는 재시도하지 않습니다. 확인된 한도 초과가 아니거나 이미 도구/부분 출력이 있으면 재시도하지 않습니다. 대체 실행에는 별도 비용이 발생할 수 있습니다.' }),
-    routingFallbackStatus?.enabled && currentRow?.routing?.enabled !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필의 코딩 라우팅은 현재 꺼져 있습니다. 여기서 라우팅 활성화나 프로필 멤버십은 변경하지 않습니다.' }) : null,
+    routingFallbackStatus?.enabled && currentRow?.routing?.enabled !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필의 작업 라우팅은 현재 꺼져 있습니다. 여기서 라우팅 활성화나 프로필 멤버십은 변경하지 않습니다.' }) : null,
     !fallbackSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '폴백 설정을 안전하게 변경할 수 있는지 확인되지 않아 읽기 전용으로 표시합니다. 플러그인 업데이트 후 상태를 새로고침하세요.' }) : null,
     jsxs('div', { style: styles.fields, children: [
       jsx('p', { style: styles.actual, children: `저장 설정: ${routingFallbackStatus?.enabled ? '사용' : '꺼짐'} · Heavy ${readableValue(routingFallbackStatus?.heavy)} · Light ${readableValue(routingFallbackStatus?.light)}` }),
@@ -1448,7 +1448,7 @@ function RouterPage({ ctx: pluginContext }) {
       jsx('p', { style: styles.actual, children: `Light 실행 경로: ${readableValue(primaryRouteForFallback(currentRow, 'light'))} → ${routingFallbackStatus?.enabled ? readableValue(routingFallbackStatus.light) : '대체 꺼짐'}` })
     ] }),
     routingEditable ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.85rem' }, children: [
-      jsx(CheckRow, { id: 'routing-fallback-enabled', label: '코딩·검증 라우팅의 예비 모델 사용', detail: '템플릿 선택만으로는 켜지지 않습니다.', checked: routingFallbackDraft.enabled, disabled, onChange: checked => updateFallbackDraft('routing', current => ({ ...current, enabled: checked })) }),
+      jsx(CheckRow, { id: 'routing-fallback-enabled', label: '작업·검증 라우팅의 예비 모델 사용', detail: '템플릿 선택만으로는 켜지지 않습니다.', checked: routingFallbackDraft.enabled, disabled, onChange: checked => updateFallbackDraft('routing', current => ({ ...current, enabled: checked })) }),
       jsx('div', { style: styles.presetGrid, children: ROUTING_FALLBACK_PRESETS.map(preset => jsx('button', { id: `routing-fallback-preset-${preset.id}`, type: 'button', disabled, onClick: () => updateFallbackDraft('routing', current => applyRoutingFallbackPresetDraft(current, preset.id)), style: styles.presetCard, children: [jsx('strong', { children: preset.name }), jsx('span', { style: styles.hint, children: preset.description }), jsx('span', { style: styles.hint, children: `Heavy ${readableValue(preset.heavy)} · Light ${readableValue(preset.light)} · 사용 여부는 그대로 유지` })] }, preset.id)) }),
       jsx('div', { style: styles.roleGrid, children: ['heavy', 'light'].map(role => jsxs('article', { style: styles.roleCard, children: [
         jsx('h4', { style: styles.roleTitle, children: role === 'heavy' ? 'Heavy 작업' : 'Light 작업' }),
@@ -1461,7 +1461,7 @@ function RouterPage({ ctx: pluginContext }) {
       fallbackTargetGroup('routing', routingFallbackTargets, routingEditable),
       fallbackError?.scope === 'routing' ? jsx('p', { role: 'alert', style: styles.warning, children: fallbackError.message }) : null,
       jsx(Button, { id: 'routing-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('routing'), onClick: () => void saveFallback('routing'), children: applyPending ? '저장 중…' : '저장' })
-    ] }) : jsx('div', { role: 'note', style: styles.warning, children: routingFallbackStatus ? '현재 코딩 대체 정책은 표시만 가능합니다.' : '이 프로필의 코딩 fallback 상태를 사용할 수 없습니다. 기존 설정은 변경되지 않습니다.' })
+    ] }) : jsx('div', { role: 'note', style: styles.warning, children: routingFallbackStatus ? '현재 작업 라우팅 대체 정책은 표시만 가능합니다.' : '이 프로필의 작업 라우팅 폴백 상태를 사용할 수 없습니다. 기존 설정은 변경되지 않습니다.' })
   ] })
 
   const delegationStatus = currentRow?.fallbacks?.delegation
@@ -1477,7 +1477,7 @@ function RouterPage({ ctx: pluginContext }) {
       jsx(Badge, { variant: delegationStatusValid && delegationStatus.mode !== 'off' ? 'warn' : 'muted', children: delegationStatusValid ? delegationModeLabel(delegationStatus.mode) : '상태 미지원' }),
       delegationFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null
     ] }),
-    jsx('p', { style: styles.hint, children: 'Hermes의 네이티브 위임 기능(delegate_task)으로 일을 맡긴 서브 에이전트의 예비 모델입니다. 이 플러그인의 Heavy/Light 코딩·검증 라우팅과는 다른 설정입니다.' }),
+    jsx('p', { style: styles.hint, children: 'Hermes의 네이티브 위임 기능(delegate_task)으로 일을 맡긴 서브 에이전트의 예비 모델입니다. 이 플러그인의 Heavy/Light 작업·검증 라우팅과는 다른 설정입니다.' }),
     jsx('p', { style: styles.warning, children: '기본 규칙에서는 모델·제공자를 따로 지정하지 않은 서브 에이전트만 메인 대화의 예비 목록을 물려받습니다. 특정 모델을 지정한 서브 에이전트도 전환하려면 위임 전용 목록을 선택하세요. 이미 진행 중인 위임 작업을 다시 시작하거나 즉시 바꾸지는 않습니다.' }),
     jsxs('div', { style: styles.fields, children: [
       jsx('p', { style: styles.actual, children: `저장 정책: ${delegationStatusValid ? delegationModeLabel(fallbackBaselines.delegation?.mode) : '확인할 수 없음'} · 목록 ${delegationChainText(fallbackBaselines.delegation?.chain)}` }),
@@ -1519,10 +1519,10 @@ function RouterPage({ ctx: pluginContext }) {
     ] }) : null
   ] })
 
-  const fallbackManagement = section('예비 모델(폴백) 설정', '주 모델을 사용할 수 없을 때 대신 쓸 모델입니다. 메인 대화, Heavy/Light 코딩·검증, 네이티브 서브 에이전트를 따로 설정합니다. 수정한 폴백은 아래 전체 미리보기·저장에도 포함됩니다.', jsxs('div', { id: 'fallback-management', style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [
+  const fallbackManagement = section('예비 모델(폴백) 설정', '주 모델을 사용할 수 없을 때 대신 쓸 모델입니다. 메인 대화, Heavy/Light 작업·검증, 네이티브 서브 에이전트를 따로 설정합니다. 수정한 폴백은 아래 전체 미리보기·저장에도 포함됩니다.', jsxs('div', { id: 'fallback-management', style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [
     !fallbackSupported ? jsx('div', { role: 'alert', style: styles.warning, children: '폴백 편집 기능을 확인할 수 없어 기존 설정을 읽기 전용으로 표시합니다. 플러그인 업데이트 후 상태를 새로고침하세요.' }) : null,
     jsxs('div', { style: styles.fields, children: [
-      jsx('p', { style: styles.hint, children: `대상 원본 프로필: ${selectedProfile || '선택 안 됨'} · 대화 대상 ${nativeFallbackTargets.length}개 · 코딩 대상 ${routingFallbackTargets.length}개 · 위임 대상 ${delegationFallbackTargets.length}개` }),
+      jsx('p', { style: styles.hint, children: `대상 원본 프로필: ${selectedProfile || '선택 안 됨'} · 대화 대상 ${nativeFallbackTargets.length}개 · 작업·검증 대상 ${routingFallbackTargets.length}개 · 위임 대상 ${delegationFallbackTargets.length}개` }),
       jsx('p', { style: styles.hint, children: '프리셋은 초안만 채웁니다. 자동 활성화나 승인 저장을 하지 않습니다. 모델 역할 프리셋, 모델 적용 대상, 라우팅 활성 프로필과도 분리되어 있습니다.' })
     ] }),
     jsx('div', { style: styles.roleGrid, children: [nativeFallbackPanel, routingFallbackPanel, delegationFallbackPanel] })
@@ -1544,7 +1544,7 @@ function RouterPage({ ctx: pluginContext }) {
   }, summaryRoutingUpdates) : []
   const modifiedFallbackSummary = [
     { scope: 'native', label: '일반 대화', changed: nativeFallbackDraftChanged || fallbackTargetEdits.native, count: nativeFallbackTargets.length },
-    { scope: 'routing', label: '코딩·검증', changed: routingFallbackDraftChanged || fallbackTargetEdits.routing, count: routingFallbackTargets.length },
+    { scope: 'routing', label: '작업·검증', changed: routingFallbackDraftChanged || fallbackTargetEdits.routing, count: routingFallbackTargets.length },
     { scope: 'delegation', label: '네이티브 위임', changed: delegationFallbackDraftChanged || fallbackTargetEdits.delegation, count: delegationFallbackTargets.length }
   ].filter(item => item.changed)
   const scopeDraftErrors = [
@@ -1563,7 +1563,7 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
       profiles.length ? section('대상 프로필', '편집할 설정 프로필을 고릅니다. 저장 검증 중 범위가 바뀌면 적용 전 요청은 안전하게 취소됩니다.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `현재 Desktop 프로필: ${activeProfile || '확인 중'} · 연결: ${connectionId || 'local'} · 게이트웨이: ${gateway || 'idle'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
       profiles.length ? section('모델 대상', '네 역할의 값을 한 번 편집하고, 아래 별도 선택 목록에 체크한 프로필에만 모델 값을 적용합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [modelFields, modelTargetGroup] })) : null,
-      profiles.length ? section('작업 라우팅', 'Heavy/Light 모델 설정의 적용 대상과 라우팅을 사용할 프로필을 따로 선택합니다. 일반 모델 적용 대상 및 폴백 대상과도 독립적입니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
+      profiles.length ? section('작업 라우팅', '코딩과 복잡한 비코딩 판단 작업에 공통 정책을 적용합니다. 근거 충돌, 여러 근거를 종합하는 판단, 오류 영향이 큰 학습 자료·문항 검토, 반복된 개념적 실패가 예입니다. 단순 글쓰기·번역·요약·추출은 Heavy 대상이 아닙니다. Heavy/Light 모델 적용 대상과 라우팅 활성 프로필은 따로 선택하며, 정책을 공통 배포해도 기존 프로필 활성 멤버십은 바뀌지 않습니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { style: styles.hint, children: routingSummary }),
         jsxs('details', { style: styles.cardSection, children: [
           jsxs('summary', { style: { cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem', flexWrap: 'wrap' }, children: [jsx('strong', { children: '라우팅 세부 설정' }), jsx(Badge, { variant: 'muted', children: `활성 프로필 ${routingProfiles.length}개` })] }),
