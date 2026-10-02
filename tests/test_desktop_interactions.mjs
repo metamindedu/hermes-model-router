@@ -185,6 +185,50 @@ test('routing source-only target never widens when changing the loaded profile',
   assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, ['claire'])
 })
 
+test('background status refresh cannot promote old routing copy intent to a newer revision', async () => {
+  const h = harness()
+  h.click('routing-target-all')
+  const staleSave = h.byId('global-save').props.onClick
+  const newer = structuredClone(h.data())
+  newer.revision++
+  newer.profiles.find(r => r.name === 'other').routing.heavy.custom.model = 'external-new-route'
+  h.setData(newer); h.render()
+  assert.equal(h.byId('global-save').props.disabled, true)
+  staleSave(); await h.flush()
+  assert.equal(h.calls.length, 0)
+  assert.deepEqual(h.selected('routing-target-'), ['claire', 'default', 'other'])
+  h.clickLabel('상태 새로고침'); await h.flush()
+  h.click('global-save'); await h.flush()
+  const payload = h.calls.find(c => c.operation === 'preview').body
+  assert.equal(payload.expected_revision, 8)
+  assert.deepEqual(payload.routing_targets, [])
+})
+
+test('background revision change blocks edited routing without discarding draft or rebasing it', async () => {
+  const h = harness()
+  h.input('heavy-custom-model', 'unsaved-old-edit')
+  h.setData({ ...structuredClone(h.data()), revision: 9 }); h.render()
+  assert.equal(h.byId('global-save').props.disabled, true)
+  assert.equal(h.byId('heavy-custom-model').props.value, 'unsaved-old-edit')
+  assert.equal(h.calls.length, 0)
+})
+
+test('status refresh during pending validation does not change captured targets/revision or duplicate apply', async () => {
+  const h = harness()
+  let release
+  h.setResponder(operation => operation === 'preview'
+    ? new Promise(resolve => { release = resolve }) : { status: 'applied', revision: 8 })
+  h.input('heavy-custom-model', 'captured-route')
+  h.click('global-save'); await h.flush()
+  const captured = structuredClone(h.calls[0].body)
+  h.setData({ ...structuredClone(h.data()), revision: 8 }); h.render()
+  release({ plan_id: 'captured-plan', changes: [] }); await h.flush()
+  assert.deepEqual(h.calls[0].body, captured)
+  assert.equal(captured.expected_revision, 7)
+  assert.deepEqual([...captured.routing_targets].sort(), ['claire', 'default', 'other'])
+  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
+})
+
 test('initial page selects every model target but preserves routing opt-in membership', () => {
   const h = harness()
   assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])

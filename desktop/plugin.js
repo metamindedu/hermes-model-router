@@ -751,6 +751,7 @@ function RouterPage({ ctx: pluginContext }) {
   const [readyScope, setReadyScope] = useState(scopeKey)
   const [selectedProfile, setSelectedProfile] = useState(null)
   const [draft, setDraft] = useState(null)
+  const [draftRevision, setDraftRevision] = useState(null)
   const [modelTargets, setModelTargets] = useState(null)
   const [routingProfiles, setRoutingProfiles] = useState([])
   const [routingTargets, setRoutingTargets] = useState(null)
@@ -772,6 +773,7 @@ function RouterPage({ ctx: pluginContext }) {
   const [needsReload, setNeedsReload] = useState(false)
   const generationRef = useRef(0)
   const applyPendingRef = useRef(false)
+  const refreshPendingRef = useRef(false)
   const needsReloadRef = useRef(false)
   const applyScopeRef = useRef(null)
   const applyPhaseRef = useRef(null)
@@ -786,6 +788,16 @@ function RouterPage({ ctx: pluginContext }) {
     staleTime: 0
   })
   const profiles = Array.isArray(statusQuery.data?.profiles) ? statusQuery.data.profiles : []
+  const revisionChanged = draftRevision !== null && statusQuery.data?.revision !== draftRevision
+  useEffect(() => {
+    if (!revisionChanged || applyPendingRef.current || refreshPendingRef.current) return
+    // Never pair old draft/copy intent with a newer query revision. Preserve
+    // the draft for inspection but require an explicit fresh baseline.
+    generationRef.current += 1
+    setRoutingTargetEdited(false)
+    setPreview(null)
+    setFallbackPreview(null)
+  }, [revisionChanged, draftRevision, statusQuery.data?.revision, applyPending])
 
   useEffect(() => {
     if (readyScope === scopeKey) return
@@ -795,6 +807,7 @@ function RouterPage({ ctx: pluginContext }) {
     setReviewed(false)
     setSelectedProfile(null)
     setDraft(null)
+    setDraftRevision(null)
     setModelTargets(null)
     setRoutingProfiles([])
     setRoutingTargets(null)
@@ -833,6 +846,7 @@ function RouterPage({ ctx: pluginContext }) {
     const row = profiles.find(item => item.name === statusQuery.data.current_profile) || profiles[0]
     if (!row) return
     setSelectedProfile(row.name)
+    setDraftRevision(statusQuery.data.revision)
     setDraft(copyProfileDraft(row))
     setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
     setRoutingTargetEdited(false)
@@ -885,13 +899,13 @@ function RouterPage({ ctx: pluginContext }) {
   const delegationFallbackError = delegationFallbackDraft ? delegationFallbackValidation(delegationFallbackDraft) : '네이티브 서브 에이전트 폴백 설정을 확인할 수 없습니다. 상태를 새로고침하세요.'
   const selectedRoutingTargets = reconcileModelTargets(routingTargets, profileNames)
   const routingDraftChanged = Boolean(draft && routingBaseline && !sameValue({ heavy: draft.routing.heavy, light: draft.routing.light }, routingBaseline))
-  const routingCopyPending = routingDraftChanged || routingTargetEdited
+  const routingCopyPending = !revisionChanged && (routingDraftChanged || routingTargetEdited)
   const routingWriteTargets = routingCopyPending ? selectedRoutingTargets : []
   const routingTargetError = routingCopyPending && !selectedRoutingTargets.length ? 'Heavy/Light 설정 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
   const selectedTargets = reconcileModelTargets(modelTargets, profileNames)
   const allTargetsSelected = allModelTargetsSelected(selectedTargets, profileNames)
   const targetSummary = allTargetsSelected ? `전체 ${profileNames.length}개 프로필` : `${selectedTargets.length}/${profileNames.length}개 프로필`
-  const disabled = applyPending || needsReload || statusQuery.isFetching || !selectedProfile || !draft
+  const disabled = applyPending || needsReload || revisionChanged || statusQuery.isFetching || !selectedProfile || !draft
   const validPreview = previewMatchesScope(preview, scopeKey, generationRef.current, selectedProfile)
   const renderGeneration = generationRef.current
   const activeRoutes = draft?.routing || {}
@@ -1028,7 +1042,7 @@ function RouterPage({ ctx: pluginContext }) {
   const captureSaveSnapshot = () => freezeDeep({
     scopeKey,
     profile: selectedProfile,
-    revision: statusQuery.data.revision,
+    revision: draftRevision,
     draft: deepClone(draft),
     modelTargets: [...selectedTargets],
     routingProfiles: [...routingProfiles],
@@ -1133,7 +1147,7 @@ function RouterPage({ ctx: pluginContext }) {
 
 
   const saveAll = () => {
-    if (renderGeneration !== generationRef.current || !currentRow || !draft || !statusQuery.data || applyPendingRef.current || needsReloadRef.current) return
+    if (renderGeneration !== generationRef.current || revisionChanged || !currentRow || !draft || !statusQuery.data || applyPendingRef.current || needsReloadRef.current) return
     const snapshot = captureSaveSnapshot()
     return runSave({
       operation: '/preview', snapshot,
@@ -1169,7 +1183,7 @@ function RouterPage({ ctx: pluginContext }) {
 
 
   const reloadStatus = async () => {
-    if (applyPendingRef.current) return
+    if (applyPendingRef.current || refreshPendingRef.current) return
     if (needsReloadRef.current && needsReloadRef.scopeKey && scopeKey !== needsReloadRef.scopeKey) {
       setPageError('적용을 시작한 원래 Desktop 프로필·연결로 돌아간 뒤 실제 상태를 새로고침하세요. 이 화면에서는 결과를 추측하거나 다시 적용하지 않습니다.')
       return
@@ -1178,7 +1192,9 @@ function RouterPage({ ctx: pluginContext }) {
     const capturedScope = scopeKey
     const token = generationRef.current
     setPageError('')
-    const response = await statusQuery.refetch()
+    refreshPendingRef.current = true
+    let response
+    try { response = await statusQuery.refetch() } finally { refreshPendingRef.current = false }
     if (generationRef.current !== token || scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope) return
     if (response.error || !response.data) {
       setPageError(response.error?.message || '상태를 다시 불러오지 못했습니다.')
@@ -1198,6 +1214,7 @@ function RouterPage({ ctx: pluginContext }) {
       routing: reconcileFallbackTargets(current.routing, rows.map(item => item.name)),
       delegation: reconcileFallbackTargets(current.delegation, rows.map(item => item.name))
     }))
+    setDraftRevision(response.data.revision)
     if (row) {
       setSelectedProfile(row.name)
       setDraft(copyProfileDraft(row))
@@ -1554,6 +1571,7 @@ function RouterPage({ ctx: pluginContext }) {
         ] })
       ] })) : null,
       profiles.length ? fallbackManagement : null,
+      revisionChanged ? jsx('div', { role: 'alert', style: styles.warning, children: '다른 화면에서 설정이 변경되어 저장을 잠갔습니다. 편집값은 아직 보존되어 있습니다. 필요한 값을 확인한 뒤 상태 새로고침으로 최신 설정을 불러와 다시 편집하세요.' }) : null,
       pageError ? jsx('div', { role: 'alert', style: styles.warning, children: pageError }) : null,
       applyOutcome ? jsxs('div', { role: 'status', 'aria-live': 'polite', style: applyOutcome.kind === 'success' ? styles.message : styles.warning, children: [jsx('strong', { children: applyOutcome.kind === 'success' ? '적용 요청이 완료되었습니다.' : applyOutcome.kind === 'partial' ? '일부 설정만 적용되었을 수 있습니다.' : '적용 결과를 확인할 수 없습니다.' }), jsx('p', { style: styles.hint, children: applyOutcome.message || (applyOutcome.kind === 'success' ? '실제 상태를 새로고침해 확인하세요. 같은 계획을 다시 적용하지 않습니다.' : '다시 적용하지 마세요. 상태를 새로고침해 실제 반영 여부를 확인하세요.') }), applyOutcome.result ? jsx('p', { style: styles.value, children: readableValue(applyOutcome.result) }) : null] }) : null,
       needsReload ? jsx('div', { style: styles.actions, children: jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching, onClick: () => void reloadStatus(), children: statusQuery.isFetching ? '상태 확인 중…' : '실제 상태 확인 후 편집 재개' }) }) : null,
