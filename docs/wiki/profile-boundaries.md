@@ -12,4 +12,10 @@ sources: [../../PLAN.md, ../../docs/profile-audit.json]
 
 플러그인 register_skill만으로는 기본 available_skills 자동 발견을 대체하지 못하는 설치 버전이 있으므로, bare skill 호환 진입점은 남기고 실행 안내의 원본은 플러그인에 동봉한다. UI는 앱 수준이지만 도구 호출은 프로필에 귀속된다. 오래된 도구 참조가 남아도 런타임 guard가 비활성화를 확인한다.
 
+## 메시징 후속 턴의 세션 ID
+
+메시징 게이트웨이는 대화 경로·프로필 ContextVar를 바인딩하면서 저장 세션 ID를 비워 둘 수 있다. 새 에이전트 생성 시 ID가 채워지는 것만 확인하면 캐시된 에이전트를 재사용하는 후속 턴 실패를 놓친다. 도구 dispatcher가 넘기는 `session_id` kwarg를 별도 신뢰 경로로 취급하되, 이미 바인딩된 메시징 경로·프로필이 일치할 때만 작업 범위 안에서 보완한다. 모델 인자·전역 환경변수·task_id를 부모 ID로 사용하지 않는다.
+
+보완 범위에는 라우팅 캡처뿐 아니라 실제 native process adoption과 observer 생성까지 포함하고 예외에서도 원래 ContextVar로 복원한다. Desktop의 누락된 UI 바인딩, 다른 프로필, 기존 부모와 dispatcher ID 불일치는 계속 거부한다. 실제 registry dispatch를 거치는 캐시된 메시징 턴 회귀와 동시 프로필 격리 테스트를 함께 유지한다. 설치·hot reload·새 실제 모델 작업의 검증은 각각 별도 증거다.
+
 관련: [[index]], [[SCHEMA]].

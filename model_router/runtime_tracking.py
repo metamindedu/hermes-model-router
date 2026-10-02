@@ -6,6 +6,7 @@ its file-backed log and evidence; native adoption merely waits on that Popen.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import copy_context
 from dataclasses import dataclass
 import os
@@ -119,6 +120,45 @@ class RouteRuntime:
                 except Exception:
                     pass
             return None
+
+
+@contextmanager
+def route_session_context(*, session_id: str = "", expected_profile: str = ""):
+    """Bind a cached messaging turn's dispatcher ID for this launch only.
+
+    The host supplies session_id as a handler kwarg, never as model arguments.
+    Gateway cached turns may bind the lane/profile but leave SESSION_ID empty.
+    Require that existing task-local lane; never borrow process-global identity
+    or repair an incomplete Desktop context. Native adoption and its observer
+    must see the same scoped ID as capture_runtime, then restore it on exit.
+    """
+    from gateway.session_context import NON_MESSAGING_SESSION_SURFACES, scoped_current_session_id
+
+    values = {var.name: value for var, value in copy_context().items()
+              if var.name.startswith("HERMES_SESSION_") or var.name == "HERMES_UI_SESSION_ID"}
+    parent = values.get("HERMES_SESSION_ID", "")
+    if session_id and (not isinstance(session_id, str) or SESSION_TOKEN.fullmatch(session_id) is None):
+        raise ValueError("invalid dispatcher session identity")
+    if parent:
+        if session_id and parent != session_id:
+            raise ValueError("dispatcher session does not match current-session context")
+        yield
+        return
+    if not session_id:
+        yield  # capture_runtime retains its existing unbound/fail-closed rules.
+        return
+    surfaces = (values.get("HERMES_SESSION_PLATFORM", ""), values.get("HERMES_SESSION_SOURCE", ""))
+    key = values.get("HERMES_SESSION_KEY", "")
+    profile = values.get("HERMES_SESSION_PROFILE", "")
+    if (not any(surfaces) or any(not isinstance(s, str) for s in surfaces)
+            or any(s and s in NON_MESSAGING_SESSION_SURFACES for s in surfaces)
+            or values.get("HERMES_UI_SESSION_ID")
+            or not isinstance(key, str) or not key or len(key) > 512
+            or any(ord(c) < 32 for c in key)
+            or not expected_profile or profile != expected_profile):
+        raise ValueError("routing requires a bound messaging lane and matching profile")
+    with scoped_current_session_id(session_id):
+        yield
 
 
 def capture_runtime(*, task_id: str = "", expected_profile: str = "", get_env=None, registry=None, emit=None):

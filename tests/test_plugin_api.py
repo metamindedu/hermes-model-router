@@ -86,6 +86,8 @@ def plugin(monkeypatch):
     observer_module.record_event = lambda event_name, **payload: state.setdefault('events', []).append((event_name, payload))
     monkeypatch.setitem(sys.modules, observer_module.__name__, observer_module)
     runtime_module = ModuleType(package.__name__ + '.runtime_tracking')
+    from contextlib import nullcontext
+    runtime_module.route_session_context = lambda **kwargs: nullcontext()
     runtime_module.capture_runtime = lambda **kwargs: state.setdefault('runtime_calls', []).append(kwargs) or SimpleNamespace(parent_session_id='parent-session')
     monkeypatch.setitem(sys.modules, runtime_module.__name__, runtime_module)
     tools, skills = [], []

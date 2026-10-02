@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-02 | messaging-dispatch-context
+- 텔레그램 후속 턴에서 native dispatcher ID는 있지만 ContextVar ID가 비어 라우팅 시작이 거부되는 경로를 재현.
+- 프로필·메시징 경로가 바인딩된 호출에만 dispatcher ID를 작업 범위로 보완하는 경계와, native adoption/observer까지 동일 범위를 유지하는 테스트 원칙을 기록. 실제 설치·실행 결과는 별도 검증 증거로 판단한다.
+
 ## 2026-10-01 | single-save-and-timeout
 - 사용자 요청: 미리보기를 필수 절차에서 빼고 실시간 참고 요약 + 단일 저장 버튼으로 변경. 서버 단일 계획·revision/CAS·중복 쓰기 차단은 유지.
 - `body.timeout`과 SDK 세 번째 RPC 대기 인자의 서로 다른 제한, 같은 YAML을 키마다 파싱하는 지연을 조사. 정확한 bytes 비교 캐시와 반환값 복사로 외부 수정 감지를 보존한다. 실제 설치·응답 결과는 별도 검증 증거로 판단한다.
