@@ -1101,7 +1101,7 @@ class Service:
 
     def preview(self, body: dict) -> dict[str, Any]:
         required = {"expected_revision", "profile", "models", "model_targets", "routing", "routing_profiles"}
-        optional = {"fallback_updates", "fallback_confirmations"}
+        optional = {"fallback_updates", "fallback_confirmations", "routing_targets"}
         if not isinstance(body, dict) or not required <= set(body) or set(body) - required - optional:
             raise ValueError("preview body has unknown or missing fields")
         fallback_updates = body.get("fallback_updates", [])
@@ -1121,7 +1121,11 @@ class Service:
             raise ValueError("model_targets and routing_profiles must be lists")
         targets = [self._require_profile(name, discovered) for name in targets]
         selected = [self._require_profile(name, discovered) for name in selected]
-        if len(set(targets)) != len(targets) or len(set(selected)) != len(selected):
+        routing_targets = body.get("routing_targets", [profile])
+        if not isinstance(routing_targets, list):
+            raise ValueError("routing_targets must be a list")
+        routing_targets = [self._require_profile(name, discovered) for name in routing_targets]
+        if len(set(targets)) != len(targets) or len(set(selected)) != len(selected) or len(set(routing_targets)) != len(routing_targets):
             raise ValueError("profile lists must not contain duplicates")
         submitted_models = _models(body["models"])
         submitted_routing = _routing(body["routing"])
@@ -1135,6 +1139,8 @@ class Service:
         entries = dict(stored["profiles"]) if stored else {}
         all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
         after = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
+        if submitted_routing["fallback"] != after[profile]["routing"]["fallback"]:
+            raise ValueError("routing.fallback can only be changed by fallback_preview")
         changes: list[dict[str, Any]] = []
         snapshots: dict[str, dict[str, Any]] = {}
         writes: list[dict[str, Any]] = []
@@ -1166,16 +1172,17 @@ class Service:
                     writes.extend(role_writes)
             entry["models"] = desired
         selected_set = set(selected)
+        routing_target_set = set(routing_targets)
         for name in all_names:
             if name not in after or name not in discovered:
                 continue
             entry = after[name]
             old_enabled = bool(entry["routing"]["enabled"])
             new_enabled = name in selected_set
-            if name == profile:
-                if submitted_routing["fallback"] != entry["routing"]["fallback"]:
-                    raise ValueError("routing.fallback can only be changed by fallback_preview")
-                new_routing = dict(submitted_routing)
+            if name in routing_target_set:
+                new_routing = copy.deepcopy(entry["routing"])
+                new_routing["heavy"] = copy.deepcopy(submitted_routing["heavy"])
+                new_routing["light"] = copy.deepcopy(submitted_routing["light"])
                 new_routing["enabled"] = new_enabled
                 if entry["routing"] != new_routing:
                     changes.append({"profile": name, "field": "routing", "before": entry["routing"], "after": new_routing})

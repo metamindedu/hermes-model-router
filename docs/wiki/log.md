@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-02 | routing-primary-targets
+- 활성 체크 목록은 여러 프로필을 켜지만 Heavy/Light는 source 하나만 저장하던 계약과 사용자 일괄 적용 기대의 불일치를 확인.
+- 경로 복사 대상과 활성 상태를 분리하고, 모델-only 재저장의 암묵적 경로 덮어쓰기 방지·target별 폴백 보존·최종 상태 검증 원칙을 기록. 설치와 실제 테스트 결과는 별도 증거로 확인한다.
+
 ## 2026-10-02 | messaging-dispatch-context
 - 텔레그램 후속 턴에서 native dispatcher ID는 있지만 ContextVar ID가 비어 라우팅 시작이 거부되는 경로를 재현.
 - 프로필·메시징 경로가 바인딩된 호출에만 dispatcher ID를 작업 범위로 보완하는 경계와, native adoption/observer까지 동일 범위를 유지하는 테스트 원칙을 기록. 실제 설치·실행 결과는 별도 검증 증거로 판단한다.

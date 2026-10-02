@@ -18,4 +18,8 @@ sources: [../../PLAN.md, ../../docs/profile-audit.json]
 
 보완 범위에는 라우팅 캡처뿐 아니라 실제 native process adoption과 observer 생성까지 포함하고 예외에서도 원래 ContextVar로 복원한다. Desktop의 누락된 UI 바인딩, 다른 프로필, 기존 부모와 dispatcher ID 불일치는 계속 거부한다. 실제 registry dispatch를 거치는 캐시된 메시징 턴 회귀와 동시 프로필 격리 테스트를 함께 유지한다. 설치·hot reload·새 실제 모델 작업의 검증은 각각 별도 증거다.
 
+## Heavy/Light 적용 범위
+
+라우팅 활성 목록은 기능 사용 상태이지 경로 복사 대상이 아니다. 다중 적용은 별도의 명시적 대상 배열로 표현하고, 누락(기존 source-only)과 빈 배열(경로 미변경)을 구분한다. 각 대상의 Heavy/Light 선언만 복사하고 폴백·비용 허용·활성 상태는 각자 범위를 유지한다. 대상의 따라가기 해석과 retained/combined 폴백 검증도 같은 최종 상태를 보아야 한다. 초기 전체 선택을 복사 의도로 처리하거나, 한 번 선택한 대상이 이후 모델-only 저장에서도 반복 복사되게 만들지 않는다. UI의 기준값/복사 의도는 프로필 변경·새로고침에서 초기화한다.
+
 관련: [[index]], [[SCHEMA]].

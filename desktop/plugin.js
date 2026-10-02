@@ -182,14 +182,15 @@ export function toggleName(names, name, checked) {
   return [...set]
 }
 
-export function buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles) {
+export function buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets) {
   return {
     expected_revision: revision,
     profile,
     models: deepClone(draft.models),
     model_targets: Array.isArray(modelTargets) ? [...modelTargets] : [],
     routing: { ...deepClone(draft.routing), enabled: routingProfiles.includes(profile) },
-    routing_profiles: [...routingProfiles]
+    routing_profiles: [...routingProfiles],
+    ...(routingTargets === undefined ? {} : { routing_targets: [...routingTargets] })
   }
 }
 
@@ -427,12 +428,14 @@ export function routeIdentity(route) {
 }
 
 export function primaryRouteForFallback(row, role, projection = null) {
-  const isRoutingDraft = projection && row?.name === projection.profile
+  const isRoutingDraft = projection && (Array.isArray(projection.routing_targets)
+    ? projection.routing_targets.includes(row?.name)
+    : row?.name === projection.profile)
   const configured = (isRoutingDraft ? projection.routing : row?.routing)?.[role]
   if (configured?.follow === 'custom' && configured.custom) return configured.custom
   const modelRole = role === 'heavy' ? 'main' : 'delegation'
   if (projection?.model_targets?.includes(row?.name)) return projection.models?.[modelRole] || null
-  return row?.actual_models?.[modelRole] || row?.models?.[modelRole] || null
+  return row?.models?.[modelRole] || row?.actual_models?.[modelRole] || null
 }
 
 export function routingFallbackValidation(draft, targetRows = [], projection = null) {
@@ -519,11 +522,11 @@ export function buildFallbackPreviewBody(revision, scope, targetNames, value, pr
   return { expected_revision: revision, updates, confirmations }
 }
 
-export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}) {
-  const body = buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles)
+export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets) {
+  const body = buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets)
   const rows = Array.isArray(profiles) ? profiles : []
   const byName = new Map(rows.map(row => [row.name, row]))
-  const projection = { profile, models: deepClone(draft.models), routing: deepClone(body.routing), model_targets: [...body.model_targets] }
+  const projection = { profile, models: deepClone(draft.models), routing: deepClone(body.routing), model_targets: [...body.model_targets], routing_targets: body.routing_targets }
   const errors = []
   const updatesByProfile = new Map()
   const confirmations = []
@@ -750,6 +753,9 @@ function RouterPage({ ctx: pluginContext }) {
   const [draft, setDraft] = useState(null)
   const [modelTargets, setModelTargets] = useState(null)
   const [routingProfiles, setRoutingProfiles] = useState([])
+  const [routingTargets, setRoutingTargets] = useState(null)
+  const [routingBaseline, setRoutingBaseline] = useState(null)
+  const [routingTargetEdited, setRoutingTargetEdited] = useState(false)
   const [fallbackDrafts, setFallbackDrafts] = useState({ native: null, routing: null, delegation: null })
   const [fallbackBaselines, setFallbackBaselines] = useState({ native: null, routing: null, delegation: null })
   const [fallbackTargets, setFallbackTargets] = useState({ native: null, routing: null, delegation: null })
@@ -791,6 +797,9 @@ function RouterPage({ ctx: pluginContext }) {
     setDraft(null)
     setModelTargets(null)
     setRoutingProfiles([])
+    setRoutingTargets(null)
+    setRoutingBaseline(null)
+    setRoutingTargetEdited(false)
     setFallbackDrafts({ native: null, routing: null, delegation: null })
     setFallbackBaselines({ native: null, routing: null, delegation: null })
     setFallbackTargets({ native: null, routing: null, delegation: null })
@@ -825,6 +834,8 @@ function RouterPage({ ctx: pluginContext }) {
     if (!row) return
     setSelectedProfile(row.name)
     setDraft(copyProfileDraft(row))
+    setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
+    setRoutingTargetEdited(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
     const routingFallback = copyRoutingFallbackDraft(row.fallbacks?.routing)
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
@@ -834,6 +845,7 @@ function RouterPage({ ctx: pluginContext }) {
     setModelTargets(current => reconcileModelTargets(current, profiles.map(item => item.name)))
     setFallbackTargets(current => Object.fromEntries(['native', 'routing', 'delegation'].map(scope => [scope, selectFallbackTargets(current[scope], row.name, profiles.map(item => item.name), editableFallbackTargets(scope, profiles))])))
     setRoutingProfiles(profiles.filter(item => item.routing?.enabled === true).map(item => item.name))
+    setRoutingTargets(current => reconcileModelTargets(current, profiles.map(item => item.name)))
   }, [readyScope, scopeKey, statusQuery.data, selectedProfile, profiles])
 
   const invalidatePlan = () => {
@@ -871,6 +883,11 @@ function RouterPage({ ctx: pluginContext }) {
   const nativeFallbackError = nativeFallbackDraft ? nativeFallbackValidation(nativeFallbackDraft) : '이 프로필의 대화 fallback 상태를 지원하지 않습니다.'
   const routingFallbackError = routingFallbackDraft ? routingFallbackValidation(routingFallbackDraft, routingFallbackRows) : '이 프로필의 코딩 fallback 상태를 지원하지 않습니다.'
   const delegationFallbackError = delegationFallbackDraft ? delegationFallbackValidation(delegationFallbackDraft) : '네이티브 서브 에이전트 폴백 설정을 확인할 수 없습니다. 상태를 새로고침하세요.'
+  const selectedRoutingTargets = reconcileModelTargets(routingTargets, profileNames)
+  const routingDraftChanged = Boolean(draft && routingBaseline && !sameValue({ heavy: draft.routing.heavy, light: draft.routing.light }, routingBaseline))
+  const routingCopyPending = routingDraftChanged || routingTargetEdited
+  const routingWriteTargets = routingCopyPending ? selectedRoutingTargets : []
+  const routingTargetError = routingCopyPending && !selectedRoutingTargets.length ? 'Heavy/Light 설정 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
   const selectedTargets = reconcileModelTargets(modelTargets, profileNames)
   const allTargetsSelected = allModelTargetsSelected(selectedTargets, profileNames)
   const targetSummary = allTargetsSelected ? `전체 ${profileNames.length}개 프로필` : `${selectedTargets.length}/${profileNames.length}개 프로필`
@@ -887,6 +904,8 @@ function RouterPage({ ctx: pluginContext }) {
     invalidatePlan()
     setSelectedProfile(name)
     setDraft(copyProfileDraft(row))
+    setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
+    setRoutingTargetEdited(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
     const routingFallback = copyRoutingFallbackDraft(row.fallbacks?.routing)
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
@@ -894,6 +913,7 @@ function RouterPage({ ctx: pluginContext }) {
     setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
     setFallbackTargetEdits({ native: false, routing: false, delegation: false })
     setModelTargets(current => reconcileModelTargets(current, profileNames))
+    setRoutingTargets(current => reconcileModelTargets(current, profileNames))
   }
 
   const applyPreset = presetId => updateDraft(current => applyModelPresetDraft(current, presetId))
@@ -914,6 +934,15 @@ function RouterPage({ ctx: pluginContext }) {
     if (applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
     setModelTargets(selectNoModelTargets())
+  }
+
+  const chooseRoutingTargets = (mode, name = null, checked = false) => {
+    if (applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
+    invalidatePlan()
+    const next = mode === 'all' ? [...profileNames] : mode === 'none' ? []
+      : mode === 'source' ? [selectedProfile] : toggleName(selectedRoutingTargets, name, checked)
+    setRoutingTargets(next)
+    setRoutingTargetEdited(next.length > 0)
   }
 
   const toggleRoutingProfile = (name, checked) => {
@@ -1003,6 +1032,8 @@ function RouterPage({ ctx: pluginContext }) {
     draft: deepClone(draft),
     modelTargets: [...selectedTargets],
     routingProfiles: [...routingProfiles],
+    routingTargets: [...routingWriteTargets],
+    routingTargetError,
     fallbackDrafts: deepClone(fallbackDrafts),
     fallbackBaselines: deepClone(fallbackBaselines),
     fallbackTargets: deepClone(fallbackTargets),
@@ -1118,7 +1149,8 @@ function RouterPage({ ctx: pluginContext }) {
           snapshot.fallbackTargets,
           snapshot.profiles,
           snapshot.fallbackSupported,
-          snapshot.fallbackTargetEdits
+          snapshot.fallbackTargetEdits,
+          snapshot.routingTargets
         )
         const routingUpdates = (combined.body.fallback_updates || [])
           .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
@@ -1127,9 +1159,10 @@ function RouterPage({ ctx: pluginContext }) {
           profile: snapshot.profile,
           models: snapshot.draft.models,
           routing: combined.body.routing,
-          model_targets: combined.body.model_targets
+          model_targets: combined.body.model_targets,
+          routing_targets: combined.body.routing_targets
         }, routingUpdates)
-        return { body: combined.body, errors: [...combined.errors, ...projectedErrors] }
+        return { body: combined.body, errors: [...combined.errors, ...projectedErrors, ...(snapshot.routingTargetError ? [snapshot.routingTargetError] : [])] }
       }
     })
   }
@@ -1159,6 +1192,7 @@ function RouterPage({ ctx: pluginContext }) {
     setFallbackPreview(null)
     setModelTargets(current => reconcileModelTargets(current, rows.map(item => item.name)))
     setRoutingProfiles(rows.filter(item => item.routing?.enabled === true).map(item => item.name))
+    setRoutingTargets(current => reconcileModelTargets(current, rows.map(item => item.name)))
     setFallbackTargets(current => ({
       native: reconcileFallbackTargets(current.native, rows.map(item => item.name)),
       routing: reconcileFallbackTargets(current.routing, rows.map(item => item.name)),
@@ -1167,6 +1201,8 @@ function RouterPage({ ctx: pluginContext }) {
     if (row) {
       setSelectedProfile(row.name)
       setDraft(copyProfileDraft(row))
+      setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
+      setRoutingTargetEdited(false)
       const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
       const routingFallback = copyRoutingFallbackDraft(row.fallbacks?.routing)
       const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
@@ -1176,6 +1212,8 @@ function RouterPage({ ctx: pluginContext }) {
     } else {
       setSelectedProfile(null)
       setDraft(null)
+      setRoutingBaseline(null)
+      setRoutingTargetEdited(false)
       setFallbackDrafts({ native: null, routing: null, delegation: null })
       setFallbackBaselines({ native: null, routing: null, delegation: null })
     }
@@ -1259,11 +1297,28 @@ function RouterPage({ ctx: pluginContext }) {
     ]
   })
 
+  const routingTargetGroup = jsx('fieldset', {
+    id: 'routing-targets', style: styles.fieldset,
+    children: [
+      jsx('legend', { style: styles.fieldName, children: 'Heavy/Light 설정 적용 대상' }),
+      jsx('p', { style: styles.hint, children: '처음에는 모든 프로필이 선택됩니다. Heavy/Light 값을 수정하거나 이 대상 목록을 직접 선택한 뒤 저장하면, 선택한 프로필에 설정을 복사합니다. 따라가기는 각 대상의 모델을 사용하며, 라우팅 활성 상태와 폴백은 복사하지 않습니다.' }),
+      jsxs('div', { style: styles.selectionToolbar, children: [
+        jsx('span', { style: styles.hint, children: `${selectedRoutingTargets.length}/${profileNames.length}개 선택 · 이번 저장 적용 ${routingWriteTargets.length}개` }),
+        jsxs('div', { style: styles.actions, children: [
+          jsx(Button, { id: 'routing-target-source', size: 'sm', variant: 'secondary', disabled, onClick: () => chooseRoutingTargets('source'), children: '불러온 프로필만' }),
+          jsx(Button, { id: 'routing-target-all', size: 'sm', variant: 'secondary', disabled, onClick: () => chooseRoutingTargets('all'), children: '전체 선택' }),
+          jsx(Button, { id: 'routing-target-none', size: 'sm', variant: 'secondary', disabled, onClick: () => chooseRoutingTargets('none'), children: '모두 해제' })
+        ] })
+      ] }),
+      jsx('div', { style: styles.profileList, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `routing-target-${row.name}`, label: row.name, checked: selectedRoutingTargets.includes(row.name), disabled, onChange: checked => chooseRoutingTargets('toggle', row.name, checked) }) }, row.name)) })
+    ]
+  })
+
   const routingProfileGroup = jsx('fieldset', {
     style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '라우팅 활성 프로필' }),
-      jsx('p', { style: styles.hint, children: '선택한 프로필 목록에만 라우팅 사용 권한을 설정합니다. 새 프로필은 기본적으로 선택되지 않습니다.' }),
+      jsx('p', { style: styles.hint, children: '여기는 라우팅을 켜고 끄는 목록입니다. Heavy/Light 모델 복사 대상은 위의 별도 목록에서 선택합니다. 새 프로필은 기본적으로 활성화되지 않습니다.' }),
       jsx('div', { style: styles.profileList, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `routing-profile-${row.name}`, label: row.name, checked: routingProfiles.includes(row.name), disabled, onChange: checked => toggleRoutingProfile(row.name, checked) }) }, row.name)) })
     ]
   })
@@ -1458,7 +1513,7 @@ function RouterPage({ ctx: pluginContext }) {
 
   const localCombinedSummary = currentRow && draft && statusQuery.data
     ? buildCombinedPreviewBody(statusQuery.data.revision, selectedProfile, draft, selectedTargets, routingProfiles,
-      fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported, fallbackTargetEdits)
+      fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported, fallbackTargetEdits, routingWriteTargets)
     : null
   const summaryRoutingUpdates = (localCombinedSummary?.body.fallback_updates || [])
     .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
@@ -1467,7 +1522,8 @@ function RouterPage({ ctx: pluginContext }) {
     profile: selectedProfile,
     models: draft.models,
     routing: localCombinedSummary.body.routing,
-    model_targets: localCombinedSummary.body.model_targets
+    model_targets: localCombinedSummary.body.model_targets,
+    routing_targets: localCombinedSummary.body.routing_targets
   }, summaryRoutingUpdates) : []
   const modifiedFallbackSummary = [
     { scope: 'native', label: '일반 대화', changed: nativeFallbackDraftChanged || fallbackTargetEdits.native, count: nativeFallbackTargets.length },
@@ -1479,7 +1535,7 @@ function RouterPage({ ctx: pluginContext }) {
     [routingFallbackDraftChanged || fallbackTargetEdits.routing, routingFallbackError],
     [delegationFallbackDraftChanged || fallbackTargetEdits.delegation, delegationFallbackError]
   ].filter(([changed, error]) => changed && error).map(([, error]) => error)
-  const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors])]
+  const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors, ...(routingTargetError ? [routingTargetError] : [])])]
   const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled)
 
   return jsxs('main', {
@@ -1490,11 +1546,11 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
       profiles.length ? section('대상 프로필', '편집할 설정 프로필을 고릅니다. 저장 검증 중 범위가 바뀌면 적용 전 요청은 안전하게 취소됩니다.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `현재 Desktop 프로필: ${activeProfile || '확인 중'} · 연결: ${connectionId || 'local'} · 게이트웨이: ${gateway || 'idle'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
       profiles.length ? section('모델 대상', '네 역할의 값을 한 번 편집하고, 아래 별도 선택 목록에 체크한 프로필에만 모델 값을 적용합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [modelFields, modelTargetGroup] })) : null,
-      profiles.length ? section('작업 라우팅', '무거운 작업과 가벼운 작업은 각각 독립적으로 대상을 정합니다. 라우팅 활성 프로필 선택은 모델 설정 적용 대상과 별개입니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
+      profiles.length ? section('작업 라우팅', 'Heavy/Light 모델 설정의 적용 대상과 라우팅을 사용할 프로필을 따로 선택합니다. 일반 모델 적용 대상 및 폴백 대상과도 독립적입니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { style: styles.hint, children: routingSummary }),
         jsxs('details', { style: styles.cardSection, children: [
           jsxs('summary', { style: { cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem', flexWrap: 'wrap' }, children: [jsx('strong', { children: '라우팅 세부 설정' }), jsx(Badge, { variant: 'muted', children: `활성 프로필 ${routingProfiles.length}개` })] }),
-          jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '0.9rem' }, children: [routingFields, routingProfileGroup] })
+          jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '0.9rem' }, children: [routingFields, routingTargetGroup, routingProfileGroup] })
         ] })
       ] })) : null,
       profiles.length ? fallbackManagement : null,
@@ -1504,7 +1560,7 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length && !needsReload ? section('전체 설정 저장', '모델·라우팅과 수정한 폴백을 한 번에 저장합니다. 저장하면 서버가 현재 revision을 검증한 뒤 같은 계획을 적용합니다. 각 폴백은 해당 카드에서 고른 대상에만 적용됩니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
         jsx('div', { id: 'draft-reference-summary', role: 'note', style: styles.section, children: [
           jsx('strong', { children: '현재 초안 요약 · 참고 정보' }),
-          jsx('p', { style: styles.hint, children: `설정 revision ${statusQuery.data?.revision ?? '확인할 수 없음'} · 모델 대상 ${targetSummary} · 라우팅 활성 ${routingProfiles.length}개` }),
+          jsx('p', { style: styles.hint, children: `설정 revision ${statusQuery.data?.revision ?? '확인할 수 없음'} · 모델 대상 ${targetSummary} · 라우팅 활성 ${routingProfiles.length}개 · Heavy/Light 설정 적용 ${routingWriteTargets.length}개 (${routingWriteTargets.join(', ') || '기존 설정 유지'})` }),
           jsx('p', { style: styles.hint, children: modifiedFallbackSummary.length
             ? `수정한 폴백: ${modifiedFallbackSummary.map(item => `${item.label} ${item.count}개 대상`).join(' · ')}`
             : '수정한 폴백 없음' }),

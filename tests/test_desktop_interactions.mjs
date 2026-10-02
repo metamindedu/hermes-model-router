@@ -104,6 +104,87 @@ function harness() {
     input(id, value) { byId(id).props.onChange({ target: { value } }); render() } }
 }
 
+test('editing Heavy with all profiles checked saves the exact bulk routing targets', async () => {
+  const h = harness()
+  h.check('routing-profile-default', true)
+  h.check('routing-profile-other', true)
+  h.input('heavy-custom-model', 'new-bulk-heavy')
+  h.click('global-save'); await h.flush()
+  const payload = h.calls.find(c => c.operation === 'preview').body
+  assert.deepEqual([...payload.routing_targets].sort(), ['claire', 'default', 'other'])
+  assert.equal(payload.routing.heavy.custom.model, 'new-bulk-heavy')
+})
+
+test('model-only save and enable-only save do not copy primary routing', async () => {
+  const h = harness()
+  h.check('routing-profile-other', true)
+  h.input('model-main-model', 'new-main-only')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [])
+})
+
+test('routing copy targets are independent, explicit, and source is not implicit', async () => {
+  const h = harness()
+  h.click('routing-target-none')
+  h.check('routing-target-other', true)
+  assert.deepEqual(h.selected('routing-profile-'), ['claire'])
+  h.click('model-target-none')
+  h.click('global-save'); await h.flush()
+  const payload = h.calls.find(c => c.operation === 'preview').body
+  assert.deepEqual(payload.routing_targets, ['other'])
+  assert.deepEqual(payload.model_targets, [])
+  assert.deepEqual(payload.routing_profiles, ['claire'])
+})
+
+test('empty routing target blocks an edited route instead of falling back to source', async () => {
+  const h = harness()
+  h.click('routing-target-none')
+  h.input('heavy-custom-model', 'must-not-save-to-source')
+  h.click('global-save'); await h.flush()
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.byId('global-save').props.disabled, false)
+})
+
+test('routing target selection persists but copy intent clears on source change and refresh', async () => {
+  const h = harness()
+  h.click('routing-target-none')
+  h.check('routing-target-other', true)
+  h.selectProfile('default')
+  assert.deepEqual(h.selected('routing-target-'), ['other'])
+  h.input('model-main-model', 'new-main')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [])
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  h.click('routing-target-all')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual([...h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets].sort(), ['claire', 'default', 'other'])
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  h.input('model-main-model', 'next-main')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets, [])
+})
+
+test('reverting a primary edit cancels implicit copy and an empty unedited scope allows model-only save', async () => {
+  const h = harness()
+  h.input('heavy-custom-model', 'temporary-edit')
+  h.input('heavy-custom-model', 'independent-heavy')
+  h.click('routing-target-none')
+  h.input('model-main-model', 'model-only')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [])
+})
+
+test('routing source-only target never widens when changing the loaded profile', async () => {
+  const h = harness()
+  h.click('routing-target-source')
+  assert.deepEqual(h.selected('routing-target-'), ['claire'])
+  h.selectProfile('other')
+  assert.deepEqual(h.selected('routing-target-'), ['claire'])
+  h.input('heavy-custom-model', 'other-route-copy')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, ['claire'])
+})
+
 test('initial page selects every model target but preserves routing opt-in membership', () => {
   const h = harness()
   assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])

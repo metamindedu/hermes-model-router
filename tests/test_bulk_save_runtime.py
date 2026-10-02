@@ -40,6 +40,10 @@ def test_real_eleven_profile_bulk_save_finishes_within_backend_budget(tmp_path, 
         "fallback_updates": [{"profile": name, **copy.deepcopy(all_scopes)} for name in names],
         "fallback_confirmations": [confirmation(scope, name) for name in names for scope in ["native", "routing", "delegation"]],
     }
+    proposal['routing_targets'] = names
+    proposal['routing'] = copy.deepcopy(row['routing'])
+    proposal['routing']['heavy'] = {'follow': 'custom', 'custom': {'provider': 'openai-codex', 'model': 'bulk-route-heavy', 'reasoning': 'high'}}
+    proposal['routing']['light'] = {'follow': 'custom', 'custom': {'provider': 'openai-codex', 'model': 'bulk-route-light', 'reasoning': 'low'}}
     t = time.monotonic()
     plan = service.preview(proposal)
     receipt = service.apply(plan["plan_id"])
@@ -53,6 +57,12 @@ def test_real_eleven_profile_bulk_save_finishes_within_backend_budget(tmp_path, 
         assert data["model"]["default"] == "bulk-test-main"
         assert data["fallback_providers"] == all_scopes["native_fallback"]["chain"]
         assert data["delegation"]["fallback_providers"] == all_scopes["delegation_fallback"]["chain"]
-    final = service.status()
+    reopened = Service(root)
+    final = reopened.status()
     assert len(final["profiles"]) == 11
+    for name in names:
+        effective = reopened.routing_config(name)
+        assert effective['heavy'] == proposal['routing']['heavy']['custom']
+        assert effective['light'] == proposal['routing']['light']['custom']
+        assert effective['enabled'] is True
     assert all(not row["drift"] and not row["fallbacks"]["native"]["drift"] and not row["fallbacks"]["delegation"]["drift"] for row in final["profiles"])
