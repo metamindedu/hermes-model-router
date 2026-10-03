@@ -295,19 +295,33 @@ def test_final_review_never_uses_lightweight_route():
     assert routing.ROUTING_PURPOSES["preliminary-review"][0] == "LIGHTWEIGHT"
 
 
-def test_timeout_is_capped_and_invalid_inputs_are_rejected(tmp_path, monkeypatch):
+def test_timeout_is_not_capped_and_invalid_inputs_are_rejected(tmp_path, monkeypatch):
     router, _service, _root, calls = _make_router(tmp_path, monkeypatch)
     cwd = tmp_path / "work"
     cwd.mkdir()
-    assert router.start("mechanical", "run tests", cwd, timeout=1200)["status"] == "running"
+    assert router.start("mechanical", "run tests", cwd, timeout=7200)["status"] == "running"
     worker_command = calls[0][0]
-    assert worker_command[worker_command.index("--timeout") + 1] == "900"
-    assert routing._bounded_timeout(1200) == 900
-    for value in (0, -1, float("inf"), True):
+    assert worker_command[worker_command.index("--timeout") + 1] == "7200"
+    assert routing._bounded_timeout(7200) == 7200
+    assert routing._bounded_timeout(0) == 0
+    for value in (-1, float("inf"), float("nan"), True, "60"):
         with pytest.raises(routing.RoutingError):
             routing._bounded_timeout(value)
     with pytest.raises(routing.RoutingError, match="unsupported routing purpose"):
         router.start("final-review-light", "task", cwd)
+
+
+@pytest.mark.parametrize("override,configured,expected", [(None, 3600, 3600), (None, 7200, 7200), (None, 0, 0), (0, 3600, 0), (1200, 7200, 1200)])
+def test_routed_total_limit_is_snapshotted_separately_from_native_limit(tmp_path, monkeypatch, override, configured, expected):
+    router, service, root, calls = _make_router(tmp_path, monkeypatch)
+    original = service.routing_config
+    service.routing_config = lambda profile: {**original(profile), "timeout_seconds": configured, "delegate_timeout_seconds": 30}
+    result = router.start("plan", "bounded read-only fixture", tmp_path, timeout=override)
+    directory = root / "profiles/claire/plugin-data/model-router/jobs" / result["job_id"]
+    snapshot = _load(directory / "snapshot.json")
+    assert snapshot["timeout_seconds"] == expected
+    assert calls[0][0][calls[0][0].index("--timeout") + 1] == str(expected)
+    assert snapshot["timeout_source"] == ("profile" if override is None else "call")
 
 
 def test_start_failure_is_recorded_and_not_reported_as_running(tmp_path, monkeypatch):
@@ -595,7 +609,8 @@ def test_symlinked_profile_jobs_root_is_rejected(tmp_path, monkeypatch):
         _start(router, tmp_path)
 
 
-def test_worker_invokes_only_fake_runner_subprocess_and_writes_terminal_state(tmp_path, monkeypatch):
+@pytest.mark.parametrize("total_seconds", [600, 0, 7200, 1e100])
+def test_worker_invokes_only_fake_runner_subprocess_and_writes_terminal_state(tmp_path, monkeypatch, total_seconds):
     root = tmp_path / "profile"
     job_id = str(uuid.uuid4())
     job_dir = root / "plugin-data" / "model-router" / "jobs" / job_id
@@ -624,6 +639,10 @@ def test_worker_invokes_only_fake_runner_subprocess_and_writes_terminal_state(tm
         returncode = None
 
         def wait(self, timeout=None):
+            if total_seconds > 0:
+                assert 0 < timeout <= min(total_seconds + 5, 86400)
+            else:
+                assert timeout is None
             self.returncode = 0
             return 0
 
@@ -645,7 +664,7 @@ def test_worker_invokes_only_fake_runner_subprocess_and_writes_terminal_state(tm
         profile="default",
         purpose="independent-review",
         cwd=cwd,
-        timeout=600,
+        timeout=total_seconds,
     )
     assert code == 0
     command, kwargs = calls[0]

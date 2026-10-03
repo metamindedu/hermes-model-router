@@ -815,15 +815,32 @@ def _stop_scoped_process_tree(process: subprocess.Popen[Any]) -> bool:
     return False
 
 
+def _wait_scoped_process(process: Any, deadline: float | None) -> int:
+    """Keep one overall deadline while using platform-safe wait slices.
+
+    Windows Popen.wait cannot represent arbitrarily large millisecond waits.
+    A daily slice is wait granularity, never a cap on the configured budget.
+    """
+    if deadline is None:
+        return process.wait(timeout=None)
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            return process.wait(timeout=min(remaining, 86400.0))
+        except subprocess.TimeoutExpired:
+            if remaining <= 86400.0 or time.monotonic() >= deadline:
+                raise
+
+
 def _invoke_scoped_adapter(
-    request: dict[str, Any], attempt_dir: Path, cwd: Path, deadline: float
+    request: dict[str, Any], attempt_dir: Path, cwd: Path, deadline: float | None
 ) -> tuple[dict[str, Any] | None, bool, bool | None, int | None]:
     request_path = attempt_dir / "attempt-request.json"
     result_path = attempt_dir / "attempt-result.json"
     if request_path.is_symlink() or result_path.is_symlink():
         raise ValueError("scoped attempt artifact must not be a symbolic link")
-    request_budget = deadline - time.monotonic()
-    if request_budget <= 0:
+    request_budget = deadline - time.monotonic() if deadline is not None else 0.0
+    if deadline is not None and request_budget <= 0:
         return None, True, None, None
     request["budget_seconds"] = request_budget
     _atomic_write_json(request_path, request)
@@ -867,12 +884,12 @@ def _invoke_scoped_adapter(
     else:
         creation["start_new_session"] = True
     process = subprocess.Popen(command, **creation)
-    wait_budget = deadline - time.monotonic()
-    if wait_budget <= 0:
+    wait_budget = deadline - time.monotonic() if deadline is not None else None
+    if wait_budget is not None and wait_budget <= 0:
         cleanup_verified = _stop_scoped_process_tree(process)
         return None, True, cleanup_verified, None
     try:
-        process_code = process.wait(timeout=wait_budget)
+        process_code = _wait_scoped_process(process, deadline)
     except subprocess.TimeoutExpired:
         cleanup_verified = _stop_scoped_process_tree(process)
         return None, True, cleanup_verified, None
@@ -897,7 +914,7 @@ def _scoped_attempt(
     mode: str,
     task: str,
     toolsets: list[str],
-    attempt_deadline: float,
+    attempt_deadline: float | None,
     parent_session_id: str | None,
     fallback_attempt: bool,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool, int | None, bool | None]:
@@ -1049,8 +1066,8 @@ def run_scoped_attempts(args: argparse.Namespace) -> int:
         raise ValueError(f"verification kind {verification_kind} requires HEAVYWEIGHT")
     if args.profile is None or args.job_dir is None or args.output is None or args.purpose is None:
         raise ValueError("scoped execution requires --profile, --purpose, --job-dir, and --output")
-    if not isinstance(args.timeout, (int, float)) or args.timeout <= 0 or not math.isfinite(args.timeout):
-        raise ValueError("scoped execution requires a positive finite timeout")
+    if isinstance(args.timeout, bool) or not isinstance(args.timeout, (int, float)) or args.timeout < 0 or not math.isfinite(args.timeout):
+        raise ValueError("scoped execution requires a nonnegative finite timeout")
     cwd = args.cwd.resolve()
     if not cwd.is_dir():
         raise ValueError("working directory does not exist")
@@ -1102,14 +1119,14 @@ def run_scoped_attempts(args: argparse.Namespace) -> int:
         raise ValueError("scoped execution requires at least one toolset")
     started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     started_epoch = time.monotonic()
-    deadline = started_epoch + float(args.timeout)
-    reserve = min(float(args.timeout) / 2.0, max(0.25, min(30.0, float(args.timeout) * 0.1)))
+    deadline = started_epoch + float(args.timeout) if args.timeout > 0 else None
+    reserve = min(float(args.timeout) / 2.0, max(0.25, min(30.0, float(args.timeout) * 0.1))) if deadline is not None else 0.0
     config_path = home / "config.yaml"
     before_config = _sha256_if_file(config_path)
     if before_config is None:
         raise ValueError("active profile config snapshot is unavailable")
-    primary_deadline = deadline - reserve
-    if primary_deadline <= time.monotonic():
+    primary_deadline = deadline - reserve if deadline is not None else None
+    if primary_deadline is not None and primary_deadline <= time.monotonic():
         raise ValueError("common execution deadline is insufficient for a primary attempt")
     primary_parent_session_id = snapshot.get("parent_session_id")
     primary_result, primary_request, primary_timed_out, primary_process_code, primary_cleanup_verified = _scoped_attempt(
@@ -1189,8 +1206,8 @@ def run_scoped_attempts(args: argparse.Namespace) -> int:
     elif _sha256_if_file(config_path) != before_config:
         fallback_reason = "config_changed"
     else:
-        remaining = deadline - time.monotonic()
-        if remaining < reserve:
+        remaining = deadline - time.monotonic() if deadline is not None else None
+        if remaining is not None and remaining < reserve:
             fallback_reason = "insufficient_deadline"
         else:
             fallback_used = True

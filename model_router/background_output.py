@@ -82,9 +82,9 @@ class BackgroundOutput:
         self.process_id = session.id
         self.session_key, self.owner_task_id = session_key, owner_task_id
         self.emit, self.clock, self.monotonic = emit, clock, monotonic
-        if not _number(timeout) or not 0 < timeout <= 900:
+        if not _number(timeout) or timeout < 0:
             raise ValueError("bounded background observation required")
-        self.deadline = monotonic() + timeout + 30
+        self.deadline = monotonic() + timeout + 30 if timeout > 0 else None
         self.started = session.started_at
         if not _number(self.started) or self.started <= 0 or not self._owned():
             raise ValueError("native background owner mismatch")
@@ -223,7 +223,7 @@ class BackgroundOutput:
             self._append(f"[{total}] 프로세스 종료를 확인했습니다.\n종료 확인 시 소요 시간: {total}\n종료 종류: Background의 현재 상태를 확인하세요.\n작업 결과: 별도 결과 확인 (실행 종료는 검수 통과를 뜻하지 않습니다.)\n", final=True)
             self.closed = True
             return False
-        if self.monotonic() >= self.deadline:
+        if self.deadline is not None and self.monotonic() >= self.deadline:
             self._append("활동 관찰 시간이 끝났습니다. 실제 실행 상태는 Background에서 확인하세요.\n", final=True)
             self.closed = True
             return False

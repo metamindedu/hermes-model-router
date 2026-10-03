@@ -207,7 +207,10 @@ def _install_fake_adapter(
             self.code = code
 
         def wait(self, timeout: float | None = None) -> int:
-            assert timeout is not None and timeout > 0
+            if requests[-1]["budget_seconds"] == 0:
+                assert timeout is None
+            else:
+                assert timeout is not None and timeout > 0
             self.returncode = self.code
             return self.code
 
@@ -269,6 +272,33 @@ def _install_fake_adapter(
     return commands, requests
 
 
+def test_platform_wait_slices_do_not_restart_overall_deadline(monkeypatch):
+    now = [0.0]
+    waits = []
+    monkeypatch.setattr(runner.time, "monotonic", lambda: now[0])
+    class Process:
+        def wait(self, timeout):
+            waits.append(timeout)
+            if len(waits) < 3:
+                now[0] += timeout
+                raise subprocess.TimeoutExpired("fixture", timeout)
+            return 0
+    assert runner._wait_scoped_process(Process(), 200000) == 0
+    assert waits == [86400, 86400, 200000 - 2 * 86400]
+
+
+def test_real_platform_wait_accepts_arbitrarily_long_finite_budget():
+    import time
+    process = subprocess.Popen([runner.sys.executable, "-c", "import time; time.sleep(.05)"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert runner._wait_scoped_process(process, time.monotonic() + 1e100) == 0
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+
+
 def _exhaustion(request: dict[str, Any]) -> dict[str, Any]:
     return _result(
         request,
@@ -279,7 +309,8 @@ def _exhaustion(request: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def test_approved_exhaustion_runs_one_fresh_same_role_sdk_attempt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("total_seconds", [60, 0, 7200])
+def test_approved_exhaustion_runs_one_fresh_same_role_sdk_attempt(tmp_path, monkeypatch, total_seconds):
     primary_parent_id = "20260930_113515_240566"
     fixture = _fixture(tmp_path, parent_session_id=primary_parent_id)
     monkeypatch.setenv("HERMES_HOME", str(fixture["home"]))
@@ -291,10 +322,14 @@ def test_approved_exhaustion_runs_one_fresh_same_role_sdk_attempt(tmp_path, monk
         ],
     )
 
-    assert runner.run_scoped_attempts(_args(fixture)) == 0
+    assert runner.run_scoped_attempts(_args(fixture, timeout=total_seconds)) == 0
     artifact = json.loads((fixture["job_dir"] / "runner-result.json").read_text(encoding="utf-8"))
 
     assert len(commands) == 2
+    if total_seconds == 0:
+        assert all(request["budget_seconds"] == 0 for request in requests)
+    elif total_seconds > 900:
+        assert all(900 < request["budget_seconds"] <= total_seconds for request in requests)
     assert artifact["execution_mode"] == "scoped_sdk"
     assert artifact["fallback_used"] is True
     assert artifact["fallback_reason"] == "exhaustion"
@@ -558,7 +593,10 @@ def test_common_deadline_reserve_blocks_late_fallback(tmp_path, monkeypatch):
     fixture = _fixture(tmp_path, approved=True)
     monkeypatch.setenv("HERMES_HOME", str(fixture["home"]))
     commands, _ = _install_fake_adapter(monkeypatch, [_exhaustion])
-    ticks = iter([0.0, 0.0, 0.0, 0.0, 9.5])
+    # Dispatch, reserve, request/write, pre-wait and OS-wait sampling all
+    # precede the late fallback decision; the new platform-safe wait samples
+    # the same shared deadline once more, without resetting it.
+    ticks = iter([0.0, 0.0, 0.0, 0.0, 0.0, 9.5])
     monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
 
     assert runner.run_scoped_attempts(_args(fixture, timeout=10)) == 1

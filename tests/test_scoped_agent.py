@@ -325,7 +325,10 @@ def test_parented_route_without_init_config_fails_before_turn(attempt, initial_c
     assert result["observed_routes"] == []
 
 
-def test_request_and_result_artifacts_are_bound_to_the_attempt_directory(attempt):
+@pytest.mark.parametrize("budget", [45, 0, 7200])
+def test_request_and_result_artifacts_are_bound_to_the_attempt_directory(attempt, budget):
+    attempt["request"]["budget_seconds"] = budget
+    attempt["request_path"].write_text(json.dumps(attempt["request"]), encoding="utf-8")
     normalized, request_path, result_path = scoped_agent._validate_request(
         attempt["request"], attempt["request_path"]
     )

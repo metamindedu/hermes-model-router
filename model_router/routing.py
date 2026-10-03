@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import task_presentation
+from .timeouts import DEFAULT_ROUTED_TOTAL_SECONDS
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = PLUGIN_ROOT / "lib" / "run_routed_agent.py"
@@ -37,7 +38,7 @@ ROUTING_PURPOSES = {
     "semantic-final": ("HEAVYWEIGHT", "review", "semantic-final"),
     "independent-review": ("HEAVYWEIGHT", "review", "independent-review"),
 }
-MAX_TIMEOUT_SECONDS = 900.0
+
 RUNNER_OPERATOR_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
@@ -323,11 +324,14 @@ def _build_job_cache(
 
 def _bounded_timeout(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise RoutingError("timeout must be a positive number of seconds")
-    timeout = float(value)
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise RoutingError("timeout must be a positive finite number of seconds")
-    return min(timeout, MAX_TIMEOUT_SECONDS)
+        raise RoutingError("timeout must be a nonnegative number of seconds")
+    try:
+        timeout = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise RoutingError("timeout must be a nonnegative finite number of seconds") from exc
+    if not math.isfinite(timeout) or timeout < 0:
+        raise RoutingError("timeout must be a nonnegative finite number of seconds")
+    return timeout
 
 
 def _job_file(job_dir: Path, filename: str) -> Path:
@@ -360,7 +364,7 @@ class Router:
         purpose: str,
         prompt: str,
         cwd: str | Path,
-        timeout: float = 600,
+        timeout: float | None = None,
         *,
         title: str | None = None,
     ) -> dict[str, Any]:
@@ -369,7 +373,7 @@ class Router:
         display_title = task_presentation.validate_title(title, purpose)
         if not isinstance(prompt, str) or not prompt.strip():
             raise RoutingError("prompt must be a non-empty string")
-        bounded_timeout = _bounded_timeout(timeout)
+
         if not isinstance(cwd, (str, Path)):
             raise RoutingError("working directory must be a path")
         working_dir = Path(cwd).expanduser().resolve()
@@ -384,6 +388,7 @@ class Router:
         config = _as_mapping(config_method(profile))
         if config.get("enabled") is not True:
             raise RoutingError("routing is disabled for the active profile")
+        bounded_timeout = _bounded_timeout(config.get("timeout_seconds", DEFAULT_ROUTED_TOTAL_SECONDS) if timeout is None else timeout)
         revision = config.get("revision")
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
             raise RoutingError("active profile routing revision is invalid")
@@ -470,6 +475,7 @@ class Router:
             "verification_kind": verification_kind,
             "cwd": str(working_dir),
             "timeout_seconds": bounded_timeout,
+            "timeout_source": "profile" if timeout is None else "call",
             "created_at": _utc_now(),
             "settings_digest": settings_digest,
             "model_provider_evidence": route_evidence,

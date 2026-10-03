@@ -170,9 +170,99 @@ export function scopeFingerprint(connectionId, profile, gateway) {
   return JSON.stringify([connectionId || 'local', profile || 'default', gateway || 'idle'])
 }
 
+const TIMEOUT_KEYS = ['delegate_total_seconds', 'routed_total_seconds']
+
+function validTimeoutSettingsShape(timeouts) {
+  return Boolean(
+    timeouts && typeof timeouts === 'object' && !Array.isArray(timeouts) &&
+    timeouts.schema === 1 && Number.isInteger(timeouts.revision) && timeouts.revision >= 0 &&
+    TIMEOUT_KEYS.every(key => typeof timeouts[key] === 'number' && Number.isFinite(timeouts[key]) && timeouts[key] >= 0) &&
+    typeof timeouts.editable === 'boolean'
+  )
+}
+
+export function validTimeoutsDto(timeouts) {
+  return Boolean(validTimeoutSettingsShape(timeouts) && Array.isArray(timeouts.warnings) &&
+    timeouts.warnings.every(warning => typeof warning === 'string'))
+}
+
+function copyTimeoutSettings(timeouts) {
+  if (!validTimeoutsDto(timeouts)) return null
+  return {
+    schema: 1,
+    revision: timeouts.revision,
+    delegate_total_seconds: timeouts.delegate_total_seconds,
+    routed_total_seconds: timeouts.routed_total_seconds,
+    editable: timeouts.editable
+  }
+}
+
+export function copyTimeoutBaseline(timeouts) {
+  const settings = copyTimeoutSettings(timeouts)
+  return settings ? {
+    revision: settings.revision,
+    delegate_total_seconds: settings.delegate_total_seconds,
+    routed_total_seconds: settings.routed_total_seconds
+  } : null
+}
+
+export function parseTimeoutSeconds(value) {
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null
+  if (typeof value !== 'string' || value.trim() === '') return null
+  const parsed = Number(value.trim())
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
+}
+
+export function timeoutDraftChanged(timeouts, baseline) {
+  if (!timeouts || !baseline) return false
+  return TIMEOUT_KEYS.some(key => {
+    const value = parseTimeoutSeconds(timeouts[key])
+    return value === null || value !== baseline[key]
+  })
+}
+
+export function timeoutRevisionMatches(baseline, currentTimeouts) {
+  return Boolean(baseline && validTimeoutSettingsShape(currentTimeouts) &&
+    currentTimeouts.revision === baseline.revision)
+}
+
+export function buildTimeoutUpdate(profile, timeouts, baseline, currentTimeouts) {
+  const changed = timeoutDraftChanged(timeouts, baseline)
+  if (!changed) return { changed: false, update: null, error: '' }
+  if (!baseline || !timeouts || typeof profile !== 'string' || !profile) {
+    return { changed: true, update: null, error: '시간 제한 편집 상태를 확인할 수 없습니다. 상태를 새로고침하세요.' }
+  }
+  if (timeouts.editable !== true) {
+    return { changed: true, update: null, error: '현재 불러온 프로필의 전체 실행 시간은 읽기 전용입니다.' }
+  }
+  if (timeouts.revision !== baseline.revision || !timeoutRevisionMatches(baseline, currentTimeouts) || currentTimeouts.editable !== true) {
+    return { changed: true, update: null, error: '시간 제한 revision이 바뀌었거나 편집할 수 없습니다. 상태를 새로고침한 뒤 다시 편집하세요.' }
+  }
+  const delegateTotalSeconds = parseTimeoutSeconds(timeouts.delegate_total_seconds)
+  const routedTotalSeconds = parseTimeoutSeconds(timeouts.routed_total_seconds)
+  if (delegateTotalSeconds === null || routedTotalSeconds === null) {
+    return { changed: true, update: null, error: '전체 실행 시간은 0 이상의 유한한 초 단위 숫자로 입력하세요.' }
+  }
+  return {
+    changed: true,
+    update: {
+      profile,
+      expected_revision: baseline.revision,
+      delegate_total_seconds: delegateTotalSeconds,
+      routed_total_seconds: routedTotalSeconds
+    },
+    error: ''
+  }
+}
+
 export function copyProfileDraft(profile) {
   if (!profile || typeof profile !== 'object' || !profile.models || !profile.routing) return null
-  return deepClone({ models: profile.models, routing: profile.routing })
+  const timeouts = copyTimeoutSettings(profile.timeouts)
+  return deepClone({
+    models: profile.models,
+    routing: profile.routing,
+    ...(timeouts ? { timeouts } : {})
+  })
 }
 
 export function toggleName(names, name, checked) {
@@ -522,7 +612,7 @@ export function buildFallbackPreviewBody(revision, scope, targetNames, value, pr
   return { expected_revision: revision, updates, confirmations }
 }
 
-export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets) {
+export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets, timeoutSettings = null) {
   const body = buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets)
   const rows = Array.isArray(profiles) ? profiles : []
   const byName = new Map(rows.map(row => [row.name, row]))
@@ -582,6 +672,16 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
     body.fallback_updates = [...updatesByProfile.values()]
     body.fallback_confirmations = confirmations
   }
+  if (timeoutSettings) {
+    const timeoutResult = buildTimeoutUpdate(
+      timeoutSettings.profile,
+      timeoutSettings.draft,
+      timeoutSettings.baseline,
+      timeoutSettings.current
+    )
+    if (timeoutResult.update) body.timeout_updates = [timeoutResult.update]
+    if (timeoutResult.error) errors.push(timeoutResult.error)
+  }
   return { body, errors }
 }
 
@@ -636,6 +736,30 @@ function Field({ id, label, value, onChange, disabled = false, hint }) {
         'aria-label': label
       }),
       hint ? jsx('span', { style: styles.hint, children: hint }) : null
+    ]
+  })
+}
+
+function TimeoutField({ id, label, value, onChange, disabled, describedBy }) {
+  return jsxs('label', {
+    htmlFor: id,
+    style: styles.field,
+    children: [
+      jsx('span', { style: styles.fieldName, children: label }),
+      jsx(Input, {
+        id,
+        type: 'number',
+        min: 0,
+        step: 'any',
+        inputMode: 'decimal',
+        style: { width: '100%', minWidth: 0, boxSizing: 'border-box' },
+        value: value ?? '',
+        onChange: event => onChange(event.target.value),
+        disabled,
+        'aria-label': label,
+        'aria-describedby': describedBy
+      }),
+      jsx('span', { style: styles.hint, children: '초 (seconds)' })
     ]
   })
 }
@@ -752,6 +876,7 @@ function RouterPage({ ctx: pluginContext }) {
   const [selectedProfile, setSelectedProfile] = useState(null)
   const [draft, setDraft] = useState(null)
   const [draftRevision, setDraftRevision] = useState(null)
+  const [timeoutBaseline, setTimeoutBaseline] = useState(null)
   const [modelTargets, setModelTargets] = useState(null)
   const [routingProfiles, setRoutingProfiles] = useState([])
   const [routingTargets, setRoutingTargets] = useState(null)
@@ -788,16 +913,24 @@ function RouterPage({ ctx: pluginContext }) {
     staleTime: 0
   })
   const profiles = Array.isArray(statusQuery.data?.profiles) ? statusQuery.data.profiles : []
+  const statusDataRef = useRef(statusQuery.data)
+  statusDataRef.current = statusQuery.data
   const revisionChanged = draftRevision !== null && statusQuery.data?.revision !== draftRevision
+  const loadedTimeoutRow = profiles.find(item => item.name === selectedProfile) || null
+  const timeoutChanged = timeoutDraftChanged(draft?.timeouts, timeoutBaseline)
+  const timeoutRevisionChanged = Boolean(timeoutChanged && timeoutBaseline &&
+    !timeoutRevisionMatches(timeoutBaseline, loadedTimeoutRow?.timeouts))
   useEffect(() => {
-    if (!revisionChanged || applyPendingRef.current || refreshPendingRef.current) return
+    if ((!revisionChanged && !timeoutRevisionChanged) || applyPendingRef.current || refreshPendingRef.current) return
     // Never pair old draft/copy intent with a newer query revision. Preserve
     // the draft for inspection but require an explicit fresh baseline.
-    generationRef.current += 1
-    setRoutingTargetEdited(false)
+    if (revisionChanged) {
+      generationRef.current += 1
+      setRoutingTargetEdited(false)
+    }
     setPreview(null)
     setFallbackPreview(null)
-  }, [revisionChanged, draftRevision, statusQuery.data?.revision, applyPending])
+  }, [revisionChanged, timeoutRevisionChanged, draftRevision, timeoutBaseline?.revision, statusQuery.data?.revision, applyPending])
 
   useEffect(() => {
     if (readyScope === scopeKey) return
@@ -808,6 +941,7 @@ function RouterPage({ ctx: pluginContext }) {
     setSelectedProfile(null)
     setDraft(null)
     setDraftRevision(null)
+    setTimeoutBaseline(null)
     setModelTargets(null)
     setRoutingProfiles([])
     setRoutingTargets(null)
@@ -845,9 +979,11 @@ function RouterPage({ ctx: pluginContext }) {
     if (readyScope !== scopeKey || !statusQuery.data || selectedProfile !== null) return
     const row = profiles.find(item => item.name === statusQuery.data.current_profile) || profiles[0]
     if (!row) return
+    const nextDraft = copyProfileDraft(row)
     setSelectedProfile(row.name)
     setDraftRevision(statusQuery.data.revision)
-    setDraft(copyProfileDraft(row))
+    setDraft(nextDraft)
+    setTimeoutBaseline(copyTimeoutBaseline(row.timeouts))
     setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
     setRoutingTargetEdited(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
@@ -905,6 +1041,9 @@ function RouterPage({ ctx: pluginContext }) {
   const selectedTargets = reconcileModelTargets(modelTargets, profileNames)
   const allTargetsSelected = allModelTargetsSelected(selectedTargets, profileNames)
   const targetSummary = allTargetsSelected ? `전체 ${profileNames.length}개 프로필` : `${selectedTargets.length}/${profileNames.length}개 프로필`
+  const timeoutDraftResult = buildTimeoutUpdate(selectedProfile, draft?.timeouts, timeoutBaseline, currentRow?.timeouts)
+  const timeoutSettingsSupported = validTimeoutsDto(currentRow?.timeouts)
+  const timeoutSettingsEditable = timeoutSettingsSupported && currentRow?.timeouts?.editable === true && Boolean(draft?.timeouts)
   const disabled = applyPending || needsReload || revisionChanged || statusQuery.isFetching || !selectedProfile || !draft
   const validPreview = previewMatchesScope(preview, scopeKey, generationRef.current, selectedProfile)
   const renderGeneration = generationRef.current
@@ -916,8 +1055,10 @@ function RouterPage({ ctx: pluginContext }) {
     const row = profiles.find(item => item.name === name)
     if (!row) return
     invalidatePlan()
+    const nextDraft = copyProfileDraft(row)
     setSelectedProfile(name)
-    setDraft(copyProfileDraft(row))
+    setDraft(nextDraft)
+    setTimeoutBaseline(copyTimeoutBaseline(row.timeouts))
     setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
     setRoutingTargetEdited(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
@@ -971,6 +1112,10 @@ function RouterPage({ ctx: pluginContext }) {
   const updateRole = (role, field, value) => updateDraft(current => ({
     ...current,
     models: { ...current.models, [role]: { ...current.models[role], [field]: value } }
+  }))
+  const updateTimeout = (key, value) => updateDraft(current => ({
+    ...current,
+    timeouts: { ...current.timeouts, [key]: value }
   }))
   const updateRoutingRoute = (group, field, value) => updateDraft(current => ({
     ...current,
@@ -1047,6 +1192,9 @@ function RouterPage({ ctx: pluginContext }) {
     modelTargets: [...selectedTargets],
     routingProfiles: [...routingProfiles],
     routingTargets: [...routingWriteTargets],
+    timeoutsBaseline: timeoutBaseline ? deepClone(timeoutBaseline) : null,
+    timeoutsCurrent: copyTimeoutSettings(currentRow?.timeouts),
+    timeoutWriteIntent: timeoutDraftResult.changed,
     routingTargetError,
     fallbackDrafts: deepClone(fallbackDrafts),
     fallbackBaselines: deepClone(fallbackBaselines),
@@ -1059,6 +1207,13 @@ function RouterPage({ ctx: pluginContext }) {
   const isSaveCurrent = (snapshot, token) => generationRef.current === token &&
     selectedProfileRef.current === snapshot.profile &&
     scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) === snapshot.scopeKey
+
+  const timeoutSnapshotStillCurrent = snapshot => {
+    if (!snapshot.timeoutWriteIntent) return true
+    const currentRow = (Array.isArray(statusDataRef.current?.profiles) ? statusDataRef.current.profiles : [])
+      .find(item => item.name === snapshot.profile)
+    return timeoutRevisionMatches(snapshot.timeoutsBaseline, currentRow?.timeouts)
+  }
 
   const releaseSaveLock = token => {
     if (generationRef.current !== token || !applyPendingRef.current) return
@@ -1103,8 +1258,13 @@ function RouterPage({ ctx: pluginContext }) {
     try {
       const prepared = prepare()
       if (prepared.errors?.length) throw new Error(prepared.errors.join(' '))
+      const timeoutWriteIncluded = Array.isArray(prepared.body?.timeout_updates) && prepared.body.timeout_updates.length > 0
       const result = await ctx.rest(operation, { method: 'POST', body: prepared.body })
       if (!isSaveCurrent(snapshot, token)) return
+      if (timeoutWriteIncluded && !timeoutSnapshotStillCurrent(snapshot)) {
+        setPageError('저장 검증 중 전체 실행 시간 revision이 바뀌었습니다. 적용하지 않았습니다. 상태를 새로고침한 뒤 다시 편집하세요.')
+        return
+      }
       if (!result || typeof result.plan_id !== 'string' || !Array.isArray(result.changes)) {
         throw new Error('저장 계획 응답이 올바르지 않습니다. 설정은 변경되지 않았습니다.')
       }
@@ -1147,7 +1307,7 @@ function RouterPage({ ctx: pluginContext }) {
 
 
   const saveAll = () => {
-    if (renderGeneration !== generationRef.current || revisionChanged || !currentRow || !draft || !statusQuery.data || applyPendingRef.current || needsReloadRef.current) return
+    if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || !currentRow || !draft || !statusQuery.data || applyPendingRef.current || needsReloadRef.current) return
     const snapshot = captureSaveSnapshot()
     return runSave({
       operation: '/preview', snapshot,
@@ -1164,7 +1324,13 @@ function RouterPage({ ctx: pluginContext }) {
           snapshot.profiles,
           snapshot.fallbackSupported,
           snapshot.fallbackTargetEdits,
-          snapshot.routingTargets
+          snapshot.routingTargets,
+          {
+            profile: snapshot.profile,
+            draft: snapshot.draft?.timeouts,
+            baseline: snapshot.timeoutsBaseline,
+            current: snapshot.timeoutsCurrent
+          }
         )
         const routingUpdates = (combined.body.fallback_updates || [])
           .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
@@ -1216,8 +1382,10 @@ function RouterPage({ ctx: pluginContext }) {
     }))
     setDraftRevision(response.data.revision)
     if (row) {
+      const nextDraft = copyProfileDraft(row)
       setSelectedProfile(row.name)
-      setDraft(copyProfileDraft(row))
+      setDraft(nextDraft)
+      setTimeoutBaseline(copyTimeoutBaseline(row.timeouts))
       setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
       setRoutingTargetEdited(false)
       const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
@@ -1229,6 +1397,7 @@ function RouterPage({ ctx: pluginContext }) {
     } else {
       setSelectedProfile(null)
       setDraft(null)
+      setTimeoutBaseline(null)
       setRoutingBaseline(null)
       setRoutingTargetEdited(false)
       setFallbackDrafts({ native: null, routing: null, delegation: null })
@@ -1313,6 +1482,37 @@ function RouterPage({ ctx: pluginContext }) {
       jsx('div', { style: styles.profileList, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${row.name}`, label: row.name, checked: selectedTargets.includes(row.name), disabled, onChange: checked => toggleModelTarget(row.name, checked) }) }, row.name)) })
     ]
   })
+
+  const timeoutSettingsSection = section('전체 실행 시간 제한 (TOTAL)', '전체 실행 시간 두 항목은 위에서 불러온 프로필 한 개에만 저장합니다. 모델·라우팅·폴백 적용 대상 목록과는 무관합니다.', jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' },
+    children: [
+      jsx('p', { id: 'timeout-policy-explanation', role: 'note', style: styles.hint, children: '값은 초 단위입니다. 0은 해당 작업에 플러그인 전체 시간 상한을 두지 않습니다. 일반 서브 에이전트 전체 시간은 새 옵션이며 delegation.child_timeout_seconds의 비활동 시간 제한을 바꾸지 않습니다. 일반 서브 에이전트 시간이 끝나면 Hermes에 협조적 중단을 요청하지만 프로세스 종료를 보장하지 않습니다. 라우팅 서브 에이전트는 시간 초과 시 실행 프로세스를 정리합니다.' }),
+      jsx('p', { style: styles.hint, children: '새 작업은 시작할 때 현재 정책을 스냅샷으로 사용합니다. 이미 실행 중인 작업에는 소급 적용되지 않습니다. 요청·도구별 제한과 반복 횟수 제한은 별도로 유지됩니다.' }),
+      !timeoutSettingsSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '시간 제한 DTO를 지원하지 않는 백엔드입니다 (UNSUPPORTED). 값을 추정하거나 기본값을 채우지 않고 읽기 전용으로 표시합니다.' }) : null,
+      timeoutSettingsSupported && currentRow.timeouts.editable !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필의 시간 제한은 읽기 전용입니다. 기존 값을 보존합니다.' }) : null,
+      timeoutRevisionChanged ? jsx('p', { role: 'alert', style: styles.warning, children: '불러온 뒤 시간 제한 revision이 바뀌었습니다. 덮어쓰기를 막았습니다. 상태 새로고침으로 최신 값을 다시 불러오세요.' }) : null,
+      timeoutSettingsSupported && currentRow.timeouts.warnings.length ? jsx('div', { role: 'note', style: styles.warning, children: currentRow.timeouts.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: warning }, index)) }) : null,
+      timeoutDraftResult.error ? jsx('p', { role: 'alert', style: styles.warning, children: timeoutDraftResult.error }) : null,
+      jsx('div', { style: styles.fields, children: [
+        jsx(TimeoutField, {
+          id: 'delegate-total-seconds',
+          label: '일반 서브 에이전트 전체 실행 시간',
+          value: draft?.timeouts?.delegate_total_seconds,
+          onChange: value => updateTimeout('delegate_total_seconds', value),
+          disabled: disabled || timeoutRevisionChanged || !timeoutSettingsEditable,
+          describedBy: 'timeout-policy-explanation'
+        }),
+        jsx(TimeoutField, {
+          id: 'routed-total-seconds',
+          label: '라우팅 서브 에이전트 전체 실행 시간',
+          value: draft?.timeouts?.routed_total_seconds,
+          onChange: value => updateTimeout('routed_total_seconds', value),
+          disabled: disabled || timeoutRevisionChanged || !timeoutSettingsEditable,
+          describedBy: 'timeout-policy-explanation'
+        })
+      ] })
+    ]
+  }))
 
   const routingTargetGroup = jsx('fieldset', {
     id: 'routing-targets', style: styles.fieldset,
@@ -1530,7 +1730,8 @@ function RouterPage({ ctx: pluginContext }) {
 
   const localCombinedSummary = currentRow && draft && statusQuery.data
     ? buildCombinedPreviewBody(statusQuery.data.revision, selectedProfile, draft, selectedTargets, routingProfiles,
-      fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported, fallbackTargetEdits, routingWriteTargets)
+      fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported, fallbackTargetEdits, routingWriteTargets,
+      { profile: selectedProfile, draft: draft.timeouts, baseline: timeoutBaseline, current: currentRow.timeouts })
     : null
   const summaryRoutingUpdates = (localCombinedSummary?.body.fallback_updates || [])
     .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
@@ -1547,13 +1748,22 @@ function RouterPage({ ctx: pluginContext }) {
     { scope: 'routing', label: '작업·검증', changed: routingFallbackDraftChanged || fallbackTargetEdits.routing, count: routingFallbackTargets.length },
     { scope: 'delegation', label: '네이티브 위임', changed: delegationFallbackDraftChanged || fallbackTargetEdits.delegation, count: delegationFallbackTargets.length }
   ].filter(item => item.changed)
+  const timeoutSummary = !timeoutSettingsSupported
+    ? '전체 실행 시간: UNSUPPORTED · 읽기 전용'
+    : timeoutDraftResult.update
+      ? `전체 실행 시간 변경: 일반 ${timeoutDraftResult.update.delegate_total_seconds}초 · 라우팅 ${timeoutDraftResult.update.routed_total_seconds}초 · 불러온 ${selectedProfile} 프로필만`
+      : timeoutDraftResult.changed
+        ? '전체 실행 시간: 입력 또는 revision을 확인하세요.'
+        : timeoutSettingsEditable
+          ? `전체 실행 시간 변경 없음 · 불러온 ${selectedProfile} 프로필 · 일반 ${draft?.timeouts?.delegate_total_seconds}초 / 라우팅 ${draft?.timeouts?.routed_total_seconds}초`
+          : `전체 실행 시간: 읽기 전용 · 불러온 ${selectedProfile || '프로필 없음'} 프로필`
   const scopeDraftErrors = [
     [nativeFallbackDraftChanged || fallbackTargetEdits.native, nativeFallbackError],
     [routingFallbackDraftChanged || fallbackTargetEdits.routing, routingFallbackError],
     [delegationFallbackDraftChanged || fallbackTargetEdits.delegation, delegationFallbackError]
   ].filter(([changed, error]) => changed && error).map(([, error]) => error)
   const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors, ...(routingTargetError ? [routingTargetError] : [])])]
-  const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled)
+  const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled && !timeoutRevisionChanged)
 
   return jsxs('main', {
     style: styles.page,
@@ -1563,6 +1773,7 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
       profiles.length ? section('대상 프로필', '편집할 설정 프로필을 고릅니다. 저장 검증 중 범위가 바뀌면 적용 전 요청은 안전하게 취소됩니다.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `현재 Desktop 프로필: ${activeProfile || '확인 중'} · 연결: ${connectionId || 'local'} · 게이트웨이: ${gateway || 'idle'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
       profiles.length ? section('모델 대상', '네 역할의 값을 한 번 편집하고, 아래 별도 선택 목록에 체크한 프로필에만 모델 값을 적용합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [modelFields, modelTargetGroup] })) : null,
+      profiles.length ? timeoutSettingsSection : null,
       profiles.length ? section('작업 라우팅', '코딩과 복잡한 비코딩 판단 작업에 공통 정책을 적용합니다. 근거 충돌, 여러 근거를 종합하는 판단, 오류 영향이 큰 학습 자료·문항 검토, 반복된 개념적 실패가 예입니다. 단순 글쓰기·번역·요약·추출은 Heavy 대상이 아닙니다. Heavy/Light 모델 적용 대상과 라우팅 활성 프로필은 따로 선택하며, 정책을 공통 배포해도 기존 프로필 활성 멤버십은 바뀌지 않습니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { style: styles.hint, children: routingSummary }),
         jsxs('details', { style: styles.cardSection, children: [
@@ -1582,6 +1793,7 @@ function RouterPage({ ctx: pluginContext }) {
           jsx('p', { style: styles.hint, children: modifiedFallbackSummary.length
             ? `수정한 폴백: ${modifiedFallbackSummary.map(item => `${item.label} ${item.count}개 대상`).join(' · ')}`
             : '수정한 폴백 없음' }),
+          jsx('p', { style: styles.hint, children: timeoutSummary }),
           jsx('p', { style: styles.hint, children: '이 요약은 현재 초안에서 로컬로 계산한 참고 정보이며, 서버 검증 결과나 실제 저장 결과 또는 확정된 변경 내역을 보증하지 않습니다.' }),
           summaryValidationErrors.length ? jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '확인할 항목' }), jsx('ul', { children: summaryValidationErrors.map((error, index) => jsx('li', { children: error }, index)) })] }) : jsx('p', { role: 'status', style: styles.hint, children: '현재 입력에서 감지된 오류가 없습니다. 서버 검증은 저장 과정에서 수행됩니다.' })
         ] }),

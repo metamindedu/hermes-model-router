@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import effective_config, fallback_policy
+from . import effective_config, fallback_policy, timeouts
 
 SCHEMA = 2
 STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
@@ -1048,6 +1048,7 @@ class Service:
                 "actual_models": actual,
                 "drift": drift,
                 "fallbacks": self._fallback_dto(name, view_entry),
+                "timeouts": timeouts.timeout_status(self._profile_home(name), enforcement_available=self._timeout_enforcement_available(name)),
             })
         return {
             "revision": stored["revision"] if stored else 0,
@@ -1074,12 +1075,16 @@ class Service:
         approved = routing["fallback"]["enabled"] and fallback_policy.consent_matches(
             profile, "routing", routing["fallback"], consent
         )
+        limits = timeouts.read_timeouts(self._profile_home(profile))
         return {
             "enabled": enabled,
             "heavy": dict(heavy),
             "light": dict(light),
             "fallback": dict(routing["fallback"]),
             "revision": revision,
+            "timeout_seconds": limits["routed_total_seconds"],
+            "delegate_timeout_seconds": limits["delegate_total_seconds"],
+            "timeout_revision": limits["revision"],
             "fallback_policy": {
                 "trigger": fallback_policy.ROUTING_TRIGGER,
                 "max_retries": fallback_policy.ROUTING_MAX_RETRIES,
@@ -1099,9 +1104,52 @@ class Service:
             "fallback_consent": {"native": None, "routing": None, "delegation": None},
         }
 
+    def _timeout_enforcement_available(self, profile: str) -> bool:
+        home = self._profile_home(profile)
+        package = home / "plugins/model-router/model_router"
+        return all((package / name).is_file() and not (package / name).is_symlink()
+                   and _inside(package / name, home)
+                   for name in ("timeouts.py", "native_watchdog.py"))
+
+    def _prepare_timeout_updates(self, updates: Any, source: str, discovered: list[str]) -> list[dict[str, Any]]:
+        if not isinstance(updates, list):
+            raise ValueError("timeout_updates must be a list")
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for update in updates:
+            if not isinstance(update, dict) or set(update) != {"profile", "expected_revision", "delegate_total_seconds", "routed_total_seconds"}:
+                raise ValueError("timeout update has unknown or missing fields")
+            profile = self._require_profile(update["profile"], discovered)
+            if profile != source or profile in seen:
+                raise ValueError("timeout updates must target only the loaded profile once")
+            seen.add(profile)
+            if not self._timeout_enforcement_available(profile):
+                raise ValueError("timeout enforcement is unavailable for this profile")
+            revision = update["expected_revision"]
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+                raise ValueError("timeout expected_revision must be a nonnegative integer")
+            home = self._profile_home(profile)
+            digest = timeouts.timeout_digest(home)
+            current = timeouts.read_timeouts(home)
+            if digest != timeouts.timeout_digest(home) or revision != current["revision"]:
+                raise RevisionConflict("timeout settings changed; reload before preview")
+            values = {key: timeouts.validate_seconds(update[key]) for key in ("delegate_total_seconds", "routed_total_seconds")}
+            before_values = {key: current[key] for key in values}
+            if values != before_values:
+                result.append({"profile": profile, "key": "model-router.timeouts", "before": digest,
+                               "before_values": before_values, "expected_revision": revision, "after": values})
+        return result
+
+    def _check_timeout_write(self, item: dict[str, Any]) -> None:
+        home = self._profile_home(self._require_profile(item["profile"]))
+        if not self._timeout_enforcement_available(item["profile"]):
+            raise RevisionConflict("timeout enforcement changed since preview")
+        if timeouts.timeout_digest(home) != item["before"] or timeouts.read_timeouts(home)["revision"] != item["expected_revision"]:
+            raise RevisionConflict("timeout settings changed since preview")
+
     def preview(self, body: dict) -> dict[str, Any]:
         required = {"expected_revision", "profile", "models", "model_targets", "routing", "routing_profiles"}
-        optional = {"fallback_updates", "fallback_confirmations", "routing_targets"}
+        optional = {"fallback_updates", "fallback_confirmations", "routing_targets", "timeout_updates"}
         if not isinstance(body, dict) or not required <= set(body) or set(body) - required - optional:
             raise ValueError("preview body has unknown or missing fields")
         fallback_updates = body.get("fallback_updates", [])
@@ -1115,6 +1163,7 @@ class Service:
             raise ValueError("expected_revision must be a non-negative integer")
         discovered = self._discover_profiles()
         profile = self._require_profile(body["profile"], discovered)
+        timeout_writes = self._prepare_timeout_updates(body.get("timeout_updates", []), profile, discovered)
         targets = body["model_targets"]
         selected = body["routing_profiles"]
         if not isinstance(targets, list) or not isinstance(selected, list):
@@ -1220,7 +1269,11 @@ class Service:
             "id": plan_id, "revision": revision, "after": after, "changes": changes,
             "snapshots": snapshots, "config_digests": config_digests, "writes": writes,
             "skill_snapshots": skill_snapshots, "model_targets": targets, "state_changed": state_changed, "expires_epoch": expires_epoch,
+            "timeout_writes": timeout_writes,
         }
+        for item in timeout_writes:
+            changes.append({"profile": item["profile"], "field": "timeouts", "before": item["before_values"], "after": item["after"]})
+            self._check_timeout_write(item)
         if fallback_updates:
             # Compose before publishing: one immutable token, revision and apply.
             # Never apply two independent previews in sequence.
@@ -1528,6 +1581,7 @@ class Service:
             "delegation_provenance": delegation_provenance,
             "state_changed": state_changed,
             "expires_epoch": expires_epoch,
+            "timeout_writes": copy.deepcopy(base_plan.get("timeout_writes", [])) if base_plan else [],
         }
         # Eligibility, sanitized preview and before hashes all came from the
         # same immutable snapshot. Reject an intervening edit instead of
@@ -1546,6 +1600,8 @@ class Service:
                 raise RevisionConflict("delegation config changed during preview") from exc
             if current_snapshot.cas_digest != expected_snapshot:
                 raise RevisionConflict("delegation config changed during preview")
+        for item in plan["timeout_writes"]:
+            self._check_timeout_write(item)
         self._plans[plan_id] = plan
         plans_dir = self.store_path.parent / "plans"
         with _FileLock(self._lock_path):
@@ -1588,6 +1644,8 @@ class Service:
             revision = current["revision"] if current else 0
             if revision != plan["revision"]:
                 raise RevisionConflict("settings revision changed; preview again")
+            for item in plan.get("timeout_writes", []):
+                self._check_timeout_write(item)
             for profile in set(plan["snapshots"]) | set(plan["skill_snapshots"]):
                 self._require_profile(profile)
             # Validate all captured config values before creating backups or writing.
@@ -1620,22 +1678,30 @@ class Service:
             next_store = {"schema": SCHEMA, "revision": new_revision, "profiles": plan["after"]}
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             profiles_to_backup = sorted({item["profile"] for item in plan["writes"]})
+            all_writes = list(plan["writes"]) + list(plan.get("timeout_writes", []))
             try:
                 for profile in profiles_to_backup:
                     self._backup_config(profile, stamp)
             except Exception:
                 receipt = {"status": "partial", "plan_id": plan_id, "revision": revision, "applied": [],
-                           "remaining": [{"profile": item["profile"], "key": item["key"]} for item in plan["writes"]],
+                           "remaining": [{"profile": item["profile"], "key": item["key"]} for item in all_writes],
                            "finished_at": _now()}
                 self._store_apply(receipt)
                 return receipt
             if plan["state_changed"]:
                 _atomic_write(self.store_path, _json_bytes(next_store))
             applied: list[dict[str, str]] = []
-            pending = list(plan["writes"])
+            pending = list(all_writes)
             try:
-                for item in plan["writes"]:
+                for item in all_writes:
                     profile, key, before, after = item["profile"], item["key"], item["before"], item["after"]
+                    if key == "model-router.timeouts":
+                        self._check_timeout_write(item)
+                        timeouts.write_timeouts(self._profile_home(profile), after,
+                                                expected_digest=before, expected_revision=item["expected_revision"])
+                        applied.append({"profile": profile, "key": key})
+                        pending.pop(0)
+                        continue
                     if profile in plan.get("native_provenance", {}):
                         try:
                             current_snapshot = self._read_native_snapshot(profile)
@@ -1657,6 +1723,10 @@ class Service:
                 for item in plan["writes"]:
                     if not self._actual_key_matches(item["profile"], item["key"], item["after"]):
                         raise RevisionConflict("profile changed before final readback")
+                for item in plan.get("timeout_writes", []):
+                    observed = timeouts.read_timeouts(self._profile_home(item["profile"]))
+                    if observed["revision"] != item["expected_revision"] + 1 or any(observed[key] != value for key, value in item["after"].items()):
+                        raise RevisionConflict("timeout settings differ from approved selection")
                 for profile in plan.get("model_targets", []):
                     if self._actual_models(profile) != next_store["profiles"][profile]["models"]:
                         raise RevisionConflict("resolved roles differ from approved desired models")

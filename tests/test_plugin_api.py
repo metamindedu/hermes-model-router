@@ -90,6 +90,9 @@ def plugin(monkeypatch):
     runtime_module.route_session_context = lambda **kwargs: nullcontext()
     runtime_module.capture_runtime = lambda **kwargs: state.setdefault('runtime_calls', []).append(kwargs) or SimpleNamespace(parent_session_id='parent-session')
     monkeypatch.setitem(sys.modules, runtime_module.__name__, runtime_module)
+    watchdog_module = ModuleType(package.__name__ + '.native_watchdog')
+    watchdog_module.register_native_watchdog = lambda ctx, home: state.setdefault('watchdog_homes', []).append(str(home))
+    monkeypatch.setitem(sys.modules, watchdog_module.__name__, watchdog_module)
     tools, skills = [], []
     ctx = SimpleNamespace(register_cli_command=lambda *args: state.update(cli=args), register_tool=lambda **kwargs: tools.append(kwargs), register_skill=lambda *args: skills.append(args), register_hook=lambda event, callback: state.setdefault('hooks', {}).update({event: callback}))
     return mod, ctx, state, tools, skills
@@ -100,6 +103,7 @@ def test_disabled_profile_registers_neither_tools_nor_skill(plugin):
     state["enabled"] = False
     mod.register(ctx)
     assert tools == skills == []
+    assert state['watchdog_homes'] == [str(Path("C:/fake/profiles/claire"))]
 
 
 def test_active_profile_registers_scoped_tool_and_skill(plugin):
@@ -123,6 +127,15 @@ def test_public_title_schema_is_forwarded_without_changing_scope(plugin):
     assert result['status'] == 'running'
     assert state['start_kwargs'] == {'title': '테스트 및 검증'}
     assert state['runtime_calls'] == [{'task_id': '', 'expected_profile': 'claire'}]
+
+
+def test_timeout_schema_exposes_zero_and_no_independent_ceiling(plugin):
+    mod, ctx, _, tools, _ = plugin
+    mod.register(ctx)
+    timeout = tools[0]['schema']['parameters']['properties']['timeout']
+    assert timeout['minimum'] == 0
+    assert 'maximum' not in timeout
+    assert 'profile' in timeout['description'] and '3600' in timeout['description']
 
 
 def test_stale_tool_cannot_bypass_profile_disable(plugin):

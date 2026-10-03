@@ -49,7 +49,15 @@ Native delegate_task may still handle Light implementation/mechanical tasks afte
 
 ## Bounded handoff and implementation
 
-Before dispatch specify deliverable, exact owned files, inputs/constraints, acceptance tests, explicit non-goals, elapsed-time budget, retry budget, external-write permissions, and cleanup responsibility. Use nonoverlapping ownership for parallel work. Complex work's Heavy plan is the implementation baseline; material deviations return to Main.
+Before dispatch specify deliverable, exact owned files, inputs/constraints, acceptance tests, explicit non-goals, the applicable profile total-runtime setting, retry budget, external-write permissions, and cleanup responsibility. Use nonoverlapping ownership for parallel work. Complex work's Heavy plan is the implementation baseline; material deviations return to Main.
+
+### Total-runtime settings (separate from native inactivity)
+
+The plugin provides TWO independent profile settings: `delegate_total_seconds` for ordinary native `delegate_task` children (default `0`, disabled), and `routed_total_seconds` for Heavy/Light routed jobs (default `3600`, one hour). `0` disables the plugin's total wall-clock limit; it does not disable provider/request/tool, iteration, native inactivity or cleanup protection. Neither setting inherits `delegation.child_timeout_seconds`, whose native meaning is an inactivity window. Policy is snapshotted for new work, not retroactively changed on running children.
+
+For `coding_route`, normally OMIT `timeout`: use the profile's `routed_total_seconds` from `action="config"`. Do not arbitrarily inject 180/300/600/900-second caps or a shorter timebox in the handoff just because a review is read-only or seems small. Supply an explicit nonnegative `timeout` only when the user requests a specific deadline or the task has a concrete external deadline; `timeout=0` disables the routed job's plugin total limit only. There is no separate 15-minute ceiling. A finite primary/fallback job shares one total deadline; timeout does not authorize a fresh automatic retry.
+
+An ordinary native child's total budget is per child, not per batch, and starts from native registered running time rather than time spent queued. At expiry the plugin requests the native owned child to stop; request acceptance is NOT proof that it has terminated, and the shared Hermes process must never be killed. Routed jobs retain their existing process-tree cancellation/cleanup evidence. Report timeout, partial work and unknown cleanup honestly, never as completion.
 
 Stop when acceptance criteria pass. Do not add refactors/docs/frameworks/new review cycles as optional polish. After two failed attempts at the same operation, return evidence and the smallest next decision; do not repeat blindly. An ambiguous external write requires exact-target readback before any retry. Time-budget exit is partial, not done.
 

@@ -27,7 +27,7 @@ MAX_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_PROMPT_CHARS = 8 * 1024 * 1024
 MAX_RESPONSE_CHARS = 48_000
 MAX_ERROR_CHARS = 600
-MAX_BUDGET_SECONDS = 900.0
+
 PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 PARENT_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 PROVIDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -145,7 +145,7 @@ def _validate_request(request: Any, request_path: Path | None = None) -> tuple[d
     if isinstance(budget, bool) or not isinstance(budget, (int, float)):
         raise AttemptError("initialization_error", "budget_seconds must be numeric")
     budget = float(budget)
-    if not math.isfinite(budget) or budget <= 0 or budget > MAX_BUDGET_SECONDS:
+    if not math.isfinite(budget) or budget < 0:
         raise AttemptError("initialization_error", "budget_seconds is outside the supported bound")
 
     attempt_dir = home / "plugin-data" / "model-router" / "jobs" / request["job_id"] / "attempts" / request["attempt_id"]

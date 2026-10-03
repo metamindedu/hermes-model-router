@@ -76,6 +76,11 @@ def register(ctx):
     for event_name in ("pre_api_request", "post_api_request", "api_request_error", "pre_tool_call", "post_tool_call"):
         ctx.register_hook(event_name, make_observer(event_name))
 
+    # Ordinary native delegation has its own opt-in total limit, independent
+    # of Heavy/Light routing membership. Never mutate native inactivity config.
+    from .model_router.native_watchdog import register_native_watchdog
+    register_native_watchdog(ctx, home)
+
     if not enabled():
         return
     ctx.register_skill(
@@ -104,7 +109,7 @@ def register(ctx):
                     with route_session_context(session_id=kwargs.get("session_id", ""), expected_profile=profile):
                         router.runtime = capture_runtime(task_id=kwargs.get("task_id") or "", expected_profile=profile)
                         title_kwargs = {"title": args["title"]} if "title" in args else {}
-                        return router.start(args.get("purpose"), args.get("prompt"), args.get("cwd"), args.get("timeout", 600), **title_kwargs)
+                        return router.start(args.get("purpose"), args.get("prompt"), args.get("cwd"), args.get("timeout"), **title_kwargs)
                 raise ValueError("action must be config, start, or status")
             return json.dumps(scoped(run), ensure_ascii=False)
         except (ValueError, PermissionError, KeyError) as exc:
@@ -123,7 +128,7 @@ def register(ctx):
                 "title": {"type": "string", "minLength": 1, "maxLength": 96, "description": "Short human-readable PUBLIC Background task title. Describe the deliverable; never put secrets or private prompt text here."},
                 "prompt": {"type": "string", "description": "Complete bounded handoff; independent review must be read-only."},
                 "cwd": {"type": "string", "description": "Existing task workspace."},
-                "timeout": {"type": "integer", "minimum": 30, "maximum": 900},
+                "timeout": {"type": "integer", "minimum": 0, "description": "Optional per-job TOTAL seconds. Omit to use this profile's routed total-runtime setting (default 3600). 0 disables only the plugin total limit; native request/tool limits remain."},
                 "job_id": {"type": "string"},
             }, "required": ["action"],
         },

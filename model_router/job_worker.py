@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -227,7 +228,7 @@ def run_job(
     job_dir = _validated_job_dir(job_dir, profile)
     if purpose not in PURPOSES:
         raise ValueError("unsupported routing purpose")
-    if not math.isfinite(timeout) or timeout <= 0 or timeout > 900:
+    if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout < 0:
         raise ValueError("timeout is outside the supported bound")
     expected_runner = (Path(__file__).resolve().parents[1] / "lib" / "run_routed_agent.py").resolve()
     if runner.resolve() != expected_runner or not runner.is_file():
@@ -249,6 +250,7 @@ def run_job(
         or snapshot.get("profile") != profile
         or snapshot.get("purpose") != purpose
         or snapshot.get("cwd") != str(cwd.resolve())
+        or ("timeout_seconds" in snapshot and snapshot["timeout_seconds"] != timeout)
     ):
         raise ValueError("immutable job snapshot does not match worker arguments")
 
@@ -291,7 +293,17 @@ def run_job(
         with log_path.open("ab"):
             process = subprocess.Popen(command, **creation)
         try:
-            runner_code = process.wait(timeout=timeout + 5.0)
+            # Slicing only the OS wait avoids Windows millisecond overflow for
+            # large valid budgets; the single overall deadline never resets.
+            worker_deadline = time.monotonic() + timeout + 5.0 if timeout > 0 else None
+            while True:
+                remaining = max(0.0, worker_deadline - time.monotonic()) if worker_deadline is not None else None
+                try:
+                    runner_code = process.wait(timeout=min(remaining, 86400.0) if remaining is not None else None)
+                    break
+                except subprocess.TimeoutExpired:
+                    if remaining is None or remaining <= 86400.0 or time.monotonic() >= worker_deadline:
+                        raise
         except subprocess.TimeoutExpired:
             cleanup_verified = _terminate_process_tree(process)
             _atomic_json(

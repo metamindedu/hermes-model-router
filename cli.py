@@ -19,7 +19,7 @@ def main(argv=None):
     p.add_argument("--purpose", required=True, choices=["implementation", "mechanical", "preliminary-review", "plan", "semantic-final", "independent-review"])
     p.add_argument("--prompt-file", required=True)
     p.add_argument("--cwd", required=True)
-    p.add_argument("--timeout", type=int, default=600)
+    p.add_argument("--timeout", type=int, default=None, help="Per-job total seconds; omitted uses profile setting, 0 disables the plugin total limit")
     p.add_argument("--title", help="Public Background task title (1–96 characters; no secrets)")
     p = sub.add_parser("job-status"); p.add_argument("--job-id", required=True)
     args = parser.parse_args(argv)

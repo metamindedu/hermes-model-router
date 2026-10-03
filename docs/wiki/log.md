@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-04 | total-runtime-limits
+- 사용자 요청: 일반 native 서브 에이전트와 Heavy/Light 라우팅 작업 각각에 플러그인 소유 전체 실행 시간 옵션을 둔다. `child_timeout_seconds` 상속/편집은 요청이 아니며 기존 native 무진행 제한을 보존한다.
+- 프로필별 별도 파일·단일 저장 계획 CAS, per-child 실제 running time·소유권을 확인한 native 중지 요청과 실제 종료의 구분, 라우팅 0/긴 예산과 공통 fallback deadline을 기록. 설치/실행 성공은 실제 검증 증거와 별도로 판단한다.
+
 ## 2026-10-02 | routing-primary-targets
 - 활성 체크 목록은 여러 프로필을 켜지만 Heavy/Light는 source 하나만 저장하던 계약과 사용자 일괄 적용 기대의 불일치를 확인.
 - 경로 복사 대상과 활성 상태를 분리하고, 모델-only 재저장의 암묵적 경로 덮어쓰기 방지·target별 폴백 보존·최종 상태 검증 원칙을 기록. 설치와 실제 테스트 결과는 별도 증거로 확인한다.

@@ -163,6 +163,17 @@ def test_observation_deadline_does_not_claim_task_exit(setup):
     assert not s.session.exited
 
 
+@pytest.mark.parametrize("total_seconds", [0, 7200])
+def test_observer_accepts_disabled_and_long_total_budget(setup, total_seconds):
+    s = setup
+    observer = bg.BackgroundOutput(**{**s.kwargs, "timeout": total_seconds})
+    assert observer.deadline == (None if total_seconds == 0 else s.now[0] + total_seconds + 30)
+    s.now[0] += 1000
+    assert observer.tick()
+    assert not s.session.exited
+    assert not any("관찰 시간이 끝났습니다" in line for line in s.output)
+
+
 def test_emit_failure_does_not_affect_native_lifecycle(setup):
     s = setup
     s.observer.emit = lambda *args: (_ for _ in ()).throw(RuntimeError("SECRET_EMIT_ERROR"))
