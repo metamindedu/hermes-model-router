@@ -566,7 +566,7 @@ class Router:
             "--cwd",
             str(working_dir),
             "--timeout",
-            f"{bounded_timeout:g}",
+            repr(bounded_timeout),
         ]
         launch_path = _job_file(job_dir, "launch.json")
         _write_json(

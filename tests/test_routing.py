@@ -301,7 +301,7 @@ def test_timeout_is_not_capped_and_invalid_inputs_are_rejected(tmp_path, monkeyp
     cwd.mkdir()
     assert router.start("mechanical", "run tests", cwd, timeout=7200)["status"] == "running"
     worker_command = calls[0][0]
-    assert worker_command[worker_command.index("--timeout") + 1] == "7200"
+    assert float(worker_command[worker_command.index("--timeout") + 1]) == 7200
     assert routing._bounded_timeout(7200) == 7200
     assert routing._bounded_timeout(0) == 0
     for value in (-1, float("inf"), float("nan"), True, "60"):
@@ -320,7 +320,7 @@ def test_routed_total_limit_is_snapshotted_separately_from_native_limit(tmp_path
     directory = root / "profiles/claire/plugin-data/model-router/jobs" / result["job_id"]
     snapshot = _load(directory / "snapshot.json")
     assert snapshot["timeout_seconds"] == expected
-    assert calls[0][0][calls[0][0].index("--timeout") + 1] == str(expected)
+    assert float(calls[0][0][calls[0][0].index("--timeout") + 1]) == expected
     assert snapshot["timeout_source"] == ("profile" if override is None else "call")
 
 
@@ -607,6 +607,40 @@ def test_symlinked_profile_jobs_root_is_rejected(tmp_path, monkeypatch):
         pytest.skip(f"directory symlinks are unavailable on this Windows host: {exc}")
     with pytest.raises(routing.RoutingError, match="symlinks|outside"):
         _start(router, tmp_path)
+
+
+@pytest.mark.parametrize("configured", [True, False])
+@pytest.mark.parametrize("total_seconds", [0, 3600, 7200, 1000001, 3600.123, 1e100])
+def test_timeout_roundtrips_router_worker_runner_without_precision_loss(tmp_path, monkeypatch, total_seconds, configured):
+    from lib import run_routed_agent as runner
+    router, service, root, calls = _make_router(tmp_path, monkeypatch)
+    native_config = service.routing_config
+    service.routing_config = lambda profile: {**native_config(profile), "timeout_seconds": total_seconds}
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    kwargs = {} if configured else {"timeout": total_seconds}
+    result = router.start("implementation", "offline precision fixture", cwd, **kwargs)
+    assert result["status"] == "running"
+    worker_args = job_worker._parser().parse_args(calls[0][0][2:])
+    assert worker_args.timeout == total_seconds
+    snapshot = _load(worker_args.job_dir / "snapshot.json")
+    assert snapshot["timeout_seconds"] == worker_args.timeout
+    assert snapshot["timeout_source"] == ("profile" if configured else "call")
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles/claire"))
+    class Process:
+        pid = 12345
+        returncode = 0
+        def wait(self, timeout=None):
+            assert (timeout is None) == (total_seconds == 0)
+            return 0
+        def poll(self): return 0
+    def fake_runner(command, **kwargs):
+        parsed = runner._build_parser().parse_args(command[2:])
+        assert parsed.timeout == total_seconds
+        Path(parsed.output).write_text(json.dumps(_verified_runner_result()), encoding="utf-8")
+        return Process()
+    monkeypatch.setattr(job_worker.subprocess, "Popen", fake_runner)
+    assert job_worker.run_job(**vars(worker_args)) == 0
 
 
 @pytest.mark.parametrize("total_seconds", [600, 0, 7200, 1e100])

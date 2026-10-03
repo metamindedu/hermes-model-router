@@ -132,7 +132,7 @@ def build_runner_command(
         "--cwd",
         str(cwd),
         "--timeout",
-        f"{timeout:g}",
+        repr(float(timeout)),
         "--output",
         str(_job_file(job_dir, "runner-result.json")),
         "--job-dir",
