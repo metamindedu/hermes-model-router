@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-04 | scoped-section-saves
+- 사용자 요청: 전체 시간 제한을 다른 옵션처럼 복수 프로필에 적용하며, 시간·모델·라우팅도 폴백처럼 독립적으로 저장한다.
+- 기본 대상 선택과 일회 복사 의도, 대상별 고정 revision/CAS, 개별 저장의 타 섹션 초안·라우팅 membership/skills 격리 원칙을 기록. 설치와 실제 저장 검증은 별도의 실행 증거로 판단한다.
+
 ## 2026-10-04 | total-runtime-limits
 - 사용자 요청: 일반 native 서브 에이전트와 Heavy/Light 라우팅 작업 각각에 플러그인 소유 전체 실행 시간 옵션을 둔다. `child_timeout_seconds` 상속/편집은 요청이 아니며 기존 native 무진행 제한을 보존한다.
 - 프로필별 별도 파일·단일 저장 계획 CAS, per-child 실제 running time·소유권을 확인한 native 중지 요청과 실제 종료의 구분, 라우팅 0/긴 예산과 공통 fallback deadline을 기록. 설치/실행 성공은 실제 검증 증거와 별도로 판단한다.

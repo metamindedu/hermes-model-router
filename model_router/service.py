@@ -1111,7 +1111,7 @@ class Service:
                    and _inside(package / name, home)
                    for name in ("timeouts.py", "native_watchdog.py"))
 
-    def _prepare_timeout_updates(self, updates: Any, source: str, discovered: list[str]) -> list[dict[str, Any]]:
+    def _prepare_timeout_updates(self, updates: Any, discovered: list[str]) -> list[dict[str, Any]]:
         if not isinstance(updates, list):
             raise ValueError("timeout_updates must be a list")
         result: list[dict[str, Any]] = []
@@ -1120,8 +1120,8 @@ class Service:
             if not isinstance(update, dict) or set(update) != {"profile", "expected_revision", "delegate_total_seconds", "routed_total_seconds"}:
                 raise ValueError("timeout update has unknown or missing fields")
             profile = self._require_profile(update["profile"], discovered)
-            if profile != source or profile in seen:
-                raise ValueError("timeout updates must target only the loaded profile once")
+            if profile in seen:
+                raise ValueError("timeout updates must target each profile only once")
             seen.add(profile)
             if not self._timeout_enforcement_available(profile):
                 raise ValueError("timeout enforcement is unavailable for this profile")
@@ -1135,9 +1135,9 @@ class Service:
                 raise RevisionConflict("timeout settings changed; reload before preview")
             values = {key: timeouts.validate_seconds(update[key]) for key in ("delegate_total_seconds", "routed_total_seconds")}
             before_values = {key: current[key] for key in values}
-            if values != before_values:
-                result.append({"profile": profile, "key": "model-router.timeouts", "before": digest,
-                               "before_values": before_values, "expected_revision": revision, "after": values})
+            result.append({"profile": profile, "key": "model-router.timeouts", "before": digest,
+                           "before_values": before_values, "expected_revision": revision,
+                           "after": values, "write_required": values != before_values})
         return result
 
     def _check_timeout_write(self, item: dict[str, Any]) -> None:
@@ -1149,36 +1149,68 @@ class Service:
 
     def preview(self, body: dict) -> dict[str, Any]:
         required = {"expected_revision", "profile", "models", "model_targets", "routing", "routing_profiles"}
-        optional = {"fallback_updates", "fallback_confirmations", "routing_targets", "timeout_updates"}
+        optional = {"fallback_updates", "fallback_confirmations", "routing_targets", "timeout_updates", "save_scope"}
         if not isinstance(body, dict) or not required <= set(body) or set(body) - required - optional:
             raise ValueError("preview body has unknown or missing fields")
+        scope = body.get("save_scope")
+        if "save_scope" in body and (not isinstance(scope, str) or scope not in {"models", "routing", "timeouts"}):
+            raise ValueError("save_scope must be models, routing, or timeouts")
         fallback_updates = body.get("fallback_updates", [])
         fallback_confirmations = body.get("fallback_confirmations", [])
         if not isinstance(fallback_updates, list) or not isinstance(fallback_confirmations, list):
             raise ValueError("fallback updates and confirmations must be lists")
         if fallback_confirmations and not fallback_updates:
             raise ValueError("fallback confirmations require explicit fallback updates")
+        if scope is not None and (fallback_updates or fallback_confirmations):
+            raise ValueError("fallback updates are outside the selected save scope")
         expected = body["expected_revision"]
         if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
             raise ValueError("expected_revision must be a non-negative integer")
         discovered = self._discover_profiles()
         profile = self._require_profile(body["profile"], discovered)
-        timeout_writes = self._prepare_timeout_updates(body.get("timeout_updates", []), profile, discovered)
+        raw_timeout_updates = body.get("timeout_updates", [])
+        if not isinstance(raw_timeout_updates, list):
+            raise ValueError("timeout_updates must be a list")
+        if scope in {"models", "routing"} and raw_timeout_updates:
+            raise ValueError("timeout updates are outside the selected save scope")
+        timeout_writes = (
+            self._prepare_timeout_updates(raw_timeout_updates, discovered)
+            if scope in {None, "timeouts"} else []
+        )
         targets = body["model_targets"]
         selected = body["routing_profiles"]
         if not isinstance(targets, list) or not isinstance(selected, list):
             raise ValueError("model_targets and routing_profiles must be lists")
         targets = [self._require_profile(name, discovered) for name in targets]
         selected = [self._require_profile(name, discovered) for name in selected]
-        routing_targets = body.get("routing_targets", [profile])
-        if not isinstance(routing_targets, list):
+        raw_routing_targets = body.get("routing_targets", [profile])
+        if not isinstance(raw_routing_targets, list):
             raise ValueError("routing_targets must be a list")
-        routing_targets = [self._require_profile(name, discovered) for name in routing_targets]
+        routing_targets = [self._require_profile(name, discovered) for name in raw_routing_targets]
         if len(set(targets)) != len(targets) or len(set(selected)) != len(selected) or len(set(routing_targets)) != len(routing_targets):
             raise ValueError("profile lists must not contain duplicates")
-        submitted_models = _models(body["models"])
-        submitted_routing = _routing(body["routing"])
-        if submitted_routing["enabled"] != (profile in selected):
+        if scope in {"routing", "timeouts"} and targets:
+            raise ValueError("model targets are outside the selected save scope")
+        if scope in {"models", "timeouts"} and "routing_targets" in body and routing_targets:
+            raise ValueError("routing targets are outside the selected save scope")
+        submitted_models = _models(body["models"]) if scope in {None, "models"} else None
+        if scope is None:
+            submitted_routing = _routing(body["routing"])
+        elif scope == "routing":
+            routing_body = body["routing"]
+            if not isinstance(routing_body, dict) or set(routing_body) != {"enabled", "heavy", "light", "fallback"}:
+                raise ValueError("routing must define enabled, heavy, light, and fallback")
+            # Fallback is a separate save scope. Validate only membership and
+            # Heavy/Light declarations; the submitted fallback draft is inert.
+            submitted_routing = _routing({
+                "enabled": routing_body["enabled"],
+                "heavy": routing_body["heavy"],
+                "light": routing_body["light"],
+                "fallback": {"enabled": False, "heavy": None, "light": None},
+            })
+        else:
+            submitted_routing = None
+        if submitted_routing is not None and submitted_routing["enabled"] != (profile in selected):
             raise ValueError("routing.enabled must match routing_profiles membership")
 
         stored = self._load_store()
@@ -1186,49 +1218,65 @@ class Service:
         if expected != revision:
             raise RevisionConflict("settings revision changed; reload before preview")
         entries = dict(stored["profiles"]) if stored else {}
-        all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
-        after = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
-        if submitted_routing["fallback"] != after[profile]["routing"]["fallback"]:
+        if scope == "timeouts":
+            # Timeout plans do not project or initialize canonical model/routing state.
+            all_names = []
+            after = copy.deepcopy(entries)
+        elif scope == "models":
+            # A model-section save may materialize a new canonical entry only
+            # for profiles explicitly selected as model targets.
+            all_names = []
+            after = copy.deepcopy(entries)
+            for name in targets:
+                if name not in after:
+                    after[name] = self._fresh_profile_entry(name, entries)
+        else:
+            all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
+            after = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
+        if scope is None and submitted_routing["fallback"] != after[profile]["routing"]["fallback"]:
             raise ValueError("routing.fallback can only be changed by fallback_preview")
         changes: list[dict[str, Any]] = []
         snapshots: dict[str, dict[str, Any]] = {}
         writes: list[dict[str, Any]] = []
         skill_snapshots: dict[str, str] = {}
-        for name in targets:
-            entry = after[name]
-            desired = submitted_models
-            if entry["models"] != desired:
-                changes.append({"profile": name, "field": "settings.models", "before": entry["models"], "after": desired})
-            actual = self._actual_models(name)
-            profile_values = self._profile_digest_keys(name, desired, False)
-            snapshots[name] = profile_values
-            for role in MODEL_ROLES:
-                if actual[role] != desired[role] or (role != "main" and actual["main"] != desired["main"]):
-                    changes.append({"profile": name, "field": f"models.{role}", "before": actual[role], "after": desired[role]})
-                    role_writes = []
-                    for key, value in zip(MODEL_KEYS[role], (desired[role]["provider"], desired[role]["model"], desired[role]["reasoning"])):
-                        old = profile_values[key]
-                        if old != value:
-                            role_writes.append({"profile": name, "key": key, "before": old, "after": value})
-                    if role in STALE_KEYS and actual[role]["provider"] != desired[role]["provider"]:
-                        for key in STALE_KEYS[role]:
-                            old = self._read_optional_key(name, key)
-                            comparable = {"sha256": _digest(old)}
-                            profile_values[key] = comparable
-                            if old not in (None, ""):
-                                writes.append({"profile": name, "key": key, "before": comparable, "after": ""})
-                                changes.append({"profile": name, "field": key, "before": "[configured]", "after": ""})
-                    writes.extend(role_writes)
-            entry["models"] = desired
+        routing_validation_names: set[str] = set()
+        if submitted_models is not None:
+            for name in targets:
+                entry = after[name]
+                desired = submitted_models
+                if entry["models"] != desired:
+                    changes.append({"profile": name, "field": "settings.models", "before": entry["models"], "after": desired})
+                actual = self._actual_models(name)
+                profile_values = self._profile_digest_keys(name, desired, False)
+                snapshots[name] = profile_values
+                for role in MODEL_ROLES:
+                    if actual[role] != desired[role] or (role != "main" and actual["main"] != desired["main"]):
+                        changes.append({"profile": name, "field": f"models.{role}", "before": actual[role], "after": desired[role]})
+                        role_writes = []
+                        for key, value in zip(MODEL_KEYS[role], (desired[role]["provider"], desired[role]["model"], desired[role]["reasoning"])):
+                            old = profile_values[key]
+                            if old != value:
+                                role_writes.append({"profile": name, "key": key, "before": old, "after": value})
+                        if role in STALE_KEYS and actual[role]["provider"] != desired[role]["provider"]:
+                            for key in STALE_KEYS[role]:
+                                old = self._read_optional_key(name, key)
+                                comparable = {"sha256": _digest(old)}
+                                profile_values[key] = comparable
+                                if old not in (None, ""):
+                                    writes.append({"profile": name, "key": key, "before": comparable, "after": ""})
+                                    changes.append({"profile": name, "field": key, "before": "[configured]", "after": ""})
+                        writes.extend(role_writes)
+                entry["models"] = desired
         selected_set = set(selected)
         routing_target_set = set(routing_targets)
-        for name in all_names:
+        for name in all_names if scope in {None, "routing"} else []:
             if name not in after or name not in discovered:
                 continue
             entry = after[name]
             old_enabled = bool(entry["routing"]["enabled"])
             new_enabled = name in selected_set
             if name in routing_target_set:
+                routing_validation_names.add(name)
                 new_routing = copy.deepcopy(entry["routing"])
                 new_routing["heavy"] = copy.deepcopy(submitted_routing["heavy"])
                 new_routing["light"] = copy.deepcopy(submitted_routing["light"])
@@ -1237,6 +1285,7 @@ class Service:
                     changes.append({"profile": name, "field": "routing", "before": entry["routing"], "after": new_routing})
                 entry["routing"] = new_routing
             elif old_enabled != new_enabled:
+                routing_validation_names.add(name)
                 entry["routing"] = dict(entry["routing"])
                 entry["routing"]["enabled"] = new_enabled
                 changes.append({"profile": name, "field": "routing.enabled", "before": old_enabled, "after": new_enabled})
@@ -1245,7 +1294,10 @@ class Service:
                 updated = [item for item in disabled if item != SKILL_NAME]
                 if not new_enabled:
                     updated.append(SKILL_NAME)
-                profile_values = snapshots.setdefault(name, self._profile_digest_keys(name, entry["models"], True))
+                if scope == "routing":
+                    profile_values = snapshots.setdefault(name, {"skills.disabled": disabled})
+                else:
+                    profile_values = snapshots.setdefault(name, self._profile_digest_keys(name, entry["models"], True))
                 profile_values["skills.disabled"] = disabled
                 if updated != disabled:
                     writes.append({"profile": name, "key": "skills.disabled", "before": disabled, "after": updated})
@@ -1256,11 +1308,20 @@ class Service:
                 if digest == "MISSING":
                     changes.append({"profile": name, "field": f"skills/{SKILL_NAME}/SKILL.md", "before": "missing", "after": "compatibility shim"})
 
-        for name, entry in after.items():
-            self._check_distinct_routes(entry["routing"], entry["models"])
-        if not fallback_updates:
-            self._check_changed_routing_fallbacks(entries, after)
-        state_changed = after != entries
+        if scope in {None, "models", "routing"}:
+            if scope is None:
+                route_validation_names = set(after)
+            elif scope == "models":
+                route_validation_names = set(targets)
+            else:
+                route_validation_names = routing_validation_names
+            for name in route_validation_names:
+                entry = after.get(name)
+                if entry is not None:
+                    self._check_distinct_routes(entry["routing"], entry["models"])
+            if not fallback_updates:
+                self._check_changed_routing_fallbacks(entries, after)
+        state_changed = scope != "timeouts" and after != entries
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
         expires_at = datetime.fromtimestamp(expires_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1270,9 +1331,11 @@ class Service:
             "snapshots": snapshots, "config_digests": config_digests, "writes": writes,
             "skill_snapshots": skill_snapshots, "model_targets": targets, "state_changed": state_changed, "expires_epoch": expires_epoch,
             "timeout_writes": timeout_writes,
+            "save_scope": scope,
         }
         for item in timeout_writes:
-            changes.append({"profile": item["profile"], "field": "timeouts", "before": item["before_values"], "after": item["after"]})
+            if item.get("write_required", True):
+                changes.append({"profile": item["profile"], "field": "timeouts", "before": item["before_values"], "after": item["after"]})
             self._check_timeout_write(item)
         if fallback_updates:
             # Compose before publishing: one immutable token, revision and apply.
@@ -1678,7 +1741,8 @@ class Service:
             next_store = {"schema": SCHEMA, "revision": new_revision, "profiles": plan["after"]}
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             profiles_to_backup = sorted({item["profile"] for item in plan["writes"]})
-            all_writes = list(plan["writes"]) + list(plan.get("timeout_writes", []))
+            timeout_writes = [item for item in plan.get("timeout_writes", []) if item.get("write_required", True)]
+            all_writes = list(plan["writes"]) + timeout_writes
             try:
                 for profile in profiles_to_backup:
                     self._backup_config(profile, stamp)
@@ -1723,7 +1787,7 @@ class Service:
                 for item in plan["writes"]:
                     if not self._actual_key_matches(item["profile"], item["key"], item["after"]):
                         raise RevisionConflict("profile changed before final readback")
-                for item in plan.get("timeout_writes", []):
+                for item in timeout_writes:
                     observed = timeouts.read_timeouts(self._profile_home(item["profile"]))
                     if observed["revision"] != item["expected_revision"] + 1 or any(observed[key] != value for key, value in item["after"].items()):
                         raise RevisionConflict("timeout settings differ from approved selection")

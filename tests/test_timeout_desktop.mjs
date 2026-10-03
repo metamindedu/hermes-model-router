@@ -234,7 +234,7 @@ test('actual page renders two accessible numeric TOTAL fields with the contract 
   for (const phrase of [
     '전체 실행 시간 제한 (TOTAL)', '초 (seconds)', 'delegation.child_timeout_seconds',
     '협조적 중단을 요청', '실행 프로세스를 정리', '새 작업은 시작할 때 현재 정책을 스냅샷',
-    '요청·도구별 제한과 반복 횟수 제한', '모델·라우팅·폴백 적용 대상 목록과는 무관'
+    '요청·도구별 제한과 반복 횟수 제한', '모델·라우팅·폴백 적용 대상과는 독립적'
   ]) assert.ok(copy.includes(phrase), `missing UI explanation: ${phrase}`)
 })
 
@@ -264,18 +264,18 @@ test('whole-page save sends only the loaded profile timeout update, numeric seco
     globalSave(h)
     await h.flush()
     const body = h.calls.find(call => call.operation === 'preview').body
-    assert.deepEqual(body.timeout_updates, [{
-      profile: 'claire', expected_revision: 8,
-      delegate_total_seconds: expected.delegate_total_seconds,
-      routed_total_seconds: expected.routed_total_seconds
-    }])
+    assert.deepEqual(body.timeout_updates, [
+      { profile: 'default', expected_revision: 3, ...expected },
+      { profile: 'claire', expected_revision: 8, ...expected },
+      { profile: 'other', expected_revision: 11, ...expected }
+    ])
     assert.deepEqual(body.model_targets, ['default', 'claire', 'other'])
-    assert.deepEqual(body.timeout_updates.map(update => update.profile), ['claire'])
+    assert.deepEqual(body.timeout_updates.map(update => update.profile), ['default', 'claire', 'other'])
     assert.equal('fallback_updates' in body, false)
   }
 })
 
-test('unchanged limits are omitted and timeout edits follow the selected source profile, not target lists', async () => {
+test('unchanged limits are omitted; edits use selected source values across selected timeout targets', async () => {
   const unchanged = harness()
   unchanged.input('model-main-model', 'model-only-change')
   globalSave(unchanged)
@@ -291,9 +291,11 @@ test('unchanged limits are omitted and timeout edits follow the selected source 
   globalSave(h)
   await h.flush()
   const body = h.calls.find(call => call.operation === 'preview').body
-  assert.deepEqual(body.timeout_updates, [{
-    profile: 'other', expected_revision: 11, delegate_total_seconds: 22, routed_total_seconds: 7200
-  }])
+  assert.deepEqual(body.timeout_updates, [
+    { profile: 'default', expected_revision: 3, delegate_total_seconds: 22, routed_total_seconds: 7200 },
+    { profile: 'claire', expected_revision: 8, delegate_total_seconds: 22, routed_total_seconds: 7200 },
+    { profile: 'other', expected_revision: 11, delegate_total_seconds: 22, routed_total_seconds: 7200 }
+  ])
 })
 
 test('read-only supported DTO displays actual values but cannot edit or add timeout_updates', async () => {
@@ -340,9 +342,11 @@ test('timeout revision replacement blocks overwrite until explicit refresh estab
   h.input('delegate-total-seconds', '6')
   globalSave(h)
   await h.flush()
-  assert.deepEqual(h.calls.find(call => call.operation === 'preview').body.timeout_updates, [{
-    profile: 'claire', expected_revision: 9, delegate_total_seconds: 6, routed_total_seconds: 7200
-  }])
+  assert.deepEqual(h.calls.find(call => call.operation === 'preview').body.timeout_updates, [
+    { profile: 'default', expected_revision: 3, delegate_total_seconds: 6, routed_total_seconds: 7200 },
+    { profile: 'claire', expected_revision: 9, delegate_total_seconds: 6, routed_total_seconds: 7200 },
+    { profile: 'other', expected_revision: 11, delegate_total_seconds: 6, routed_total_seconds: 7200 }
+  ])
 })
 
 test('immutable timeout save snapshot does not drift and incoming revision change cancels before apply', async () => {
@@ -354,9 +358,11 @@ test('immutable timeout save snapshot does not drift and incoming revision chang
   h.input('routed-total-seconds', '9000')
   globalSave(h)
   const captured = structuredClone(h.calls[0].body)
-  assert.deepEqual(captured.timeout_updates, [{
-    profile: 'claire', expected_revision: 8, delegate_total_seconds: 0, routed_total_seconds: 9000
-  }])
+  assert.deepEqual(captured.timeout_updates, [
+    { profile: 'default', expected_revision: 3, delegate_total_seconds: 0, routed_total_seconds: 9000 },
+    { profile: 'claire', expected_revision: 8, delegate_total_seconds: 0, routed_total_seconds: 9000 },
+    { profile: 'other', expected_revision: 11, delegate_total_seconds: 0, routed_total_seconds: 9000 }
+  ])
   const newer = structuredClone(h.data())
   newer.profiles.find(row => row.name === 'claire').timeouts.revision = 9
   h.setData(newer)
@@ -377,9 +383,11 @@ test('connection change during timeout validation cancels the old scope without 
     : { status: 'applied', revision: 13 })
   h.input('routed-total-seconds', '7654')
   globalSave(h)
-  assert.deepEqual(h.calls[0].body.timeout_updates, [{
-    profile: 'claire', expected_revision: 8, delegate_total_seconds: 0, routed_total_seconds: 7654
-  }])
+  assert.deepEqual(h.calls[0].body.timeout_updates, [
+    { profile: 'default', expected_revision: 3, delegate_total_seconds: 0, routed_total_seconds: 7654 },
+    { profile: 'claire', expected_revision: 8, delegate_total_seconds: 0, routed_total_seconds: 7654 },
+    { profile: 'other', expected_revision: 11, delegate_total_seconds: 0, routed_total_seconds: 7654 }
+  ])
   h.state.connectionId.value = 'different-connection'
   h.render()
   resolvePreview({ plan_id: 'old-connection-plan', changes: [] })
