@@ -365,6 +365,31 @@ test('unknown scoped apply result is one-shot and never triggers a blind preview
   assert.match(text(h.tree), /적용 결과를 확인할 수 없습니다/)
 })
 
+test('source change preserves timeout targets but clears previous one-shot copy intent for whole save', async () => {
+  const h = harness()
+  h.click('timeout-target-source')
+  h.selectProfile('other')
+  assert.equal(h.byId('timeout-target-claire').props.checked, true)
+  assert.equal(h.byId('timeout-target-other').props.checked, false)
+  h.input('model-main-model', 'model-only-after-source-switch')
+  await h.click('global-save')
+  await h.flush()
+  assert.equal('timeout_updates' in lastPreview(h).body, false)
+})
+
+for (const action of ['individual-save', 'new-edit', 'new-target-action']) {
+  test(`new source values still copy after explicit ${action} with target-local revisions`, async () => {
+    const h = harness()
+    h.click('timeout-target-source')
+    h.selectProfile('other')
+    if (action === 'new-edit') h.input('delegate-total-seconds', '21')
+    if (action === 'new-target-action') h.check('timeout-target-claire', true)
+    await h.click(action === 'individual-save' ? 'timeouts-save' : 'global-save')
+    await h.flush()
+    assert.deepEqual(lastPreview(h).body.timeout_updates, [expectedTimeout('claire', 8, action === 'new-edit' ? 21 : 12, 7200)])
+  })
+}
+
 for (const kind of ['readonly', 'unsupported']) {
   test(`a selected timeout target becoming ${kind} stays selected and blocks the complete save`, async () => {
     const h = harness()

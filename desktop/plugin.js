@@ -1234,6 +1234,7 @@ function RouterPage({ ctx: pluginContext }) {
     setSelectedProfile(name)
     setDraft(nextDraft)
     setTimeoutBaseline(copyTimeoutBaselineShape(loadedBaseline.timeouts))
+    setTimeoutTargetEdited(false)
     setRoutingBaseline(deepClone({ heavy: loadedBaseline.routing.heavy, light: loadedBaseline.routing.light }))
     setRoutingTargetEdited(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)

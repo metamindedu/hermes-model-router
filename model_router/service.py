@@ -1787,7 +1787,12 @@ class Service:
                 for item in plan["writes"]:
                     if not self._actual_key_matches(item["profile"], item["key"], item["after"]):
                         raise RevisionConflict("profile changed before final readback")
-                for item in timeout_writes:
+                # Every explicit target is part of the approved final state,
+                # including NOOP targets which were not physically written.
+                for item in plan.get("timeout_writes", []):
+                    if not item.get("write_required", True):
+                        self._check_timeout_write(item)
+                        continue
                     observed = timeouts.read_timeouts(self._profile_home(item["profile"]))
                     if observed["revision"] != item["expected_revision"] + 1 or any(observed[key] != value for key, value in item["after"].items()):
                         raise RevisionConflict("timeout settings differ from approved selection")
