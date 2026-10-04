@@ -6,7 +6,7 @@ const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'u
 const route = (provider, model, reasoning = 'high') => ({ provider, model, reasoning })
 const timeoutDto = (revision, delegateTotalSeconds, routedTotalSeconds, editable = true) => ({
   schema: 1, revision, delegate_total_seconds: delegateTotalSeconds,
-  routed_total_seconds: routedTotalSeconds, editable, warnings: []
+  routed_total_seconds: routedTotalSeconds, editable, split_routing_supported: true, warnings: []
 })
 const profile = (name, timeouts) => ({
   name,
@@ -164,7 +164,8 @@ function harness(initial = statusFixture()) {
 function profileRow(h, name) { return h.data().profiles.find(row => row.name === name) }
 function lastPreview(h) { return h.calls.filter(call => call.operation === 'preview').at(-1) }
 function expectedTimeout(profileName, revision, delegate, routed) {
-  return { profile: profileName, expected_revision: revision, delegate_total_seconds: delegate, routed_total_seconds: routed }
+  return { profile: profileName, expected_revision: revision, delegate_total_seconds: delegate,
+    routed_light_total_seconds: routed, routed_heavy_total_seconds: routed }
 }
 
 
@@ -220,7 +221,7 @@ test('timeout target eligibility is DTO-backed; source-only and manual nonempty 
 test('models-only save ignores dirty routing, timeout, and fallback drafts and uses stored routing baselines', async () => {
   const h = harness()
   h.input('model-main-model', 'unsaved-model-draft')
-  h.input('routed-total-seconds', '9999')
+  h.input('routed-light-total-minutes', '9999')
   h.check('routing-profile-other', true)
   h.select('heavy-follow', 'custom')
   h.input('heavy-custom-model', 'unsaved-heavy-draft')
@@ -246,7 +247,7 @@ test('routing-only save applies activation membership and explicit Heavy/Light t
   const h = harness()
   const sourceModels = structuredClone(profileRow(h, 'claire').models)
   h.input('model-main-model', 'dirty-unsaved-model')
-  h.input('delegate-total-seconds', '12345')
+  h.input('delegate-total-minutes', '12345')
   h.select('heavy-follow', 'custom')
   h.input('heavy-custom-model', 'routing-only-heavy')
   h.check('routing-profile-other', true)
@@ -382,11 +383,11 @@ for (const action of ['individual-save', 'new-edit', 'new-target-action']) {
     const h = harness()
     h.click('timeout-target-source')
     h.selectProfile('other')
-    if (action === 'new-edit') h.input('delegate-total-seconds', '21')
+    if (action === 'new-edit') h.input('delegate-total-minutes', '21')
     if (action === 'new-target-action') h.check('timeout-target-claire', true)
     await h.click(action === 'individual-save' ? 'timeouts-save' : 'global-save')
     await h.flush()
-    assert.deepEqual(lastPreview(h).body.timeout_updates, [expectedTimeout('claire', 8, action === 'new-edit' ? 21 : 12, 7200)])
+    assert.deepEqual(lastPreview(h).body.timeout_updates, [expectedTimeout('claire', 8, action === 'new-edit' ? 1260 : 12, 7200)])
   })
 }
 

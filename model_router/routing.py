@@ -38,6 +38,7 @@ ROUTING_PURPOSES = {
     "semantic-final": ("HEAVYWEIGHT", "review", "semantic-final"),
     "independent-review": ("HEAVYWEIGHT", "review", "independent-review"),
 }
+ROUTED_ROLE_TIMEOUTS_SUPPORTED = True
 
 RUNNER_OPERATOR_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
@@ -74,6 +75,9 @@ def _as_mapping(value: Any) -> dict[str, Any]:
         "provider",
         "model",
         "reasoning",
+        "timeout_seconds",
+        "light_timeout_seconds",
+        "heavy_timeout_seconds",
     )
     result = {name: getattr(value, name) for name in names if hasattr(value, name)}
     return result
@@ -370,6 +374,7 @@ class Router:
     ) -> dict[str, Any]:
         if purpose not in ROUTING_PURPOSES:
             raise RoutingError(f"unsupported routing purpose: {purpose}")
+        role, mode, verification_kind = ROUTING_PURPOSES[purpose]
         display_title = task_presentation.validate_title(title, purpose)
         if not isinstance(prompt, str) or not prompt.strip():
             raise RoutingError("prompt must be a non-empty string")
@@ -388,7 +393,18 @@ class Router:
         config = _as_mapping(config_method(profile))
         if config.get("enabled") is not True:
             raise RoutingError("routing is disabled for the active profile")
-        bounded_timeout = _bounded_timeout(config.get("timeout_seconds", DEFAULT_ROUTED_TOTAL_SECONDS) if timeout is None else timeout)
+        if timeout is None:
+            role_timeout_field = (
+                "light_timeout_seconds" if role == "LIGHTWEIGHT" else "heavy_timeout_seconds"
+            )
+            profile_timeout = (
+                config[role_timeout_field]
+                if role_timeout_field in config
+                else config.get("timeout_seconds", DEFAULT_ROUTED_TOTAL_SECONDS)
+            )
+        else:
+            profile_timeout = timeout
+        bounded_timeout = _bounded_timeout(profile_timeout)
         revision = config.get("revision")
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
             raise RoutingError("active profile routing revision is invalid")
@@ -414,17 +430,17 @@ class Router:
         fallback_approved = _fallback_policy_is_approved(fallback_policy)
         fallback_enabled = configured_fallback_enabled and fallback_approved
         fallbacks: dict[str, dict[str, str] | None] = {}
-        for role, key in (("HEAVYWEIGHT", "heavy"), ("LIGHTWEIGHT", "light")):
+        for fallback_role, key in (("HEAVYWEIGHT", "heavy"), ("LIGHTWEIGHT", "light")):
             value = fallback.get(key) if fallback_enabled else None
-            fallbacks[role] = None if value is None else _safe_route(value, f"fallback.{key}")
-        if fallback_enabled and any(fallbacks[role] is None for role in fallbacks):
+            fallbacks[fallback_role] = None if value is None else _safe_route(value, f"fallback.{key}")
+        if fallback_enabled and any(fallbacks[fallback_role] is None for fallback_role in fallbacks):
             raise RoutingError("approved enabled fallback requires explicit Heavy and Light routes")
-        for role, primary_route in primary.items():
-            fallback_route = fallbacks[role]
+        for route_role, primary_route in primary.items():
+            fallback_route = fallbacks[route_role]
             if fallback_route and (
                 fallback_route["provider"], fallback_route["model"]
             ) == (primary_route["provider"], primary_route["model"]):
-                raise RoutingError(f"fallback.{role} must differ from its primary route")
+                raise RoutingError(f"fallback.{route_role} must differ from its primary route")
 
         home = _profile_home(self.service, profile)
         jobs_root = _jobs_root(home)
@@ -437,7 +453,6 @@ class Router:
         except OSError as exc:
             raise RoutingError("could not create the active profile job directory") from exc
 
-        role, mode, verification_kind = ROUTING_PURPOSES[purpose]
         selected = primary[role]
         route_evidence = {
             "purpose_role": role,

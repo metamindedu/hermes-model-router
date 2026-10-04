@@ -11,9 +11,12 @@ import pytest
 from model_router.timeouts import (
     DEFAULT_DELEGATE_TOTAL_SECONDS,
     DEFAULT_ROUTED_TOTAL_SECONDS,
+    policy_values,
     read_timeouts,
+    routed_seconds,
     timeout_digest,
     timeout_status,
+    validate_policy_values,
     validate_seconds,
     write_timeouts,
 )
@@ -347,3 +350,136 @@ def test_foreign_profile_write_does_not_modify_other_profile_file(tmp_path):
 
     assert foreign_path.read_bytes() == foreign_payload
     assert read_timeouts(foreign)["revision"] == 9
+
+
+def test_schema1_read_projects_one_routed_budget_to_both_roles_without_rewriting(tmp_path):
+    home = make_home(tmp_path)
+    path = timeout_path(home)
+    path.parent.mkdir(parents=True)
+    payload = b'{"schema":1,"revision":7,"delegate_total_seconds":12.5,"routed_total_seconds":91.25}\n'
+    path.write_bytes(payload)
+
+    state = read_timeouts(home)
+
+    assert state == {
+        "schema": 1, "revision": 7,
+        "delegate_total_seconds": 12.5, "routed_total_seconds": 91.25,
+    }
+    assert policy_values(state) == {
+        "delegate_total_seconds": 12.5,
+        "routed_light_total_seconds": 91.25,
+        "routed_heavy_total_seconds": 91.25,
+    }
+    assert routed_seconds(state, "light") == routed_seconds(state, "heavy") == 91.25
+    assert path.read_bytes() == payload
+
+
+def test_schema2_preserves_distinct_light_and_heavy_budgets(tmp_path):
+    home = make_home(tmp_path)
+    path = timeout_path(home)
+    path.parent.mkdir(parents=True)
+    payload = (b'{"schema":2,"revision":3,"delegate_total_seconds":8,'
+               b'"routed_light_total_seconds":11.5,"routed_heavy_total_seconds":97}\n')
+    path.write_bytes(payload)
+
+    state = read_timeouts(home)
+
+    assert state == {
+        "schema": 2, "revision": 3, "delegate_total_seconds": 8.0,
+        "routed_light_total_seconds": 11.5, "routed_heavy_total_seconds": 97.0,
+    }
+    assert policy_values(state) == {
+        "delegate_total_seconds": 8.0,
+        "routed_light_total_seconds": 11.5,
+        "routed_heavy_total_seconds": 97.0,
+    }
+    assert routed_seconds(state, "light") == 11.5
+    assert routed_seconds(state, "heavy") == 97.0
+    assert path.read_bytes() == payload
+    with pytest.raises(ValueError, match="distinct"):
+        policy_values(state, split=False)
+
+
+def test_new_split_write_migrates_only_when_semantically_changed_and_never_downgrades(tmp_path):
+    home = make_home(tmp_path)
+    path = timeout_path(home)
+    legacy_payload = b'{"schema":1,"revision":4,"delegate_total_seconds":0,"routed_total_seconds":3600}\n'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(legacy_payload)
+    inherited = {
+        "delegate_total_seconds": 0, "routed_light_total_seconds": 3600,
+        "routed_heavy_total_seconds": 3600,
+    }
+
+    noop = write_timeouts(home, inherited, expected_digest=timeout_digest(home), expected_revision=4)
+    assert noop["schema"] == 1 and noop["revision"] == 4
+    assert path.read_bytes() == legacy_payload
+
+    changed = {**inherited, "routed_heavy_total_seconds": 5400}
+    written = write_timeouts(home, changed, expected_digest=timeout_digest(home), expected_revision=4)
+    assert written == {"schema": 2, "revision": 5, **changed}
+    split_payload = path.read_bytes()
+    with pytest.raises(RuntimeError, match="legacy timeout updates"):
+        write_timeouts(
+            home,
+            {"delegate_total_seconds": 0, "routed_total_seconds": 3600},
+            expected_digest=timeout_digest(home), expected_revision=5,
+        )
+    assert path.read_bytes() == split_payload
+
+
+@pytest.mark.parametrize("values", [
+    {"delegate_total_seconds": 1, "routed_total_seconds": 2, "routed_light_total_seconds": 2},
+    {"delegate_total_seconds": 1, "routed_light_total_seconds": 2},
+    {"delegate_total_seconds": 1, "routed_light_total_seconds": 2,
+     "routed_heavy_total_seconds": 3, "routed_total_seconds": 2},
+    {"delegate_total_seconds": True, "routed_light_total_seconds": 2, "routed_heavy_total_seconds": 3},
+    {"delegate_total_seconds": 1, "routed_light_total_seconds": float("inf"), "routed_heavy_total_seconds": 3},
+    {"delegate_total_seconds": 1, "routed_light_total_seconds": 2, "routed_heavy_total_seconds": -1},
+    {"delegate_total_seconds": 10**10000, "routed_light_total_seconds": 2, "routed_heavy_total_seconds": 3},
+])
+def test_split_policy_validator_rejects_mixed_partial_boolean_nonfinite_negative_and_overflow(values):
+    with pytest.raises(ValueError):
+        validate_policy_values(values)
+
+
+def test_schema2_stale_cas_does_not_overwrite_bytes(tmp_path):
+    home = make_home(tmp_path)
+    first = write_timeouts(
+        home,
+        {"delegate_total_seconds": 1, "routed_light_total_seconds": 2, "routed_heavy_total_seconds": 3},
+        expected_digest="MISSING", expected_revision=0,
+    )
+    path = timeout_path(home)
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="changed"):
+        write_timeouts(
+            home,
+            {"delegate_total_seconds": 4, "routed_light_total_seconds": 5, "routed_heavy_total_seconds": 6},
+            expected_digest="MISSING", expected_revision=first["revision"],
+        )
+
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("payload", [
+    {"schema": 2, "revision": True, "delegate_total_seconds": 0,
+     "routed_light_total_seconds": 1, "routed_heavy_total_seconds": 2},
+    {"schema": 2, "revision": 0, "delegate_total_seconds": 0,
+     "routed_light_total_seconds": True, "routed_heavy_total_seconds": 2},
+    {"schema": 2, "revision": 0, "delegate_total_seconds": 0,
+     "routed_light_total_seconds": 1, "routed_heavy_total_seconds": float("nan")},
+    {"schema": 2, "revision": 0, "delegate_total_seconds": 0,
+     "routed_light_total_seconds": 1, "routed_heavy_total_seconds": 10**400},
+    {"schema": 2, "revision": 0, "delegate_total_seconds": 0,
+     "routed_light_total_seconds": 1, "routed_heavy_total_seconds": 2, "routed_total_seconds": 3},
+])
+def test_schema2_documents_reject_malformed_boolean_nonfinite_overflow_and_extra_fields(tmp_path, payload):
+    home = make_home(tmp_path)
+    path = timeout_path(home)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError):
+        read_timeouts(home)

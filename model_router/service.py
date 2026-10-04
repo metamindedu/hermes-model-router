@@ -1,11 +1,13 @@
 """Profile-scoped canonical settings and safe Hermes CLI projection."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1048,7 +1050,13 @@ class Service:
                 "actual_models": actual,
                 "drift": drift,
                 "fallbacks": self._fallback_dto(name, view_entry),
-                "timeouts": timeouts.timeout_status(self._profile_home(name), enforcement_available=self._timeout_enforcement_available(name)),
+                "timeouts": {
+                    **timeouts.timeout_status(
+                        self._profile_home(name),
+                        enforcement_available=self._timeout_enforcement_available(name),
+                    ),
+                    "split_routing_supported": self._timeout_role_enforcement_available(name),
+                },
             })
         return {
             "revision": stored["revision"] if stored else 0,
@@ -1076,13 +1084,14 @@ class Service:
             profile, "routing", routing["fallback"], consent
         )
         limits = timeouts.read_timeouts(self._profile_home(profile))
-        return {
+        config = {
             "enabled": enabled,
             "heavy": dict(heavy),
             "light": dict(light),
             "fallback": dict(routing["fallback"]),
             "revision": revision,
-            "timeout_seconds": limits["routed_total_seconds"],
+            "light_timeout_seconds": timeouts.routed_seconds(limits, "light"),
+            "heavy_timeout_seconds": timeouts.routed_seconds(limits, "heavy"),
             "delegate_timeout_seconds": limits["delegate_total_seconds"],
             "timeout_revision": limits["revision"],
             "fallback_policy": {
@@ -1091,6 +1100,9 @@ class Service:
                 "approved": approved,
             },
         }
+        if limits["schema"] == 1:
+            config["timeout_seconds"] = limits["routed_total_seconds"]
+        return config
 
     def _fresh_profile_entry(self, profile: str, entries: dict[str, Any]) -> dict[str, Any]:
         if profile in entries:
@@ -1111,19 +1123,71 @@ class Service:
                    and _inside(package / name, home)
                    for name in ("timeouts.py", "native_watchdog.py"))
 
+    def _timeout_role_enforcement_available(self, profile: str) -> bool:
+        """Trust only a safe installed routing module with a literal AST marker."""
+        try:
+            self._require_profile(profile)
+        except (TypeError, ValueError):
+            return False
+        if not self._timeout_enforcement_available(profile):
+            return False
+
+        home = self._profile_home(profile)
+        relative_parts = ("plugins", "model-router", "model_router", "routing.py")
+        marker_path = home.joinpath(*relative_parts)
+        if not _inside(marker_path, home):
+            return False
+        current = home
+        try:
+            home_info = current.lstat()
+            if stat.S_ISLNK(home_info.st_mode) or getattr(current, "is_junction", lambda: False)():
+                return False
+            for index, part in enumerate(relative_parts):
+                current = current / part
+                info = current.lstat()
+                if stat.S_ISLNK(info.st_mode) or getattr(current, "is_junction", lambda: False)():
+                    return False
+                is_file = index == len(relative_parts) - 1
+                if is_file and not stat.S_ISREG(info.st_mode):
+                    return False
+                if not is_file and not stat.S_ISDIR(info.st_mode):
+                    return False
+            source = marker_path.read_text(encoding="utf-8")
+            module = ast.parse(source, filename=str(marker_path))
+        except (OSError, UnicodeError, SyntaxError, ValueError):
+            return False
+
+        assignments: list[ast.expr | None] = []
+        for node in module.body:
+            if isinstance(node, ast.Assign):
+                if any(isinstance(target, ast.Name) and target.id == "ROUTED_ROLE_TIMEOUTS_SUPPORTED"
+                       for target in node.targets):
+                    assignments.append(node.value)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                if node.target.id == "ROUTED_ROLE_TIMEOUTS_SUPPORTED":
+                    assignments.append(node.value)
+        return len(assignments) == 1 and isinstance(assignments[0], ast.Constant) and assignments[0].value is True
+
     def _prepare_timeout_updates(self, updates: Any, discovered: list[str]) -> list[dict[str, Any]]:
         if not isinstance(updates, list):
             raise ValueError("timeout_updates must be a list")
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
         for update in updates:
-            if not isinstance(update, dict) or set(update) != {"profile", "expected_revision", "delegate_total_seconds", "routed_total_seconds"}:
+            if not isinstance(update, dict) or not {"profile", "expected_revision"} <= set(update):
                 raise ValueError("timeout update has unknown or missing fields")
+            raw_values = {key: value for key, value in update.items() if key not in {"profile", "expected_revision"}}
+            values = timeouts.validate_policy_values(raw_values)
+            split_update = "routed_total_seconds" not in values
             profile = self._require_profile(update["profile"], discovered)
             if profile in seen:
                 raise ValueError("timeout updates must target each profile only once")
             seen.add(profile)
-            if not self._timeout_enforcement_available(profile):
+            supported = (
+                self._timeout_role_enforcement_available(profile)
+                if split_update else self._timeout_enforcement_available(profile)
+            )
+            if not supported:
                 raise ValueError("timeout enforcement is unavailable for this profile")
             revision = update["expected_revision"]
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
@@ -1133,16 +1197,23 @@ class Service:
             current = timeouts.read_timeouts(home)
             if digest != timeouts.timeout_digest(home) or revision != current["revision"]:
                 raise RevisionConflict("timeout settings changed; reload before preview")
-            values = {key: timeouts.validate_seconds(update[key]) for key in ("delegate_total_seconds", "routed_total_seconds")}
-            before_values = {key: current[key] for key in values}
+            if not split_update and current["schema"] == 2:
+                raise ValueError("legacy timeout updates cannot target split settings")
+            before_values = timeouts.policy_values(current, split=split_update)
             result.append({"profile": profile, "key": "model-router.timeouts", "before": digest,
                            "before_values": before_values, "expected_revision": revision,
                            "after": values, "write_required": values != before_values})
         return result
 
     def _check_timeout_write(self, item: dict[str, Any]) -> None:
-        home = self._profile_home(self._require_profile(item["profile"]))
-        if not self._timeout_enforcement_available(item["profile"]):
+        profile = self._require_profile(item["profile"])
+        home = self._profile_home(profile)
+        split_update = "routed_total_seconds" not in item.get("after", {})
+        supported = (
+            self._timeout_role_enforcement_available(profile)
+            if split_update else self._timeout_enforcement_available(profile)
+        )
+        if not supported:
             raise RevisionConflict("timeout enforcement changed since preview")
         if timeouts.timeout_digest(home) != item["before"] or timeouts.read_timeouts(home)["revision"] != item["expected_revision"]:
             raise RevisionConflict("timeout settings changed since preview")
@@ -1734,6 +1805,8 @@ class Service:
                 if self._skill_digest(profile) != expected:
                     raise RevisionConflict("profile skill state changed since preview")
             if not plan["changes"]:
+                for item in plan.get("timeout_writes", []):
+                    self._check_timeout_write(item)
                 receipt = {"status": "no_change", "plan_id": plan_id, "revision": revision, "applied": [], "remaining": [], "finished_at": _now()}
                 self._store_apply(receipt)
                 return receipt
@@ -1793,6 +1866,8 @@ class Service:
                     if not item.get("write_required", True):
                         self._check_timeout_write(item)
                         continue
+                    if set(item["after"]) == timeouts._SPLIT_TIMEOUT_FIELDS and not self._timeout_role_enforcement_available(item["profile"]):
+                        raise RevisionConflict("role timeout enforcement changed before final readback")
                     observed = timeouts.read_timeouts(self._profile_home(item["profile"]))
                     if observed["revision"] != item["expected_revision"] + 1 or any(observed[key] != value for key, value in item["after"].items()):
                         raise RevisionConflict("timeout settings differ from approved selection")

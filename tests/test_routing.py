@@ -295,6 +295,141 @@ def test_final_review_never_uses_lightweight_route():
     assert routing.ROUTING_PURPOSES["preliminary-review"][0] == "LIGHTWEIGHT"
 
 
+@pytest.mark.parametrize(
+    ("purpose", "route_class", "expected_timeout"),
+    [
+        ("implementation", "LIGHTWEIGHT", 1800),
+        ("mechanical", "LIGHTWEIGHT", 1800),
+        ("preliminary-review", "LIGHTWEIGHT", 1800),
+        ("plan", "HEAVYWEIGHT", 7200),
+        ("semantic-final", "HEAVYWEIGHT", 7200),
+        ("independent-review", "HEAVYWEIGHT", 7200),
+    ],
+)
+def test_omitted_timeout_uses_the_purpose_role_budget(
+    tmp_path, monkeypatch, purpose, route_class, expected_timeout
+):
+    router, service, root, calls = _make_router(tmp_path, monkeypatch)
+    original = service.routing_config
+    service.routing_config = lambda profile: {
+        **original(profile),
+        "light_timeout_seconds": 1800,
+        "heavy_timeout_seconds": 7200,
+        # A conflicting legacy value must not override either role budget.
+        "timeout_seconds": 123,
+    }
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    result = router.start(purpose, "select the purpose role budget", cwd)
+
+    job_dir = root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs" / result["job_id"]
+    snapshot = _load(job_dir / "snapshot.json")
+    argv_timeout = calls[0][0][calls[0][0].index("--timeout") + 1]
+    assert routing.ROUTED_ROLE_TIMEOUTS_SUPPORTED is True
+    assert result["route_class"] == route_class
+    assert snapshot["route_class"] == route_class
+    assert snapshot["timeout_seconds"] == expected_timeout
+    assert snapshot["timeout_source"] == "profile"
+    assert argv_timeout == repr(float(expected_timeout))
+
+
+@pytest.mark.parametrize(
+    ("purpose", "role_timeout_field", "other_timeout_field"),
+    [
+        ("implementation", "light_timeout_seconds", "heavy_timeout_seconds"),
+        ("plan", "heavy_timeout_seconds", "light_timeout_seconds"),
+    ],
+)
+def test_zero_role_budget_applies_independently(
+    tmp_path, monkeypatch, purpose, role_timeout_field, other_timeout_field
+):
+    router, service, root, calls = _make_router(tmp_path, monkeypatch)
+    original = service.routing_config
+    budgets = {role_timeout_field: 0, other_timeout_field: 1800}
+    service.routing_config = lambda profile: {
+        **original(profile),
+        **budgets,
+        "timeout_seconds": 7200,
+    }
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    result = router.start(purpose, "zero one role without changing the other", cwd)
+
+    snapshot = _load(
+        root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs"
+        / result["job_id"] / "snapshot.json"
+    )
+    assert snapshot["timeout_seconds"] == 0
+    assert calls[0][0][calls[0][0].index("--timeout") + 1] == "0.0"
+
+
+@pytest.mark.parametrize("role_timeout_field,purpose", [
+    ("light_timeout_seconds", "implementation"),
+    ("heavy_timeout_seconds", "plan"),
+])
+@pytest.mark.parametrize("invalid_budget", [None, True, float("nan"), -1])
+def test_invalid_present_role_budget_never_falls_back_but_call_override_wins(
+    tmp_path, monkeypatch, role_timeout_field, purpose, invalid_budget
+):
+    router, service, root, calls = _make_router(tmp_path, monkeypatch)
+    original = service.routing_config
+    service.routing_config = lambda profile: {
+        **original(profile),
+        role_timeout_field: invalid_budget,
+        "timeout_seconds": 7200,
+    }
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    with pytest.raises(routing.RoutingError, match="timeout must be"):
+        router.start(purpose, "invalid role budget is fail closed", cwd)
+    assert calls == []
+    assert not (root / "profiles" / "claire" / "plugin-data").exists()
+
+    result = router.start(purpose, "explicit zero overrides the profile", cwd, timeout=0)
+    snapshot = _load(
+        root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs"
+        / result["job_id"] / "snapshot.json"
+    )
+    assert snapshot["timeout_seconds"] == 0
+    assert snapshot["timeout_source"] == "call"
+    assert calls[0][0][calls[0][0].index("--timeout") + 1] == "0.0"
+
+
+@pytest.mark.parametrize(("legacy_timeout", "expected_timeout"), [(5432, 5432), (None, 3600)])
+def test_legacy_timeout_config_is_used_only_when_role_fields_are_absent(
+    tmp_path, monkeypatch, legacy_timeout, expected_timeout
+):
+    router, service, root, calls = _make_router(tmp_path, monkeypatch)
+    original = service.routing_config
+
+    def old_service_config(profile):
+        config = original(profile)
+        config.pop("light_timeout_seconds", None)
+        config.pop("heavy_timeout_seconds", None)
+        if legacy_timeout is None:
+            config.pop("timeout_seconds", None)
+        else:
+            config["timeout_seconds"] = legacy_timeout
+        return config
+
+    service.routing_config = old_service_config
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    result = router.start("implementation", "old service DTO compatibility", cwd)
+
+    snapshot = _load(
+        root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs"
+        / result["job_id"] / "snapshot.json"
+    )
+    assert snapshot["timeout_seconds"] == expected_timeout
+    assert snapshot["timeout_source"] == "profile"
+    assert calls[0][0][calls[0][0].index("--timeout") + 1] == repr(float(expected_timeout))
+
+
 def test_timeout_is_not_capped_and_invalid_inputs_are_rejected(tmp_path, monkeypatch):
     router, _service, _root, calls = _make_router(tmp_path, monkeypatch)
     cwd = tmp_path / "work"
@@ -307,6 +442,8 @@ def test_timeout_is_not_capped_and_invalid_inputs_are_rejected(tmp_path, monkeyp
     for value in (-1, float("inf"), float("nan"), True, "60"):
         with pytest.raises(routing.RoutingError):
             routing._bounded_timeout(value)
+    with pytest.raises(routing.RoutingError, match="timeout must be"):
+        router.start("mechanical", "reject an invalid explicit override", cwd, timeout=-1)
     with pytest.raises(routing.RoutingError, match="unsupported routing purpose"):
         router.start("final-review-light", "task", cwd)
 
@@ -315,7 +452,16 @@ def test_timeout_is_not_capped_and_invalid_inputs_are_rejected(tmp_path, monkeyp
 def test_routed_total_limit_is_snapshotted_separately_from_native_limit(tmp_path, monkeypatch, override, configured, expected):
     router, service, root, calls = _make_router(tmp_path, monkeypatch)
     original = service.routing_config
-    service.routing_config = lambda profile: {**original(profile), "timeout_seconds": configured, "delegate_timeout_seconds": 30}
+
+    def legacy_service_config(profile):
+        config = original(profile)
+        config.pop("light_timeout_seconds", None)
+        config.pop("heavy_timeout_seconds", None)
+        config.update(timeout_seconds=configured, delegate_timeout_seconds=30)
+        return config
+
+    # This fixture intentionally removes role fields to verify the old scalar DTO.
+    service.routing_config = legacy_service_config
     result = router.start("plan", "bounded read-only fixture", tmp_path, timeout=override)
     directory = root / "profiles/claire/plugin-data/model-router/jobs" / result["job_id"]
     snapshot = _load(directory / "snapshot.json")
@@ -615,7 +761,12 @@ def test_timeout_roundtrips_router_worker_runner_without_precision_loss(tmp_path
     from lib import run_routed_agent as runner
     router, service, root, calls = _make_router(tmp_path, monkeypatch)
     native_config = service.routing_config
-    service.routing_config = lambda profile: {**native_config(profile), "timeout_seconds": total_seconds}
+    service.routing_config = lambda profile: {
+        **native_config(profile),
+        "light_timeout_seconds": total_seconds if configured else 7777,
+        "heavy_timeout_seconds": 8888,
+        "timeout_seconds": 3333,
+    }
     cwd = tmp_path / "work"
     cwd.mkdir()
     kwargs = {} if configured else {"timeout": total_seconds}
@@ -625,6 +776,7 @@ def test_timeout_roundtrips_router_worker_runner_without_precision_loss(tmp_path
     assert worker_args.timeout == total_seconds
     snapshot = _load(worker_args.job_dir / "snapshot.json")
     assert snapshot["timeout_seconds"] == worker_args.timeout
+    assert calls[0][0][calls[0][0].index("--timeout") + 1] == repr(float(total_seconds))
     assert snapshot["timeout_source"] == ("profile" if configured else "call")
     monkeypatch.setenv("HERMES_HOME", str(root / "profiles/claire"))
     class Process:

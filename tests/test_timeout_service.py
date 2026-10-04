@@ -38,6 +38,16 @@ def update(profile="p1", revision=0, delegate=120, routed=7200):
             "delegate_total_seconds": delegate, "routed_total_seconds": routed}
 
 
+def split_update(profile="p1", revision=0, delegate=120, light=7200, heavy=10800):
+    return {
+        "profile": profile,
+        "expected_revision": revision,
+        "delegate_total_seconds": delegate,
+        "routed_light_total_seconds": light,
+        "routed_heavy_total_seconds": heavy,
+    }
+
+
 def test_timeout_only_plan_writes_only_selected_profile_not_models_or_native_inactivity(tmp_path, monkeypatch):
     service, cli, root = fixture(tmp_path, monkeypatch)
     model_store_before = service.store_path.read_bytes()
@@ -346,3 +356,101 @@ def test_unknown_or_ambiguous_save_scope_is_rejected(tmp_path, monkeypatch, scop
 
     assert not list((service.store_path.parent / "plans").glob("*.json"))
     assert cli.calls == []
+
+
+def test_mixed_legacy_and_split_targets_keep_each_profiles_own_revision_and_projection(tmp_path, monkeypatch):
+    service, _cli, _root = fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(Service, "_timeout_role_enforcement_available", lambda self, profile: True)
+    p2 = service._profile_home("p2")
+    write_timeouts(
+        p2,
+        {"delegate_total_seconds": 30, "routed_light_total_seconds": 4000, "routed_heavy_total_seconds": 5000},
+        expected_digest="MISSING", expected_revision=0,
+    )
+
+    preview = service.preview(body_for(service, timeout_updates=[
+        update("p1", revision=0, delegate=60, routed=7200),
+        split_update("p2", revision=1, delegate=90, light=6000, heavy=9000),
+    ]))
+    persisted = json.loads((service.store_path.parent / "plans" / f"{preview['plan_id']}.json").read_text(encoding="utf-8"))
+    assert [item["before_values"] for item in persisted["timeout_writes"]] == [
+        {"delegate_total_seconds": 0.0, "routed_total_seconds": 3600.0},
+        {"delegate_total_seconds": 30.0, "routed_light_total_seconds": 4000.0,
+         "routed_heavy_total_seconds": 5000.0},
+    ]
+    assert [item["expected_revision"] for item in persisted["timeout_writes"]] == [0, 1]
+
+    receipt = service.apply(preview["plan_id"])
+
+    assert receipt["status"] == "applied"
+    assert read_timeouts(service._profile_home("p1")) == {
+        "schema": 1, "revision": 1, "delegate_total_seconds": 60.0, "routed_total_seconds": 7200.0,
+    }
+    assert read_timeouts(p2) == {
+        "schema": 2, "revision": 2, "delegate_total_seconds": 90.0,
+        "routed_light_total_seconds": 6000.0, "routed_heavy_total_seconds": 9000.0,
+    }
+
+
+def test_legacy_timeout_update_cannot_downgrade_schema2_even_when_equal(tmp_path, monkeypatch):
+    service, _cli, _root = fixture(tmp_path, monkeypatch)
+    p2 = service._profile_home("p2")
+    write_timeouts(
+        p2,
+        {"delegate_total_seconds": 1, "routed_light_total_seconds": 3600, "routed_heavy_total_seconds": 3600},
+        expected_digest="MISSING", expected_revision=0,
+    )
+    before = (p2 / "plugin-data/model-router/timeouts.json").read_bytes()
+
+    with pytest.raises(ValueError, match="legacy timeout"):
+        service.preview(body_for(service, timeout_updates=[update("p2", revision=1, delegate=1, routed=3600)]))
+
+    assert (p2 / "plugin-data/model-router/timeouts.json").read_bytes() == before
+    assert not list((service.store_path.parent / "plans").glob("*.json"))
+
+
+def test_split_timeout_noop_rechecks_final_cas_after_preflight_race(tmp_path, monkeypatch):
+    service, _cli, _root = fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(Service, "_timeout_role_enforcement_available", lambda self, profile: True)
+    home = service._profile_home("p1")
+    preview = service.preview(body_for(service, timeout_updates=[
+        split_update("p1", revision=0, delegate=0, light=3600, heavy=3600),
+    ]))
+    assert preview["changes"] == []
+    original_check = service._check_timeout_write
+    checks = 0
+
+    def race_after_preflight(item):
+        nonlocal checks
+        checks += 1
+        original_check(item)
+        if checks == 1:
+            write_timeouts(
+                home,
+                {"delegate_total_seconds": 0, "routed_total_seconds": 4000},
+                expected_digest=timeout_digest(home), expected_revision=0,
+            )
+
+    monkeypatch.setattr(service, "_check_timeout_write", race_after_preflight)
+    with pytest.raises(RevisionConflict, match="timeout settings changed"):
+        service.apply(preview["plan_id"])
+    assert checks == 2
+    assert read_timeouts(home)["routed_total_seconds"] == 4000
+
+
+def test_routing_config_projects_split_budgets_and_omits_ambiguous_legacy_scalar(tmp_path, monkeypatch):
+    service, _cli, _root = fixture(tmp_path, monkeypatch)
+    p1 = service._profile_home("p1")
+    legacy = service.routing_config("p1")
+    assert legacy["light_timeout_seconds"] == legacy["heavy_timeout_seconds"] == 3600
+    assert legacy["timeout_seconds"] == 3600
+
+    write_timeouts(
+        p1,
+        {"delegate_total_seconds": 5, "routed_light_total_seconds": 120, "routed_heavy_total_seconds": 600},
+        expected_digest="MISSING", expected_revision=0,
+    )
+    split = service.routing_config("p1")
+    assert split["light_timeout_seconds"] == 120
+    assert split["heavy_timeout_seconds"] == 600
+    assert "timeout_seconds" not in split

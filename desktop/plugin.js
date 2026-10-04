@@ -170,15 +170,24 @@ export function scopeFingerprint(connectionId, profile, gateway) {
   return JSON.stringify([connectionId || 'local', profile || 'default', gateway || 'idle'])
 }
 
-const TIMEOUT_KEYS = ['delegate_total_seconds', 'routed_total_seconds']
+const TIMEOUT_MINUTE_KEYS = ['delegate_total_minutes', 'routed_light_total_minutes', 'routed_heavy_total_minutes']
+
+function validSeconds(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
 
 function validTimeoutSettingsShape(timeouts) {
-  return Boolean(
-    timeouts && typeof timeouts === 'object' && !Array.isArray(timeouts) &&
-    timeouts.schema === 1 && Number.isInteger(timeouts.revision) && timeouts.revision >= 0 &&
-    TIMEOUT_KEYS.every(key => typeof timeouts[key] === 'number' && Number.isFinite(timeouts[key]) && timeouts[key] >= 0) &&
-    typeof timeouts.editable === 'boolean'
-  )
+  if (!timeouts || typeof timeouts !== 'object' || Array.isArray(timeouts) ||
+    !Number.isInteger(timeouts.revision) || timeouts.revision < 0 || typeof timeouts.editable !== 'boolean') return false
+  if (timeouts.schema === 1) {
+    return validSeconds(timeouts.delegate_total_seconds) && validSeconds(timeouts.routed_total_seconds) &&
+      !Object.hasOwn(timeouts, 'routed_light_total_seconds') && !Object.hasOwn(timeouts, 'routed_heavy_total_seconds')
+  }
+  if (timeouts.schema === 2) {
+    return validSeconds(timeouts.delegate_total_seconds) && validSeconds(timeouts.routed_light_total_seconds) &&
+      validSeconds(timeouts.routed_heavy_total_seconds) && !Object.hasOwn(timeouts, 'routed_total_seconds')
+  }
+  return false
 }
 
 export function validTimeoutsDto(timeouts) {
@@ -186,43 +195,81 @@ export function validTimeoutsDto(timeouts) {
     timeouts.warnings.every(warning => typeof warning === 'string'))
 }
 
+export function splitRoutingSupported(timeouts) {
+  return Boolean(validTimeoutsDto(timeouts) && timeouts.split_routing_supported === true)
+}
+
+export function projectTimeoutSeconds(timeouts) {
+  if (!validTimeoutSettingsShape(timeouts)) return null
+  if (timeouts.schema === 1) return {
+    delegate_total_seconds: timeouts.delegate_total_seconds,
+    routed_light_total_seconds: timeouts.routed_total_seconds,
+    routed_heavy_total_seconds: timeouts.routed_total_seconds
+  }
+  return {
+    delegate_total_seconds: timeouts.delegate_total_seconds,
+    routed_light_total_seconds: timeouts.routed_light_total_seconds,
+    routed_heavy_total_seconds: timeouts.routed_heavy_total_seconds
+  }
+}
+
 function copyTimeoutSettingsShape(timeouts) {
   if (!validTimeoutSettingsShape(timeouts)) return null
   return {
-    schema: 1,
+    schema: timeouts.schema,
     revision: timeouts.revision,
     delegate_total_seconds: timeouts.delegate_total_seconds,
-    routed_total_seconds: timeouts.routed_total_seconds,
-    editable: timeouts.editable
+    ...(timeouts.schema === 1
+      ? { routed_total_seconds: timeouts.routed_total_seconds }
+      : { routed_light_total_seconds: timeouts.routed_light_total_seconds, routed_heavy_total_seconds: timeouts.routed_heavy_total_seconds }),
+    editable: timeouts.editable,
+    split_routing_supported: timeouts.split_routing_supported === true
   }
 }
 
 function copyTimeoutSettings(timeouts) {
   if (!validTimeoutsDto(timeouts)) return null
-  return copyTimeoutSettingsShape(timeouts)
+  return { ...copyTimeoutSettingsShape(timeouts), warnings: [...timeouts.warnings] }
 }
 
 export function copyTimeoutBaseline(timeouts) {
   const settings = copyTimeoutSettings(timeouts)
-  return settings ? {
+  const projected = projectTimeoutSeconds(settings)
+  return settings && projected ? {
+    schema: settings.schema,
     revision: settings.revision,
+    editable: settings.editable,
+    split_routing_supported: settings.split_routing_supported,
     delegate_total_seconds: settings.delegate_total_seconds,
-    routed_total_seconds: settings.routed_total_seconds
+    ...(settings.schema === 1 ? { routed_total_seconds: settings.routed_total_seconds } : {}),
+    routed_light_total_seconds: projected.routed_light_total_seconds,
+    routed_heavy_total_seconds: projected.routed_heavy_total_seconds
   } : null
 }
 
 function copyTimeoutBaselineShape(timeouts) {
-  const settings = copyTimeoutSettingsShape(timeouts)
-  return settings ? {
-    revision: settings.revision,
-    delegate_total_seconds: settings.delegate_total_seconds,
-    routed_total_seconds: settings.routed_total_seconds
-  } : null
+  return copyTimeoutBaseline(timeouts)
+}
+
+function timeoutDraftFromSettings(timeouts) {
+  if (!validTimeoutsDto(timeouts)) return null
+  const projected = projectTimeoutSeconds(timeouts)
+  if (!projected) return null
+  return {
+    schema: timeouts.schema,
+    revision: timeouts.revision,
+    editable: timeouts.editable,
+    split_routing_supported: timeouts.split_routing_supported === true,
+    delegate_total_minutes: projected.delegate_total_seconds / 60,
+    routed_light_total_minutes: projected.routed_light_total_seconds / 60,
+    routed_heavy_total_minutes: projected.routed_heavy_total_seconds / 60
+  }
 }
 
 export function eligibleTimeoutTargets(profiles) {
   return (Array.isArray(profiles) ? profiles : [])
-    .filter(row => typeof row?.name === 'string' && row.name.length > 0 && validTimeoutsDto(row.timeouts) && row.timeouts.editable === true)
+    .filter(row => typeof row?.name === 'string' && row.name.length > 0 &&
+      splitRoutingSupported(row.timeouts) && row.timeouts.editable === true)
     .map(row => row.name)
 }
 
@@ -236,7 +283,12 @@ export function reconcileTimeoutTargets(selected, profiles) {
 
 function copyProfileBaselines(profiles) {
   return Object.fromEntries((Array.isArray(profiles) ? profiles : [])
-    .map(row => [row?.name, copyProfileDraft(row)])
+    .map(row => {
+      const draft = copyProfileDraft(row)
+      if (!draft) return [row?.name, null]
+      const timeouts = copyTimeoutSettings(row.timeouts)
+      return [row.name, { ...draft, ...(timeouts ? { timeouts } : {}) }]
+    })
     .filter(([name, baseline]) => typeof name === 'string' && name.length > 0 && baseline))
 }
 
@@ -248,25 +300,36 @@ function timeoutBaselinesFromProfiles(profileBaselines) {
 
 function currentTimeoutsFromProfiles(profiles) {
   return Object.fromEntries((Array.isArray(profiles) ? profiles : [])
-    .map(row => {
-      const settings = copyTimeoutSettings(row?.timeouts)
-      return [row?.name, settings ? { ...settings, warnings: [...row.timeouts.warnings] } : null]
-    })
+    .map(row => [row?.name, copyTimeoutSettings(row?.timeouts)])
     .filter(([name]) => typeof name === 'string' && name.length > 0))
 }
 
-export function parseTimeoutSeconds(value) {
+export function parseTimeoutMinutes(value) {
   if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null
   if (typeof value !== 'string' || value.trim() === '') return null
   const parsed = Number(value.trim())
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
 }
 
+function timeoutBaselineSeconds(baseline, minuteKey) {
+  if (minuteKey === 'delegate_total_minutes') return baseline?.delegate_total_seconds
+  if (baseline?.schema === 1) return baseline.routed_total_seconds
+  return minuteKey === 'routed_light_total_minutes'
+    ? baseline?.routed_light_total_seconds
+    : baseline?.routed_heavy_total_seconds
+}
+
+function timeoutBaselineMinute(baseline, minuteKey) {
+  const seconds = timeoutBaselineSeconds(baseline, minuteKey)
+  return validSeconds(seconds) ? seconds / 60 : null
+}
+
 export function timeoutDraftChanged(timeouts, baseline) {
   if (!timeouts || !baseline) return false
-  return TIMEOUT_KEYS.some(key => {
-    const value = parseTimeoutSeconds(timeouts[key])
-    return value === null || value !== baseline[key]
+  return TIMEOUT_MINUTE_KEYS.some(key => {
+    const value = parseTimeoutMinutes(timeouts[key])
+    const original = timeoutBaselineMinute(baseline, key)
+    return value === null || original === null || value !== original
   })
 }
 
@@ -275,31 +338,46 @@ export function timeoutRevisionMatches(baseline, currentTimeouts) {
     currentTimeouts.revision === baseline.revision)
 }
 
+function timeoutPayloadValues(timeouts, baseline) {
+  if (!timeouts || !baseline) return null
+  const values = {}
+  for (const key of TIMEOUT_MINUTE_KEYS) {
+    const minutes = parseTimeoutMinutes(timeouts[key])
+    const secondsKey = key === 'delegate_total_minutes'
+      ? 'delegate_total_seconds'
+      : key === 'routed_light_total_minutes' ? 'routed_light_total_seconds' : 'routed_heavy_total_seconds'
+    if (minutes === null) return null
+    const sourceSeconds = timeoutBaselineSeconds(baseline, key)
+    const baselineMinutes = validSeconds(sourceSeconds) ? sourceSeconds / 60 : null
+    const seconds = minutes === baselineMinutes ? sourceSeconds : minutes * 60
+    if (!validSeconds(seconds)) return null
+    values[secondsKey] = seconds
+  }
+  return values
+}
+
+function timeoutUpdateError() {
+  return '각 시간 제한을 0 이상의 유한한 분 단위 숫자로 입력하세요. 입력값을 초 단위로 변환할 수 없는 경우 저장할 수 없습니다.'
+}
+
 export function buildTimeoutUpdate(profile, timeouts, baseline, currentTimeouts) {
   const changed = timeoutDraftChanged(timeouts, baseline)
   if (!changed) return { changed: false, update: null, error: '' }
   if (!baseline || !timeouts || typeof profile !== 'string' || !profile) {
     return { changed: true, update: null, error: '시간 제한 편집 상태를 확인할 수 없습니다. 상태를 새로고침하세요.' }
   }
-  if (timeouts.editable !== true) {
-    return { changed: true, update: null, error: '현재 불러온 프로필의 전체 실행 시간은 읽기 전용입니다.' }
+  if (timeouts.editable !== true || timeouts.split_routing_supported !== true || baseline.editable !== true || baseline.split_routing_supported !== true) {
+    return { changed: true, update: null, error: '역할별 시간 제한 지원이 확인되지 않아 현재 시간 제한은 읽기 전용입니다.' }
   }
-  if (timeouts.revision !== baseline.revision || !timeoutRevisionMatches(baseline, currentTimeouts) || currentTimeouts.editable !== true) {
-    return { changed: true, update: null, error: '시간 제한 revision이 바뀌었거나 편집할 수 없습니다. 상태를 새로고침한 뒤 다시 편집하세요.' }
+  if (timeouts.revision !== baseline.revision || !timeoutRevisionMatches(baseline, currentTimeouts) ||
+    currentTimeouts.editable !== true || currentTimeouts.split_routing_supported !== true) {
+    return { changed: true, update: null, error: '시간 제한 revision 또는 역할별 지원 상태가 바뀌었거나 편집할 수 없습니다. 상태를 새로고침한 뒤 다시 편집하세요.' }
   }
-  const delegateTotalSeconds = parseTimeoutSeconds(timeouts.delegate_total_seconds)
-  const routedTotalSeconds = parseTimeoutSeconds(timeouts.routed_total_seconds)
-  if (delegateTotalSeconds === null || routedTotalSeconds === null) {
-    return { changed: true, update: null, error: '전체 실행 시간은 0 이상의 유한한 초 단위 숫자로 입력하세요.' }
-  }
+  const values = timeoutPayloadValues(timeouts, baseline)
+  if (!values) return { changed: true, update: null, error: timeoutUpdateError() }
   return {
     changed: true,
-    update: {
-      profile,
-      expected_revision: baseline.revision,
-      delegate_total_seconds: delegateTotalSeconds,
-      routed_total_seconds: routedTotalSeconds
-    },
+    update: { profile, expected_revision: baseline.revision, ...values },
     error: ''
   }
 }
@@ -312,40 +390,34 @@ export function buildTimeoutUpdates(sourceProfile, timeouts, targetNames, baseli
   if (!targets.length) {
     return { updates: [], errors: ['시간 제한 적용 대상이 0개입니다. 편집 가능한 프로필을 하나 이상 선택하세요.'] }
   }
-  const delegateTotalSeconds = parseTimeoutSeconds(timeouts.delegate_total_seconds)
-  const routedTotalSeconds = parseTimeoutSeconds(timeouts.routed_total_seconds)
-  if (delegateTotalSeconds === null || routedTotalSeconds === null) {
-    return { updates: [], errors: ['전체 실행 시간은 0 이상의 유한한 초 단위 숫자로 입력하세요.'] }
-  }
   const sourceBaseline = baselinesByProfile?.[sourceProfile]
   const sourceCurrent = currentByProfile?.[sourceProfile]
-  if (!sourceBaseline || !validTimeoutsDto(sourceCurrent) || sourceCurrent.editable !== sourceBaseline.editable ||
-    !timeoutRevisionMatches(sourceBaseline, sourceCurrent)) {
-    return { updates: [], errors: [`시간 제한 원본 프로필 ${sourceProfile}의 불러온 revision이 바뀌었습니다. 상태를 새로고침하세요.`] }
+  if (!sourceBaseline || !validTimeoutsDto(sourceCurrent) || sourceBaseline.editable !== true ||
+    sourceBaseline.split_routing_supported !== true || sourceCurrent.editable !== true ||
+    sourceCurrent.split_routing_supported !== true || !timeoutRevisionMatches(sourceBaseline, sourceCurrent)) {
+    return { updates: [], errors: [`시간 제한 원본 프로필 ${sourceProfile}의 역할별 지원 또는 불러온 revision을 확인할 수 없습니다. 상태를 새로고침하세요.`] }
   }
+  const values = timeoutPayloadValues(timeouts, sourceBaseline)
+  if (!values) return { updates: [], errors: [timeoutUpdateError()] }
   const updates = []
   const errors = []
   for (const profile of targets) {
     const baseline = baselinesByProfile?.[profile]
     const current = currentByProfile?.[profile]
-    if (!baseline || !validTimeoutsDto(current) || !validTimeoutSettingsShape(baseline) || baseline.editable !== true ||
-      current.editable !== true || !timeoutRevisionMatches(baseline, current)) {
-      errors.push(`${profile} 프로필의 시간 제한 revision이 바뀌었거나 편집할 수 없습니다. 상태를 새로고침하세요.`)
+    if (!baseline || !validTimeoutsDto(current) || !validTimeoutSettingsShape(baseline) ||
+      baseline.editable !== true || baseline.split_routing_supported !== true || current.editable !== true ||
+      current.split_routing_supported !== true || !timeoutRevisionMatches(baseline, current)) {
+      errors.push(`${profile} 프로필의 역할별 시간 제한 지원, revision 또는 편집 권한을 확인할 수 없습니다. 상태를 새로고침하세요.`)
       continue
     }
-    updates.push({
-      profile,
-      expected_revision: baseline.revision,
-      delegate_total_seconds: delegateTotalSeconds,
-      routed_total_seconds: routedTotalSeconds
-    })
+    updates.push({ profile, expected_revision: baseline.revision, ...values })
   }
   return { updates: errors.length ? [] : updates, errors }
 }
 
 export function copyProfileDraft(profile) {
   if (!profile || typeof profile !== 'object' || !profile.models || !profile.routing) return null
-  const timeouts = copyTimeoutSettings(profile.timeouts)
+  const timeouts = timeoutDraftFromSettings(profile.timeouts)
   return deepClone({
     models: profile.models,
     routing: profile.routing,
@@ -899,7 +971,7 @@ function TimeoutField({ id, label, value, onChange, disabled, describedBy }) {
         'aria-label': label,
         'aria-describedby': describedBy
       }),
-      jsx('span', { style: styles.hint, children: '초 (seconds)' })
+      jsx('span', { style: styles.hint, children: '분 (minutes)' })
     ]
   })
 }
@@ -1069,13 +1141,16 @@ function RouterPage({ ctx: pluginContext }) {
   const timeoutSourceRevisionChanged = Boolean(timeoutBaseline && (
     !validTimeoutsDto(loadedTimeoutRow?.timeouts) ||
     timeoutBaselineMap[selectedProfile]?.editable !== loadedTimeoutRow?.timeouts?.editable ||
+    timeoutBaselineMap[selectedProfile]?.split_routing_supported !== (loadedTimeoutRow?.timeouts?.split_routing_supported === true) ||
     !timeoutRevisionMatches(timeoutBaselineMap[selectedProfile], loadedTimeoutRow?.timeouts)
   ))
   const timeoutTargetsRevisionChanged = selectedTimeoutTargets.some(name => {
     const row = profiles.find(item => item.name === name)
     const baseline = timeoutBaselineMap[name]
     return !validTimeoutsDto(row?.timeouts) || baseline?.editable !== row?.timeouts?.editable ||
-      row?.timeouts?.editable !== true || !timeoutRevisionMatches(baseline, row?.timeouts)
+      baseline?.split_routing_supported !== (row?.timeouts?.split_routing_supported === true) ||
+      row?.timeouts?.editable !== true || row?.timeouts?.split_routing_supported !== true ||
+      !timeoutRevisionMatches(baseline, row?.timeouts)
   })
   const timeoutRevisionChanged = timeoutWriteRequested && (timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged)
   const timeoutSaveRevisionChanged = timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged
@@ -1212,11 +1287,11 @@ function RouterPage({ ctx: pluginContext }) {
   const targetSummary = allTargetsSelected ? `전체 ${profileNames.length}개 프로필` : `${selectedTargets.length}/${profileNames.length}개 프로필`
   const timeoutDraftResult = buildTimeoutUpdate(selectedProfile, draft?.timeouts, timeoutBaseline, currentRow?.timeouts)
   const timeoutSettingsSupported = validTimeoutsDto(currentRow?.timeouts)
-  const timeoutSettingsEditable = timeoutSettingsSupported && currentRow?.timeouts?.editable === true && Boolean(draft?.timeouts)
+  const timeoutRoleSupported = splitRoutingSupported(currentRow?.timeouts)
+  const timeoutSettingsEditable = timeoutSettingsSupported && timeoutRoleSupported && currentRow?.timeouts?.editable === true && Boolean(draft?.timeouts)
   const disabled = applyPending || needsReload || revisionChanged || statusQuery.isFetching || !selectedProfile || !draft
-  const timeoutSaveValuesValid = parseTimeoutSeconds(draft?.timeouts?.delegate_total_seconds) !== null &&
-    parseTimeoutSeconds(draft?.timeouts?.routed_total_seconds) !== null
-  const timeoutSaveDisabled = disabled || !timeoutSettingsSupported || !selectedTimeoutTargets.length ||
+  const timeoutSaveValuesValid = Boolean(timeoutPayloadValues(draft?.timeouts, timeoutBaseline))
+  const timeoutSaveDisabled = disabled || !timeoutSettingsEditable || !selectedTimeoutTargets.length ||
     timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged || !timeoutSaveValuesValid
   const validPreview = previewMatchesScope(preview, scopeKey, generationRef.current, selectedProfile)
   const renderGeneration = generationRef.current
@@ -1231,6 +1306,9 @@ function RouterPage({ ctx: pluginContext }) {
     if (!loadedBaseline) return
     invalidatePlan()
     const nextDraft = deepClone(loadedBaseline)
+    const timeoutDraft = timeoutDraftFromSettings(loadedBaseline.timeouts)
+    if (timeoutDraft) nextDraft.timeouts = timeoutDraft
+    else delete nextDraft.timeouts
     setSelectedProfile(name)
     setDraft(nextDraft)
     setTimeoutBaseline(copyTimeoutBaselineShape(loadedBaseline.timeouts))
@@ -1410,6 +1488,7 @@ function RouterPage({ ctx: pluginContext }) {
       const baseline = snapshot.timeoutBaselinesByProfile?.[name]
       const current = currentRows.find(row => row.name === name)?.timeouts
       if (!baseline || !validTimeoutsDto(current) || current.editable !== baseline.editable ||
+        current.split_routing_supported !== baseline.split_routing_supported || current.split_routing_supported !== true ||
         (name !== snapshot.profile && current.editable !== true)) return false
       return timeoutRevisionMatches(baseline, current)
     })
@@ -1718,37 +1797,46 @@ function RouterPage({ ctx: pluginContext }) {
     ]
   })
 
-  const timeoutSettingsSection = section('전체 실행 시간 제한 (TOTAL)', '불러온 프로필의 값을 편집하고, 아래 시간 제한 적용 대상 목록에 선택한 프로필에 저장합니다. 모델·라우팅·폴백 적용 대상과는 독립적입니다.', jsxs('div', {
+  const timeoutSettingsSection = section('전체 실행 시간 제한 (TOTAL)', '불러온 프로필에서 일반 작업·Light·Heavy의 시간 제한을 각각 분 단위로 편집하고, 아래 시간 제한 적용 대상에 복사합니다. 모델·라우팅·폴백 적용 대상과는 독립적입니다.', jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' },
     children: [
-      jsx('p', { id: 'timeout-policy-explanation', role: 'note', style: styles.hint, children: '값은 초 단위입니다. 0은 해당 작업에 플러그인 전체 시간 상한을 두지 않습니다. 일반 서브 에이전트 전체 시간은 새 옵션이며 delegation.child_timeout_seconds의 비활동 시간 제한을 바꾸지 않습니다. 일반 서브 에이전트 시간이 끝나면 Hermes에 협조적 중단을 요청하지만 프로세스 종료를 보장하지 않습니다. 라우팅 서브 에이전트는 시간 초과 시 실행 프로세스를 정리합니다.' }),
+      jsx('p', { id: 'timeout-policy-explanation', role: 'note', style: styles.hint, children: '세 값은 분 단위이며 각각 독립적입니다. 0은 해당 역할에 플러그인 전체 시간 상한을 두지 않습니다. 일반 서브 에이전트 전체 시간은 delegation.child_timeout_seconds의 비활동 시간 제한을 바꾸지 않습니다. 일반 서브 에이전트 시간이 끝나면 Hermes에 협조적 중단을 요청하지만 프로세스 종료를 보장하지 않습니다. 라우팅 Light와 Heavy는 각자의 제한을 사용하고, 시간 초과 시 실행 프로세스를 정리합니다. 기존 통합 시간 설정은 Light와 Heavy에 같은 값으로 표시됩니다.' }),
       jsx('p', { style: styles.hint, children: '새 작업은 시작할 때 현재 정책을 스냅샷으로 사용합니다. 이미 실행 중인 작업에는 소급 적용되지 않습니다. 요청·도구별 제한과 반복 횟수 제한은 별도로 유지됩니다.' }),
       !timeoutSettingsSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '시간 제한 DTO를 지원하지 않는 백엔드입니다 (UNSUPPORTED). 값을 추정하거나 기본값을 채우지 않고 읽기 전용으로 표시합니다.' }) : null,
-      timeoutSettingsSupported && currentRow.timeouts.editable !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필의 시간 제한은 읽기 전용입니다. 기존 값을 보존합니다.' }) : null,
-      timeoutRevisionChanged || timeoutSaveRevisionChanged ? jsx('p', { role: 'alert', style: styles.warning, children: '불러온 뒤 시간 제한 대상 프로필의 revision이 바뀌었습니다. 덮어쓰기를 막았습니다. 상태 새로고침으로 최신 값을 다시 불러오세요.' }) : null,
+      timeoutSettingsSupported && !timeoutRoleSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '역할별 시간 제한 지원을 확인할 수 없는 백엔드입니다. 일반·Light·Heavy 값을 표시만 하며 편집하거나 일괄 적용할 수 없습니다. 백엔드 지원 여부를 추정하지 않습니다.' }) : null,
+      timeoutSettingsSupported && timeoutRoleSupported && currentRow.timeouts.editable !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필의 시간 제한은 읽기 전용입니다. 기존 값을 보존합니다.' }) : null,
+      timeoutRevisionChanged || timeoutSaveRevisionChanged ? jsx('p', { role: 'alert', style: styles.warning, children: '불러온 뒤 시간 제한 대상 프로필의 revision 또는 역할별 지원 상태가 바뀌었습니다. 덮어쓰기를 막았습니다. 상태 새로고침으로 최신 값을 다시 불러오세요.' }) : null,
       timeoutSettingsSupported && currentRow.timeouts.warnings.length ? jsx('div', { role: 'note', style: styles.warning, children: currentRow.timeouts.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: warning }, index)) }) : null,
       timeoutDraftResult.error ? jsx('p', { role: 'alert', style: styles.warning, children: timeoutDraftResult.error }) : null,
       jsx('div', { style: styles.fields, children: [
         jsx(TimeoutField, {
-          id: 'delegate-total-seconds',
-          label: '일반 서브 에이전트 전체 실행 시간',
-          value: draft?.timeouts?.delegate_total_seconds,
-          onChange: value => updateTimeout('delegate_total_seconds', value),
+          id: 'delegate-total-minutes',
+          label: '일반 서브 에이전트 전체 실행 시간 (분)',
+          value: draft?.timeouts?.delegate_total_minutes,
+          onChange: value => updateTimeout('delegate_total_minutes', value),
           disabled: disabled || timeoutRevisionChanged || !timeoutSettingsEditable,
           describedBy: 'timeout-policy-explanation'
         }),
         jsx(TimeoutField, {
-          id: 'routed-total-seconds',
-          label: '라우팅 서브 에이전트 전체 실행 시간',
-          value: draft?.timeouts?.routed_total_seconds,
-          onChange: value => updateTimeout('routed_total_seconds', value),
+          id: 'routed-light-total-minutes',
+          label: '라우팅 Light 전체 실행 시간 (분)',
+          value: draft?.timeouts?.routed_light_total_minutes,
+          onChange: value => updateTimeout('routed_light_total_minutes', value),
+          disabled: disabled || timeoutRevisionChanged || !timeoutSettingsEditable,
+          describedBy: 'timeout-policy-explanation'
+        }),
+        jsx(TimeoutField, {
+          id: 'routed-heavy-total-minutes',
+          label: '라우팅 Heavy 전체 실행 시간 (분)',
+          value: draft?.timeouts?.routed_heavy_total_minutes,
+          onChange: value => updateTimeout('routed_heavy_total_minutes', value),
           disabled: disabled || timeoutRevisionChanged || !timeoutSettingsEditable,
           describedBy: 'timeout-policy-explanation'
         })
       ] }),
       jsx('fieldset', { id: 'timeout-targets', style: styles.fieldset, children: [
         jsx('legend', { style: styles.fieldName, children: '시간 제한 적용 대상' }),
-        jsx('p', { style: styles.hint, children: '처음 열면 시간 제한 DTO가 유효하고 편집 가능한 모든 프로필을 선택합니다. 수동 부분 선택이나 모두 해제는 프로필 전환과 새로고침 후에도 유지됩니다. 대상 선택만으로 저장되지는 않으며, 전체 저장에선 변경한 값 또는 직접 지정한 복사 의도만 적용합니다.' }),
+        jsx('p', { style: styles.hint, children: '처음 열면 역할별 지원이 확인되고 편집 가능한 모든 프로필을 선택합니다. 수동 부분 선택이나 모두 해제는 프로필 전환과 새로고침 후에도 유지됩니다. 대상 선택만으로 저장되지는 않으며, 전체 저장에선 변경한 값 또는 직접 지정한 복사 의도만 적용합니다.' }),
         jsxs('div', { style: styles.selectionToolbar, children: [
           jsx('span', { style: styles.hint, children: `${selectedTimeoutTargets.length}/${eligibleTimeoutTargets(profiles).length}개 편집 가능 프로필 선택${timeoutTargetEdited ? ' · 전체 저장에 복사 의도 포함' : ''}` }),
           jsxs('div', { style: styles.actions, children: [
@@ -1758,11 +1846,18 @@ function RouterPage({ ctx: pluginContext }) {
           ] })
         ] }),
         jsx('div', { style: styles.profileList, children: profiles.map(row => {
-          const eligible = validTimeoutsDto(row.timeouts) && row.timeouts.editable === true
+          const dtoValid = validTimeoutsDto(row.timeouts)
+          const roleSupported = splitRoutingSupported(row.timeouts)
+          const eligible = roleSupported && row.timeouts.editable === true
+          const detail = !dtoValid
+            ? '시간 제한 정보를 확인할 수 없습니다. 기존 값을 보존합니다.'
+            : !roleSupported
+              ? '역할별 시간 제한 지원을 확인할 수 없어 선택할 수 없습니다.'
+              : row.timeouts.editable !== true ? '시간 제한은 읽기 전용입니다. 기존 값을 보존합니다.' : undefined
           return jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, {
             id: `timeout-target-${row.name}`,
             label: row.name,
-            detail: eligible ? undefined : '시간 제한 정보를 확인할 수 없거나 읽기 전용입니다.',
+            detail,
             checked: selectedTimeoutTargets.includes(row.name),
             disabled: disabled || !eligible,
             onChange: checked => chooseTimeoutTargets('toggle', row.name, checked)
@@ -2019,11 +2114,13 @@ function RouterPage({ ctx: pluginContext }) {
   ].filter(item => item.changed)
   const timeoutSummary = !timeoutSettingsSupported
     ? '전체 실행 시간: UNSUPPORTED · 읽기 전용'
-    : localCombinedSummary?.body.timeout_updates?.length
-      ? `전체 실행 시간 변경: ${localCombinedSummary.body.timeout_updates.length}개 대상 · 일반 ${localCombinedSummary.body.timeout_updates[0].delegate_total_seconds}초 / 라우팅 ${localCombinedSummary.body.timeout_updates[0].routed_total_seconds}초`
-      : timeoutWriteRequested
-        ? '전체 실행 시간: 입력 또는 대상 revision을 확인하세요.'
-        : `전체 실행 시간 변경 없음 · 시간 제한 대상 ${selectedTimeoutTargets.length}개 선택 · 불러온 ${selectedProfile} 프로필 값 ${draft?.timeouts?.delegate_total_seconds}초 / ${draft?.timeouts?.routed_total_seconds}초`
+    : !timeoutRoleSupported
+      ? '역할별 시간 제한 지원 미확인 · 표시만 가능'
+      : localCombinedSummary?.body.timeout_updates?.length
+        ? `전체 실행 시간 변경: ${localCombinedSummary.body.timeout_updates.length}개 대상 · 일반 ${draft?.timeouts?.delegate_total_minutes}분 / Light ${draft?.timeouts?.routed_light_total_minutes}분 / Heavy ${draft?.timeouts?.routed_heavy_total_minutes}분`
+        : timeoutWriteRequested
+          ? '전체 실행 시간: 입력 또는 대상 revision을 확인하세요.'
+          : `전체 실행 시간 변경 없음 · 시간 제한 대상 ${selectedTimeoutTargets.length}개 선택 · 불러온 ${selectedProfile} 프로필 값 일반 ${draft?.timeouts?.delegate_total_minutes}분 / Light ${draft?.timeouts?.routed_light_total_minutes}분 / Heavy ${draft?.timeouts?.routed_heavy_total_minutes}분`
   const scopeDraftErrors = [
     [nativeFallbackDraftChanged || fallbackTargetEdits.native, nativeFallbackError],
     [routingFallbackDraftChanged || fallbackTargetEdits.routing, routingFallbackError],

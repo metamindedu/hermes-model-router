@@ -1,5 +1,5 @@
 name: model-router
-version: 0.3.1
+version: 0.4.0
 description: "프로필별 모델 설정과 안전한 작업 라우팅 — 코딩·복잡한 비코딩 판단, 실행 검증, 동봉 스킬"
 author: NewMetaW
 provides_tools:

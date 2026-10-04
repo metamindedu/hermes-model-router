@@ -1,6 +1,6 @@
 # 운영 지식 색인
 
-- [[total-runtime-limits]] — 일반/라우팅 서브 에이전트의 독립 전체 시간 설정, 복수 프로필 대상별 revision/CAS, 시간·모델·라우팅 개별 저장, 네이티브 무진행 제한과 구분, 실제 running time·소유권·취소 확인
+- [[total-runtime-limits]] — 일반·Light·Heavy 시간 분리, 분 입력/초 API와 구 단일 값 호환, 복수 프로필 대상별 revision/CAS, 시간·모델·라우팅 개별 저장, 네이티브 무진행 제한과 구분, 실제 running time·소유권·취소 확인
 
 - [[profile-boundaries]] — 모델 관리와 코딩 라우팅 활성화의 독립 범위, 메시징 후속 턴의 dispatcher ID·ContextVar 보완과 프로필 격리, Heavy/Light 명시적 다중 적용·일회 복사 의도
 - [[fallback-boundaries]] — 세 폴백의 실행 경로, 전체 미리보기·단일 저장, 독립 적용 대상과 비용 고지, 오류 판정 원칙, 관측·관리형 설정 검증과 테스트 환경 함정

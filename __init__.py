@@ -128,7 +128,7 @@ def register(ctx):
                 "title": {"type": "string", "minLength": 1, "maxLength": 96, "description": "Short human-readable PUBLIC Background task title. Describe the deliverable; never put secrets or private prompt text here."},
                 "prompt": {"type": "string", "description": "Complete bounded handoff; independent review must be read-only."},
                 "cwd": {"type": "string", "description": "Existing task workspace."},
-                "timeout": {"type": "integer", "minimum": 0, "description": "Optional per-job TOTAL seconds. Omit to use this profile's routed total-runtime setting (default 3600). 0 disables only the plugin total limit; native request/tool limits remain."},
+                "timeout": {"type": "integer", "minimum": 0, "description": "Optional per-job TOTAL seconds. Omit to use this profile's Light or Heavy total-runtime setting for the purpose (each defaults to 3600). Settings UI inputs use minutes; this API override remains seconds. 0 disables only this job's plugin total limit; native request/tool limits remain."},
                 "job_id": {"type": "string"},
             }, "required": ["action"],
         },
