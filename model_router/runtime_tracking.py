@@ -1,8 +1,8 @@
-"""Connect a real routed Popen to Hermes' native background process tracker.
+"""Connect routed Popen jobs to native Background and Desktop completion wakes.
 
-No delegate records/events are forged, no extra monitor process is spawned, and
-no model config or notification-delivery contract changes. The worker still owns
-its file-backed log and evidence; native adoption merely waits on that Popen.
+No delegate records/events are forged. The real worker owns its file-backed
+result/state before exit; native adoption owns completion delivery. Only bound
+Desktop jobs opt into wakes; other surfaces retain their existing contract.
 """
 from __future__ import annotations
 
@@ -51,18 +51,6 @@ class RouteRuntime:
         display_title = task_presentation.validate_title(title, purpose)
         display_role = role or task_presentation.default_role(purpose)
         command = task_presentation.native_command(display_title, display_role, model, purpose)
-        session = self.registry.adopt_local(
-            process,
-            command=command,
-            cwd=cwd,
-            task_id=self.task_id,
-            owner_task_id=self.task_id,
-            session_key=self.session_key,
-            # Keep coding_route's existing bounded status/result contract. Do not
-            # inject a second completion model turn or forward private job logs.
-            notify_on_complete=False,
-        )
-        process_id = str(getattr(session, "id", ""))
         cwd_basename = os.path.basename(os.path.normpath(cwd)) if isinstance(cwd, str) else "미지정"
         seed = task_presentation.terminal_seed(
             title=display_title,
@@ -75,15 +63,25 @@ class RouteRuntime:
             cwd_basename=cwd_basename,
             reasoning=reasoning,
         )
-        # Adoption has already transferred ownership of the live process. Seed
-        # exactly once before announcing the native card; failures carry its ID
-        # so the caller reports the adopted process and never tries to relaunch.
+        # Seed via the native API BEFORE its reader starts. A very fast exit
+        # must still carry the exact job ID, never private worker stdout.
+        session = self.registry.adopt_local(
+            process,
+            command=command,
+            cwd=cwd,
+            task_id=self.task_id,
+            owner_task_id=self.task_id,
+            session_key=self.session_key,
+            output_so_far=seed,
+            # Desktop's native owner/Stop/opt-out/dedup gates own the wake.
+            # A completion only asks the parent to read the file-backed result.
+            notify_on_complete=bool(self.ui_session_id),
+        )
+        process_id = str(getattr(session, "id", ""))
+        # Ownership has already transferred. A display failure must never cause
+        # a relaunch or suppress the independently owned completion event.
         try:
-            append_output = getattr(session, "append_output", None)
-            if not callable(append_output):
-                raise RuntimeError("native process output seeding is unavailable")
-            append_output(seed)
-            seeded = self.emit("status.update", {"kind": "process", "process_id": process_id})
+            seeded = self.emit("status.update", {"kind": "process", "text": ""})
         except Exception:
             raise DesktopSeedUnavailable(process_id) from None
         if seeded is not True:

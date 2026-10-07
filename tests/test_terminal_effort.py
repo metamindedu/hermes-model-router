@@ -34,6 +34,7 @@ def test_router_forwards_selected_snapshot_effort_to_native_terminal(tmp_path, m
     class Registry:
         def adopt_local(self, process, **kwargs):
             commands.append(kwargs['command'])
+            output.append(kwargs['output_so_far'])
             return SimpleNamespace(id='proc_effort', append_output=output.append)
     router.runtime = RouteRuntime('parent', 'key', 'task', Registry(), lambda *a: True)
     work = tmp_path / 'work'

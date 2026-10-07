@@ -11,6 +11,7 @@ def test_native_label_and_terminal_summary_are_human_readable(tmp_path):
     class Registry:
         def adopt_local(self, process, **kwargs):
             adopted.append(kwargs)
+            output.append(kwargs['output_so_far'])
             return SimpleNamespace(id='proc_123', append_output=output.append)
     runtime = RouteRuntime('parent', 'key', 'owner', Registry(), lambda *e: events.append(e) or True)
     runtime.track(SimpleNamespace(pid=42), job_id='12345678-1234-1234-1234-123456789012',
@@ -61,7 +62,9 @@ def test_maximum_title_and_seed_failure_preserve_actual_adoption(tmp_path, monke
             adopted.append(process)
             def fail(text): raise RuntimeError('SECRET_SEED_ERROR_CANARY')
             return SimpleNamespace(id='proc_adopted', append_output=fail)
-    runtime = RouteRuntime('parent', 'key', 'task', Registry(), lambda *e: True)
+    def fail_emit(*args):
+        raise RuntimeError('SECRET_SEED_ERROR_CANARY')
+    runtime = RouteRuntime('parent', 'key', 'task', Registry(), fail_emit)
     router.runtime = runtime
     work = tmp_path/'work'; work.mkdir()
     result = router.start('mechanical', 'SECRET_PROMPT_CANARY', work, title='테스트')

@@ -51,7 +51,9 @@ def test_native_plugin_cli_transport_in_isolated_home(tmp_path):
     env=dict(os.environ,HERMES_HOME=str(root));env.pop('HERMES_PROFILE',None)
     for inherited in ('VIRTUAL_ENV','PYTHONHOME','PYTHONPATH'):
         env.pop(inherited,None)
-    result=run_launcher([str(launcher),'--profile','default','model-router','status'],env=env,timeout=40)
+    # This is a cold native CLI bootstrap budget, not a routed-job limit.
+    # Managed Windows startup can exceed 40s before this plugin command runs.
+    result=run_launcher([str(launcher),'--profile','default','model-router','status'],env=env,timeout=120)
     assert result.returncode==0,result.stderr
     line=next(v for v in result.stdout.splitlines() if v.startswith('MODEL_ROUTER_JSON:'))
     response=json.loads(line.split(':',1)[1])

@@ -109,7 +109,7 @@ class BackgroundOutput:
         try:
             # The thread runs under the spawning ContextVars. No global/current
             # foreground session fallback and no fabricated delegate event.
-            self.emit("status.update", {"kind": "process", "process_id": self.process_id})
+            self.emit("status.update", {"kind": "process", "text": ""})
         except Exception:
             pass  # Native poll still reconciles this real process and its output.
 

@@ -66,6 +66,7 @@ def test_native_adoption_uses_task_local_context_and_no_fake_delegate_events(tmp
     class Registry:
         def adopt_local(self, process, **kwargs):
             adoptions.append((process, kwargs))
+            seeds.append(kwargs["output_so_far"])
             return SimpleNamespace(id="proc_native", append_output=seeds.append)
     def launch(parent):
         current.set({"HERMES_SESSION_ID": parent, "HERMES_SESSION_KEY": "key-" + parent, "HERMES_UI_SESSION_ID": "ui-" + parent, "HERMES_SESSION_PROFILE": "claire"})
@@ -75,7 +76,7 @@ def test_native_adoption_uses_task_local_context_and_no_fake_delegate_events(tmp
         assert list(pool.map(launch, ["parent-A", "parent-B"])) == ["proc_native", "proc_native"]
     assert {kw["session_key"] for _, kw in adoptions} == {"key-parent-A", "key-parent-B"}
     assert {kw["owner_task_id"] for _, kw in adoptions} == {"task-parent-A", "task-parent-B"}
-    assert all(kw["notify_on_complete"] is False for _, kw in adoptions)
+    assert all(kw["notify_on_complete"] is True for _, kw in adoptions)
     assert all(kw["command"].startswith("서브 에이전트 작업: 테스트 및 검증 · Light · 미지정") for _, kw in adoptions)
     assert all("job-parent-" not in kw["command"] for _, kw in adoptions)
     assert len(seeds) == 2

@@ -181,4 +181,4 @@ def test_actual_desktop_emit_preserves_bound_ui_not_later_focus(setup, monkeypat
         assert not thread.is_alive()
     Context().run(spawn)
     assert received
-    assert all(sid == "ui-A" and event == "status.update" and payload == {"kind": "process", "process_id": "proc_bound"} for sid, event, payload in received)
+    assert all(sid == "ui-A" and event == "status.update" and payload == {"kind": "process", "text": ""} for sid, event, payload in received)

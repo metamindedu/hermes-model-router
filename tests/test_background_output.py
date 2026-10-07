@@ -62,7 +62,7 @@ def test_real_changes_only_and_frozen_exactly_once_summary(setup):
     assert "종료 확인 시 소요 시간: 00:04" in text
     assert "검수 통과를 뜻하지 않습니다" in text
     assert "SECRET" not in text
-    assert all(event == ("status.update", {"kind": "process", "process_id": "proc_bound"}) for event in s.events)
+    assert all(event == ("status.update", {"kind": "process", "text": ""}) for event in s.events)
 
 
 @pytest.mark.parametrize("field,bad", [("job_id", str(uuid4())), ("profile", "other"), ("parent_session_id", "parent-B"), ("attempt_id", str(uuid4())), ("session_id", str(uuid4())), ("schema", True), ("updated_at", float("nan")), ("updated_at", 999999999), ("activity", 4)])
@@ -251,7 +251,7 @@ def test_real_registry_output_and_final_flush_without_wait_or_kill_ownership(tmp
             assert "프로세스 종료를 확인했습니다." in row.output_buffer
             assert "PRIVATE_LOG_CANARY" not in row.output_buffer
             assert row.output_buffer.count("종료 확인 시 소요 시간:") == 1
-            assert all(e == ("status.update", {"kind": "process", "process_id": process_id}) for e in seen)
+            assert all(e == ("status.update", {"kind": "process", "text": ""}) for e in seen)
     finally:
         if process is not None and process.poll() is None:
             process.terminate()
