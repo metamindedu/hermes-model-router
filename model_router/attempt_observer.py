@@ -72,6 +72,41 @@ def _no_symlink_component(path: Path, stop: Path) -> bool:
     return True
 
 
+def _validate_attempt_fast_snapshot(data: dict[str, Any], *, home: Path, profile: str) -> bool:
+    """Validate schema-2 intent against the original immutable job parent."""
+    job_dir = home / "plugin-data" / "model-router" / "jobs" / data["job_id"]
+    snapshot_path = job_dir / "snapshot.json"
+    try:
+        if (
+            snapshot_path.is_symlink()
+            or not snapshot_path.is_file()
+            or snapshot_path.resolve(strict=True).parent != job_dir.resolve(strict=True)
+            or not _no_symlink_component(snapshot_path, home)
+            or snapshot_path.stat().st_size > 1024 * 1024
+        ):
+            return False
+        job_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(job_snapshot, dict)
+            or type(job_snapshot.get("schema")) is not int
+            or job_snapshot.get("schema") != 1
+            or job_snapshot.get("job_id") != data["job_id"]
+            or job_snapshot.get("profile") != profile
+            or "fast_snapshot" not in job_snapshot
+            or job_snapshot.get("fast_snapshot") != data.get("fast_snapshot")
+        ):
+            return False
+        from .fast_inheritance import validate_fast_snapshot
+        validated = validate_fast_snapshot(
+            data.get("fast_snapshot"),
+            profile=profile,
+            parent_session_id=job_snapshot.get("parent_session_id"),
+        )
+        return isinstance(validated, dict) and validated == data.get("fast_snapshot")
+    except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def _load_verified_state() -> _State | None:
     """Verify the environment-bound request and artifact path; return None on any ambiguity."""
     global _state
@@ -89,15 +124,18 @@ def _load_verified_state() -> _State | None:
         home = Path(home_text).resolve(strict=True)
         request_path = request_path.resolve(strict=True)
         data = json.loads(request_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or set(data) != {
+        v1_fields = {
             "schema", "attempt_id", "job_id", "profile", "home", "cwd", "source",
             "task_id", "session_id", "parent_session_id", "route", "toolsets",
             "prompt", "budget_seconds",
-        }:
+        }
+        schema = data.get("schema") if isinstance(data, dict) else None
+        expected_fields = v1_fields if schema == 1 and type(schema) is int else v1_fields | {"fast_snapshot"}
+        if not isinstance(data, dict) or set(data) != expected_fields:
             return None
         if (
-            data.get("schema") != 1
-            or isinstance(data.get("schema"), bool)
+            type(schema) is not int
+            or schema not in {1, 2}
             or not _canonical_uuid(data.get("attempt_id"))
             or not _canonical_uuid(data.get("job_id"))
             or data.get("profile") != profile
@@ -119,6 +157,8 @@ def _load_verified_state() -> _State | None:
         if request_path.parent != expected_dir.resolve(strict=True):
             return None
         if not _no_symlink_component(request_path, home):
+            return None
+        if schema == 2 and not _validate_attempt_fast_snapshot(data, home=home, profile=profile):
             return None
         if (
             os.path.normcase(str(home)) != os.path.normcase(str(Path(home_text).resolve(strict=True)))

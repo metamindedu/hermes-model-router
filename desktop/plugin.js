@@ -1764,6 +1764,7 @@ function RouterPage({ ctx: pluginContext }) {
     style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' },
     children: [
       modelPresetCards,
+      jsx('p', { id: 'fast-inheritance-note', role: 'note', style: styles.hint, children: '메인 세션에서 선택한 Fast 모드는 기본 위임과 Heavy/Light 라우팅의 새 작업이 시작할 때 상속합니다. 지원하지 않는 모델·제공자에는 Fast 옵션을 보내지 않으며, auto/cold의 남은 시간을 연장하지 않습니다. Fast 요청에는 API 추가 요금이나 Codex 크레딧 사용 증가가 있을 수 있습니다. 요청한 모드와 제공자가 실제 처리한 등급은 다를 수 있으며, 업데이트된 실행 기능은 새 세션에서 확인하세요.' }),
       jsx('div', {
         style: styles.roleGrid,
         children: ROLES.map(role => jsxs('article', {
@@ -1953,7 +1954,8 @@ function RouterPage({ ctx: pluginContext }) {
   const nativeFallbackPanel = jsxs('article', { style: styles.roleCard, children: [
     jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '일반 대화 폴백' }), jsx(Badge, { variant: nativeStatus?.enabled ? 'warn' : 'muted', children: nativeStatus?.enabled ? '현재 사용' : nativeStatus ? '현재 꺼짐' : '상태 미지원' }), nativeFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null] }),
     jsx('p', { style: styles.hint, children: '메인 세션에서 나와 대화하는 모델의 예비입니다. 주 모델을 사용할 수 없을 때, Hermes의 전환 조건에 따라 현재 대화 문맥으로 다른 모델을 사용합니다. 이 설정을 저장한다고 진행 중인 응답이 즉시 바뀌지는 않습니다.' }),
-    jsx('p', { style: styles.warning, children: '대체 모델을 켜거나 경로를 바꾸면 사용량에 따라 추가 비용이 발생할 수 있습니다. 설정을 저장하려면 변경 미리보기와 별도의 적용 동작이 필요합니다.' }),
+    jsx('p', { id: 'native-fallback-recovery-note', role: 'note', style: styles.hint, children: '메인 모델 복귀는 Hermes가 다음 턴에 사용 제한과 쿨다운을 확인하여 결정합니다. 런타임 복원 안내는 메인 모델로 다시 요청할 준비가 되었다는 뜻이며, 정상 응답을 확인했다는 뜻은 아닙니다. 아래 예비 경로는 설정에서 확인한 목록이며 현재 대화가 사용 중인 모델 표시는 아닙니다.' }),
+    jsx('p', { style: styles.warning, children: '대체 모델을 켜거나 경로를 바꾸면 사용량에 따라 추가 비용이 발생할 수 있습니다. 선택한 범위를 저장할 때만 설정에 반영됩니다.' }),
     jsxs('div', { style: styles.fields, children: [
       jsx('p', { style: styles.actual, children: `저장 설정: ${fallbackBaselines.native?.enabled ? nativeChainText(fallbackBaselines.native.chain) : `꺼짐 · 보관 체인 ${nativeChainText(fallbackBaselines.native?.chain)}`}` }),
       jsx('p', { style: styles.actual, children: `편집 초안: ${nativeFallbackDraft?.enabled ? nativeChainText(nativeFallbackDraft.chain) : `꺼짐 · 보관 체인 ${nativeChainText(nativeFallbackDraft?.chain)}`}` }),
@@ -1994,6 +1996,7 @@ function RouterPage({ ctx: pluginContext }) {
   const routingFallbackPanel = jsxs('article', { style: styles.roleCard, children: [
     jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '작업·검증 라우팅 폴백' }), jsx(Badge, { variant: routingFallbackStatus?.enabled ? 'warn' : 'muted', children: routingFallbackStatus?.enabled ? '현재 사용' : routingFallbackStatus ? '현재 꺼짐' : '상태 미지원' }), routingFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null] }),
     jsx('p', { style: styles.hint, children: '이 플러그인이 Heavy/Light로 배정한 작업의 예비 모델입니다. 구독 사용량 소진 때문에 작업을 시작하지 못한 경우, 같은 등급의 예비 모델로 새 작업을 최대 한 번 시도합니다. 일반 대화나 네이티브 위임 폴백과는 별개입니다.' }),
+    jsx('p', { id: 'routing-fallback-recovery-note', role: 'note', style: styles.hint, children: '폴백으로 시작한 시도는 작업 도중 기본 모델로 다시 전환하지 않습니다. 다음 새 작업은 설정된 기본 경로부터 시작합니다. 진행 중 작업의 경로나 결과가 불명확하다고 자동으로 다시 실행하지 않습니다.' }),
     jsx('p', { style: styles.warning, children: '실패 문구만으로는 재시도하지 않습니다. 확인된 한도 초과가 아니거나 이미 도구/부분 출력이 있으면 재시도하지 않습니다. 대체 실행에는 별도 비용이 발생할 수 있습니다.' }),
     routingFallbackStatus?.enabled && currentRow?.routing?.enabled !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필의 작업 라우팅은 현재 꺼져 있습니다. 여기서 라우팅 활성화나 프로필 멤버십은 변경하지 않습니다.' }) : null,
     !fallbackSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '폴백 설정을 안전하게 변경할 수 있는지 확인되지 않아 읽기 전용으로 표시합니다. 플러그인 업데이트 후 상태를 새로고침하세요.' }) : null,

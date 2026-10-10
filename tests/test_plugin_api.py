@@ -70,7 +70,11 @@ def plugin(monkeypatch):
             state['fallback_body'] = body
             return {'plan_id': 'f' * 32, 'changes': [], 'warnings': []}
     class Router:
-        def __init__(self, service): self.service = service
+        def __init__(self, service, **kwargs):
+            self.service = service
+            state['router_kwargs'] = kwargs
+            self.fast_snapshot = kwargs.get('fast_snapshot')
+            self.runtime = kwargs.get('runtime')
         def start(self, *args, **kwargs): state["started"] += 1; state['start_kwargs'] = kwargs; return {"job_id": "a" * 32, "status": "running"}
         def status(self, job_id): return {"status": "failed", "verification_status": "unmet"}
     for name, cls in [("service", Service), ("routing", Router)]:
@@ -93,6 +97,13 @@ def plugin(monkeypatch):
     watchdog_module = ModuleType(package.__name__ + '.native_watchdog')
     watchdog_module.register_native_watchdog = lambda ctx, home: state.setdefault('watchdog_homes', []).append(str(home))
     monkeypatch.setitem(sys.modules, watchdog_module.__name__, watchdog_module)
+    fast_module = ModuleType(package.__name__ + '.fast_inheritance')
+    def capture_for_route(*, session_id, profile):
+        state.setdefault('fast_captures', []).append({'session_id': session_id, 'profile': profile})
+        return state.get('fast_snapshot')
+    controller = SimpleNamespace(capture_for_route=capture_for_route)
+    fast_module.register_fast_inheritance = lambda ctx, home: state.setdefault('fast_homes', []).append(str(home)) or controller
+    monkeypatch.setitem(sys.modules, fast_module.__name__, fast_module)
     tools, skills = [], []
     ctx = SimpleNamespace(register_cli_command=lambda *args: state.update(cli=args), register_tool=lambda **kwargs: tools.append(kwargs), register_skill=lambda *args: skills.append(args), register_hook=lambda event, callback: state.setdefault('hooks', {}).update({event: callback}))
     return mod, ctx, state, tools, skills
@@ -192,3 +203,39 @@ def test_tool_rejects_cross_profile_field(plugin):
     result = json.loads(tools[0]["handler"]({"action": "start", "purpose": "implementation", "profile": "other"}))
     assert result["error"] == "invalid_or_denied"
     assert state["started"] == 0
+
+
+def test_fast_registration_is_independent_of_routing_opt_in(plugin):
+    mod, ctx, state, tools, _ = plugin
+    state['enabled'] = False
+    mod.register(ctx)
+    assert state['fast_homes'] == [str(Path('C:/fake/profiles/claire'))]
+    assert tools == []
+
+
+def test_router_inherits_only_host_bound_parent_snapshot(plugin):
+    mod, ctx, state, tools, _ = plugin
+    snapshot = {'schema': 1, 'profile': 'claire', 'origin_session_id': 'parent-session',
+                'parent_session_id': 'parent-session', 'mode': 'priority', 'expires_at': None}
+    state['fast_snapshot'] = snapshot
+    mod.register(ctx)
+    handler = tools[0]['handler']
+    result = json.loads(handler({'action': 'start', 'purpose': 'mechanical', 'prompt': 'bounded', 'cwd': 'C:/fake'},
+                                session_id='parent-session', task_id='host-task'))
+    assert result['status'] == 'running'
+    assert state['fast_captures'] == [{'session_id': 'parent-session', 'profile': 'claire'}]
+    assert state['router_kwargs']['fast_snapshot'] == snapshot
+    assert state['router_kwargs']['runtime'].parent_session_id == 'parent-session'
+    assert state['start_kwargs'] == {}
+    before = len(state['fast_captures'])
+    denied = json.loads(handler({'action': 'start', 'purpose': 'mechanical', 'fast_snapshot': snapshot}))
+    assert denied['error'] == 'invalid_or_denied'
+    assert len(state['fast_captures']) == before
+
+
+def test_status_never_captures_or_changes_fast_mode(plugin):
+    mod, ctx, state, tools, _ = plugin
+    mod.register(ctx)
+    result = json.loads(tools[0]['handler']({'action': 'status', 'job_id': 'a' * 32}))
+    assert result['status'] == 'failed'
+    assert state.get('fast_captures', []) == []

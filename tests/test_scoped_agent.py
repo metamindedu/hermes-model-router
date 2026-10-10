@@ -1022,3 +1022,80 @@ def test_public_progress_io_failure_does_not_break_observer_or_attempt(attempt, 
     assert result["tool_seen"] is True
     assert not (attempt["attempt_dir"] / "public-progress.json").exists()
     assert "PRIVATE_IO_FAILURE_CANARY" not in json.dumps(result)
+
+
+def _write_fast_job_snapshot(attempt: dict[str, Any], fast_snapshot: dict[str, Any], parent: str) -> Path:
+    job_dir = attempt["attempt_dir"].parent.parent
+    snapshot_path = job_dir / "snapshot.json"
+    snapshot_path.write_text(json.dumps({
+        "schema": 1,
+        "job_id": attempt["request"]["job_id"],
+        "profile": attempt["request"]["profile"],
+        "parent_session_id": parent,
+        "fast_snapshot": fast_snapshot,
+    }), encoding="utf-8")
+    return snapshot_path
+
+
+def test_schema2_attempt_validates_immutable_fast_provenance_not_execution_parent(attempt):
+    original_parent = "host-parent-A"
+    fast_snapshot = {
+        "schema": 1,
+        "profile": "claire",
+        "origin_session_id": "fast-origin-A",
+        "parent_session_id": original_parent,
+        "mode": "cold",
+        "expires_at": 2_000_000_000.0,
+    }
+    _write_fast_job_snapshot(attempt, fast_snapshot, original_parent)
+    request = {
+        **attempt["request"],
+        "schema": 2,
+        "parent_session_id": "primary-attempt-session",
+        "fast_snapshot": fast_snapshot,
+    }
+    attempt["request_path"].write_text(json.dumps(request), encoding="utf-8")
+    validated, _path, _result = scoped_agent._validate_request(request, attempt["request_path"])
+    assert validated["parent_session_id"] == "primary-attempt-session"
+    assert validated["fast_snapshot"] == fast_snapshot
+    assert validated["fast_snapshot"]["parent_session_id"] == original_parent
+
+
+def test_schema2_forged_or_malformed_fast_snapshot_fails_before_runtime(attempt):
+    original_parent = "host-parent-A"
+    fast_snapshot = {
+        "schema": 1,
+        "profile": "claire",
+        "origin_session_id": "fast-origin-A",
+        "parent_session_id": original_parent,
+        "mode": "priority",
+        "expires_at": None,
+    }
+    _write_fast_job_snapshot(attempt, fast_snapshot, original_parent)
+    forged = {**attempt["request"], "schema": 2, "fast_snapshot": {**fast_snapshot, "mode": "normal"}}
+    attempt["request_path"].write_text(json.dumps(forged), encoding="utf-8")
+    prepared: list[bool] = []
+    result = scoped_agent.run_attempt(
+        forged,
+        dependencies={"prepare_runtime": lambda _request: prepared.append(True)},
+    )
+    assert result["completed"] is False
+    assert result["error"]["kind"] == "initialization_error"
+    assert prepared == []
+
+
+def test_schema2_malformed_expiry_is_rejected_without_float_overflow(attempt):
+    original_parent = "host-parent-A"
+    fast_snapshot = {
+        "schema": 1,
+        "profile": "claire",
+        "origin_session_id": "fast-origin-A",
+        "parent_session_id": original_parent,
+        "mode": "auto",
+        "expires_at": 10**1000,
+    }
+    _write_fast_job_snapshot(attempt, fast_snapshot, original_parent)
+    request = {**attempt["request"], "schema": 2, "fast_snapshot": fast_snapshot}
+    attempt["request_path"].write_text(json.dumps(request), encoding="utf-8")
+    with pytest.raises(scoped_agent.AttemptError, match="expiry"):
+        scoped_agent._validate_request(request, attempt["request_path"])

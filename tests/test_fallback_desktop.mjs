@@ -159,6 +159,25 @@ function harness(initial = statusFixture()) {
   }
 }
 
+test('recovery and Fast inheritance notes are readonly and do not claim provider success', () => {
+  const h = harness()
+  const recovery = h.byId('native-fallback-recovery-note')
+  assert.match(text(recovery), /다음 턴/)
+  assert.match(text(recovery), /쿨다운/)
+  assert.match(text(recovery), /정상 응답을 확인했다는 뜻은 아닙니다/)
+  const fast = h.byId('fast-inheritance-note')
+  assert.match(text(fast), /기본 위임과 Heavy\/Light/)
+  assert.match(text(fast), /시작할 때/)
+  assert.match(text(fast), /지원하지 않는/)
+  assert.match(text(fast), /추가 요금|크레딧/)
+  const routing = h.byId('routing-fallback-recovery-note')
+  assert.match(text(routing), /다음 새 작업/)
+  assert.match(text(routing), /기본 경로/)
+  assert.equal(recovery.props.onClick, undefined)
+  assert.equal(fast.props.onClick, undefined)
+  assert.equal(h.calls.length, 0)
+})
+
 test('phase1 presets remain exact while fallback presets only fill drafts and never enable', () => {
   assert.deepEqual(helpers.MODEL_PRESETS.map(item => item.id), ['openai', 'non-openai'])
   const nativeOff = { enabled: false, chain: [] }

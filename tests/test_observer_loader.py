@@ -101,6 +101,44 @@ def test_actual_loader_and_adapter_share_observer(attempt, loaded, outcome):
     assert attempt_observer.snapshot()['observed_routes'] == []
 
 
+def test_registered_observer_accepts_only_schema2_snapshot_bound_to_job(attempt, loaded, monkeypatch):
+    _manager, observer = loaded
+    original_parent = "native-parent-A"
+    fast_snapshot = {
+        "schema": 1,
+        "profile": "claire",
+        "origin_session_id": "fast-origin-A",
+        "parent_session_id": original_parent,
+        "mode": "priority",
+        "expires_at": None,
+    }
+    job_dir = attempt["attempt_dir"].parent.parent
+    (job_dir / "snapshot.json").write_text(json.dumps({
+        "schema": 1,
+        "job_id": attempt["request"]["job_id"],
+        "profile": "claire",
+        "parent_session_id": original_parent,
+        "fast_snapshot": fast_snapshot,
+    }), encoding="utf-8")
+    request = {
+        **attempt["request"],
+        "schema": 2,
+        "parent_session_id": "primary-attempt-session",
+        "fast_snapshot": fast_snapshot,
+    }
+    attempt["request_path"].write_text(json.dumps(request), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(attempt["home"]))
+    monkeypatch.setenv("HERMES_PROFILE", "claire")
+    monkeypatch.setenv("MODEL_ROUTER_ATTEMPT_REQUEST", str(attempt["request_path"]))
+
+    assert observer._load_verified_state() is not None
+    observer.reset_for_tests()
+    forged = {**request, "fast_snapshot": {**fast_snapshot, "mode": "normal"}}
+    attempt["request_path"].write_text(json.dumps(forged), encoding="utf-8")
+    assert observer._load_verified_state() is None
+    observer.reset_for_tests()
+
+
 def test_registered_observer_rejects_foreign_profile_and_wrong_root(attempt, loaded):
     _manager, _observer = loaded
     other = attempt['base'] / 'other'

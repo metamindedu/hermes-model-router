@@ -81,6 +81,12 @@ def register(ctx):
     from .model_router.native_watchdog import register_native_watchdog
     register_native_watchdog(ctx, home)
 
+    # Session Fast inheritance is independent of routing opt-in and TOTAL.
+    # The controller observes exact native child IDs and rewrites only their
+    # supported request payloads; it never edits native agent/config state.
+    from .model_router.fast_inheritance import register_fast_inheritance
+    fast_controller = register_fast_inheritance(ctx, home)
+
     if not enabled():
         return
     ctx.register_skill(
@@ -97,9 +103,8 @@ def register(ctx):
                 action = args.get("action")
                 if action == "config":
                     return service.routing_config(service.active_profile())
-                router = Router(service)
                 if action == "status":
-                    return router.status(args.get("job_id", ""))
+                    return Router(service).status(args.get("job_id", ""))
                 if action == "start":
                     allowed = {"action", "purpose", "prompt", "cwd", "timeout", "title"}
                     if set(args) - allowed:
@@ -107,7 +112,13 @@ def register(ctx):
                     from .model_router.runtime_tracking import capture_runtime, route_session_context
                     profile = service.active_profile()
                     with route_session_context(session_id=kwargs.get("session_id", ""), expected_profile=profile):
-                        router.runtime = capture_runtime(task_id=kwargs.get("task_id") or "", expected_profile=profile)
+                        runtime = capture_runtime(task_id=kwargs.get("task_id") or "", expected_profile=profile)
+                        snapshot = None
+                        if fast_controller is not None and runtime is not None:
+                            snapshot = fast_controller.capture_for_route(
+                                session_id=runtime.parent_session_id, profile=profile,
+                            )
+                        router = Router(service, runtime=runtime, fast_snapshot=snapshot)
                         title_kwargs = {"title": args["title"]} if "title" in args else {}
                         return router.start(args.get("purpose"), args.get("prompt"), args.get("cwd"), args.get("timeout"), **title_kwargs)
                 raise ValueError("action must be config, start, or status")

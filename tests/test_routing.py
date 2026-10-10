@@ -914,3 +914,83 @@ def test_worker_records_runner_crash_without_fabricating_result(tmp_path, monkey
     assert not (job_dir / "runner-result.json").exists()
     assert _load(job_dir / "state.json")["status"] == "failed"
     assert _load(job_dir / "state.json")["error_type"] == "OSError"
+
+
+def _fast_snapshot(profile: str = "claire", parent: str = "parent-session") -> dict[str, Any]:
+    return {
+        "schema": 1,
+        "profile": profile,
+        "origin_session_id": parent,
+        "parent_session_id": parent,
+        "mode": "priority",
+        "expires_at": None,
+    }
+
+
+def test_worker_rejects_forged_fast_snapshot_before_runner_process(tmp_path, monkeypatch):
+    root = tmp_path / "hermes"
+    home = root / "profiles" / "claire"
+    job_id = str(uuid.uuid4())
+    job_dir = home / "plugin-data" / "model-router" / "jobs" / job_id
+    cwd = tmp_path / "work"
+    job_dir.mkdir(parents=True)
+    cwd.mkdir()
+    cli = tmp_path / "hermes.exe"
+    cli.write_bytes(b"fake executable marker")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(job_worker.shutil, "which", lambda name: str(cli) if name == "hermes" else None)
+    snapshot = {
+        "schema": 1,
+        "job_id": job_id,
+        "profile": "claire",
+        "purpose": "implementation",
+        "cwd": str(cwd.resolve()),
+        "parent_session_id": "parent-A",
+        "fast_snapshot": _fast_snapshot(parent="parent-B"),
+    }
+    (job_dir / "snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    spawned: list[bool] = []
+    monkeypatch.setattr(job_worker.subprocess, "Popen", lambda *_a, **_k: spawned.append(True))
+
+    with pytest.raises(ValueError, match="Fast job snapshot is invalid"):
+        job_worker.run_job(
+            job_dir=job_dir,
+            runner=routing.RUNNER_PATH,
+            python=sys.executable,
+            hermes_exe=cli,
+            profile="claire",
+            purpose="implementation",
+            cwd=cwd,
+            timeout=60,
+        )
+    assert spawned == []
+    assert not (job_dir / "state.json").exists()
+
+
+def test_router_rejects_fast_snapshot_without_actual_runtime(tmp_path):
+    service = FakeService(tmp_path / "hermes")
+    with pytest.raises(routing.RoutingError, match="active host runtime"):
+        routing.Router(service, fast_snapshot=_fast_snapshot())
+
+
+def test_router_persists_only_validated_parent_fast_snapshot(tmp_path, monkeypatch):
+    _router, service, root, _popen_calls = _make_router(tmp_path, monkeypatch)
+    runtime = type("Runtime", (), {"parent_session_id": "parent-session", "ui_session_id": "ui-session"})()
+    router = routing.Router(service, runtime=runtime, fast_snapshot=_fast_snapshot())
+    result = _start(router, tmp_path)
+    job_dir = root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs" / result["job_id"]
+    snapshot = _load(job_dir / "snapshot.json")
+    assert snapshot["schema"] == 1
+    assert snapshot["fast_snapshot"] == _fast_snapshot()
+    assert "fast_snapshot" not in result
+
+
+@pytest.mark.parametrize(
+    "profile,parent",
+    [("other", "parent-session"), ("claire", "different-parent")],
+)
+def test_router_rejects_forged_fast_profile_or_parent(tmp_path, profile, parent):
+    service = FakeService(tmp_path / "hermes")
+    runtime = type("Runtime", (), {"parent_session_id": "parent-session"})()
+    with pytest.raises(routing.RoutingError, match="active profile and parent"):
+        routing.Router(service, runtime=runtime, fast_snapshot=_fast_snapshot(profile, parent))

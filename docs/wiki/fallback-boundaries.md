@@ -8,6 +8,8 @@ sources: [../../FALLBACK_PLAN.md, ../../PLAN.md, ../../.private/fallback-live-au
 
 # 폴백 운영 경계
 
+세션 Fast 승인·만료 상속과 런타임 복원/실제 응답 성공의 구분은 [[fast-inheritance]]를 참고한다. 플러그인은 코어 복귀/backoff를 감싸거나 private native 상태를 변경하지 않는다.
+
 Hermes에는 서로 다른 두 폴백 계층이 있고, 플러그인은 이를 **한 화면에서 분리해** 관리한다.
 
 - **일반 대화(native)**: `fallback_providers`(현재 키)와 `fallback_model`(구 키)를 합쳐 읽는다. 같은 턴의 전환 및 다음 턴의 primary 재시도는 Hermes 런타임 정책을 따른다. 사용량 재개 시각/쿨다운이 남아 있으면 다음 턴에도 fallback을 유지할 수 있으므로, 매 턴 원래 모델로 복귀한다고 보장하지 않는다. 일부 상속형 위임·자동 보조 호출도 이 체인을 참조할 수 있다. 추론 강도는 체인 항목이 아니라 모델별 override/전역 설정에서 다시 계산된다.

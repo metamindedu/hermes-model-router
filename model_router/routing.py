@@ -350,10 +350,34 @@ def _pid_alive(pid: Any) -> bool:
     return is_process_alive(pid)
 
 
+def _validate_routed_fast_snapshot(value: Any, *, profile: str, runtime: Any) -> dict[str, Any] | None:
+    """Bind an internal Fast snapshot to this host's exact profile and parent."""
+    if value is None:
+        return None
+    if runtime is None:
+        raise RoutingError("Fast inheritance requires an active host runtime")
+    parent_session_id = getattr(runtime, "parent_session_id", None)
+    if not isinstance(parent_session_id, str) or not parent_session_id:
+        raise RoutingError("Fast inheritance requires the exact active parent session")
+    try:
+        from .fast_inheritance import validate_fast_snapshot
+    except (ImportError, AttributeError) as exc:
+        raise RoutingError("Fast inheritance is unavailable for this registered plugin") from exc
+    try:
+        validated = validate_fast_snapshot(
+            value, profile=profile, parent_session_id=parent_session_id
+        )
+    except (TypeError, ValueError) as exc:
+        raise RoutingError("Fast snapshot does not match the active profile and parent") from exc
+    if not isinstance(validated, dict) or validated != value:
+        raise RoutingError("Fast snapshot validation did not preserve the exact intent")
+    return validated
+
+
 class Router:
     """Start and inspect detached jobs for the active Hermes profile only."""
 
-    def __init__(self, service: Any = None, *, runtime: Any = None):
+    def __init__(self, service: Any = None, *, runtime: Any = None, fast_snapshot: Any = None):
         if service is None:
             try:
                 from .service import Service
@@ -362,6 +386,9 @@ class Router:
             service = Service()
         self.service = service
         self.runtime = runtime
+        self.fast_snapshot = _validate_routed_fast_snapshot(
+            fast_snapshot, profile=_service_profile(service), runtime=runtime
+        )
 
     def start(
         self,
@@ -386,6 +413,9 @@ class Router:
             raise RoutingError("working directory does not exist")
 
         profile = _service_profile(self.service)
+        fast_snapshot = _validate_routed_fast_snapshot(
+            self.fast_snapshot, profile=profile, runtime=self.runtime
+        )
         _check_profile_drift(self.service, profile)
         config_method = getattr(self.service, "routing_config", None)
         if not callable(config_method):
@@ -495,6 +525,8 @@ class Router:
             "settings_digest": settings_digest,
             "model_provider_evidence": route_evidence,
         }
+        if fast_snapshot is not None:
+            snapshot["fast_snapshot"] = fast_snapshot
         cache = _build_job_cache(primary, fallbacks, fallback_enabled)
         snapshot_path = _job_file(job_dir, "snapshot.json")
         prompt_path = _job_file(job_dir, "prompt.txt")

@@ -489,6 +489,42 @@ def _scoped_home(profile: str) -> Path:
     return home
 
 
+def _validated_job_fast_snapshot(
+    snapshot: dict[str, Any], *, profile: str, home: Path
+) -> dict[str, Any] | None:
+    """Validate the immutable job provenance before creating any attempt process."""
+    if "fast_snapshot" not in snapshot:
+        return None
+    if type(snapshot.get("schema")) is not int or snapshot["schema"] != 1:
+        raise ValueError("Fast job snapshot must retain job schema 1")
+    if snapshot.get("profile") != profile:
+        raise ValueError("Fast job snapshot profile does not match the runner")
+    parent_session_id = snapshot.get("parent_session_id")
+    if not isinstance(parent_session_id, str) or not parent_session_id:
+        raise ValueError("Fast job snapshot has no exact original parent")
+    if not home.is_dir():
+        raise ValueError("Fast job profile home is unavailable")
+    plugin_root = Path(__file__).resolve(strict=True).parents[1]
+    if str(plugin_root) not in sys.path:
+        sys.path.insert(0, str(plugin_root))
+    try:
+        module = importlib.util.find_spec("model_router.fast_inheritance")
+        origin = Path(module.origin).resolve(strict=True) if module and module.origin else None
+        expected = (plugin_root / "model_router" / "fast_inheritance.py").resolve(strict=True)
+        if origin != expected:
+            raise ValueError("Fast validator origin is outside this plugin")
+        from model_router.fast_inheritance import validate_fast_snapshot
+        validated = validate_fast_snapshot(
+            snapshot["fast_snapshot"], profile=profile,
+            parent_session_id=parent_session_id,
+        )
+    except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Fast job snapshot is invalid for this profile and parent") from exc
+    if not isinstance(validated, dict) or validated != snapshot["fast_snapshot"]:
+        raise ValueError("Fast job snapshot did not preserve its exact intent")
+    return validated
+
+
 def _scoped_job_context(
     job_dir: Path, profile: str, purpose: str, route_class: str, cwd: Path
 ) -> tuple[Path, dict[str, Any]]:
@@ -518,6 +554,7 @@ def _scoped_job_context(
         or snapshot.get("cwd") != str(cwd.resolve())
     ):
         raise ValueError("job snapshot does not match scoped runner arguments")
+    _validated_job_fast_snapshot(snapshot, profile=profile, home=home)
     return resolved_job, snapshot
 
 
@@ -917,6 +954,7 @@ def _scoped_attempt(
     attempt_deadline: float | None,
     parent_session_id: str | None,
     fallback_attempt: bool,
+    fast_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool, int | None, bool | None]:
     attempt_id = str(uuid.uuid4())
     attempt_dir = job_dir / "attempts" / attempt_id
@@ -930,7 +968,7 @@ def _scoped_attempt(
     if os.name != "nt":
         os.chmod(attempt_dir, 0o700)
     request = {
-        "schema": 1,
+        "schema": 2 if fast_snapshot is not None else 1,
         "attempt_id": attempt_id,
         "job_id": job_id,
         "profile": profile,
@@ -955,6 +993,8 @@ def _scoped_attempt(
             ),
         ),
     }
+    if fast_snapshot is not None:
+        request["fast_snapshot"] = dict(fast_snapshot)
     result, timed_out, cleanup_verified, process_code = _invoke_scoped_adapter(
         request, attempt_dir, cwd, attempt_deadline
     )
@@ -1074,6 +1114,7 @@ def run_scoped_attempts(args: argparse.Namespace) -> int:
     job_dir, snapshot = _scoped_job_context(
         args.job_dir, args.profile, args.purpose, args.route_class, cwd
     )
+    fast_snapshot = snapshot.get("fast_snapshot") if "fast_snapshot" in snapshot else None
     home = _scoped_home(args.profile)
     route_raw = resolve_route(args.cache, args.route_class)
     primary_route = _runner_route(route_raw)
@@ -1134,6 +1175,7 @@ def run_scoped_attempts(args: argparse.Namespace) -> int:
         cwd=cwd, route=primary_route, route_class=args.route_class, mode=args.mode,
         task=task, toolsets=toolsets, attempt_deadline=primary_deadline,
         parent_session_id=primary_parent_session_id, fallback_attempt=False,
+        fast_snapshot=fast_snapshot,
     )
     if primary_request is None:
         raise RuntimeError("primary scoped attempt did not produce a request record")
@@ -1217,6 +1259,7 @@ def run_scoped_attempts(args: argparse.Namespace) -> int:
                 cwd=cwd, route=fallback_route, route_class=args.route_class, mode=args.mode,
                 task=task, toolsets=toolsets, attempt_deadline=deadline,
                 parent_session_id=primary_request["session_id"], fallback_attempt=True,
+                fast_snapshot=fast_snapshot,
             )
             if fallback_request is None:
                 raise RuntimeError("fallback scoped attempt did not produce a request record")

@@ -214,6 +214,43 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> bool:
     return False
 
 
+def _validate_job_fast_snapshot(snapshot: dict[str, Any], *, profile: str, home: Path) -> None:
+    """Fail closed on an additive Fast field before starting the routed runner."""
+    if "fast_snapshot" not in snapshot:
+        return
+    if type(snapshot.get("schema")) is not int or snapshot["schema"] != 1:
+        raise ValueError("Fast job snapshot must retain job schema 1")
+    if snapshot.get("profile") != profile:
+        raise ValueError("Fast job snapshot profile does not match the worker")
+    parent_session_id = snapshot.get("parent_session_id")
+    if not isinstance(parent_session_id, str) or not parent_session_id:
+        raise ValueError("Fast job snapshot has no exact original parent")
+    try:
+        if __package__:
+            from . import fast_inheritance
+        else:
+            plugin_root = Path(__file__).resolve(strict=True).parents[1]
+            if str(plugin_root) not in sys.path:
+                sys.path.insert(0, str(plugin_root))
+            import model_router.fast_inheritance as fast_inheritance
+            expected_origin = (plugin_root / "model_router" / "fast_inheritance.py").resolve(strict=True)
+            if Path(fast_inheritance.__file__).resolve(strict=True) != expected_origin:
+                raise ValueError("Fast validator origin is outside this plugin")
+        validated = fast_inheritance.validate_fast_snapshot(
+            snapshot["fast_snapshot"],
+            profile=profile,
+            parent_session_id=parent_session_id,
+        )
+    except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Fast job snapshot is invalid for this profile and parent") from exc
+    if not isinstance(validated, dict) or validated != snapshot["fast_snapshot"]:
+        raise ValueError("Fast job snapshot did not preserve its exact intent")
+    # home is the path authority established by _validated_job_dir; the shared
+    # snapshot schema intentionally carries profile and parent, never a caller path.
+    if not home.is_dir():
+        raise ValueError("Fast job profile home is unavailable")
+
+
 def run_job(
     *,
     job_dir: Path,
@@ -253,6 +290,9 @@ def run_job(
         or ("timeout_seconds" in snapshot and snapshot["timeout_seconds"] != timeout)
     ):
         raise ValueError("immutable job snapshot does not match worker arguments")
+    if "fast_snapshot" in snapshot:
+        profile_home = Path(os.environ["HERMES_HOME"]).expanduser().resolve()
+        _validate_job_fast_snapshot(snapshot, profile=profile, home=profile_home)
 
     started_at = _utc_now()
     state_path = _job_file(job_dir, "state.json")

@@ -33,9 +33,13 @@ PARENT_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 PROVIDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 REASONING = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
-REQUEST_FIELDS = frozenset({
+REQUEST_FIELDS_V1 = frozenset({
     "schema", "attempt_id", "job_id", "profile", "home", "cwd", "source", "task_id",
     "session_id", "parent_session_id", "route", "toolsets", "prompt", "budget_seconds",
+})
+REQUEST_FIELDS_V2 = REQUEST_FIELDS_V1 | {"fast_snapshot"}
+FAST_SNAPSHOT_FIELDS = frozenset({
+    "schema", "profile", "origin_session_id", "parent_session_id", "mode", "expires_at",
 })
 RESULT_FIELDS = frozenset({
     "schema", "attempt_id", "job_id", "session_id", "task_id", "requested_route", "completed",
@@ -84,11 +88,87 @@ def _no_symlink_path(path: Path, root: Path) -> bool:
     return True
 
 
+def _validate_fast_snapshot_shape(value: Any, *, profile: str, parent_session_id: Any) -> dict[str, Any]:
+    """Apply the shared schema's primitive/identity rules before plugin discovery."""
+    if not isinstance(value, dict) or set(value) != FAST_SNAPSHOT_FIELDS:
+        raise AttemptError("initialization_error", "Fast snapshot fields do not match schema 1")
+    if type(value.get("schema")) is not int or value["schema"] != 1:
+        raise AttemptError("initialization_error", "unsupported Fast snapshot schema")
+    if value.get("profile") != profile or not isinstance(parent_session_id, str):
+        raise AttemptError("initialization_error", "Fast snapshot profile or parent is invalid")
+    if value.get("parent_session_id") != parent_session_id or PARENT_SESSION_ID_RE.fullmatch(parent_session_id) is None:
+        raise AttemptError("initialization_error", "Fast snapshot parent does not match the immutable job")
+    origin = value.get("origin_session_id")
+    if not isinstance(origin, str) or PARENT_SESSION_ID_RE.fullmatch(origin) is None:
+        raise AttemptError("initialization_error", "Fast snapshot origin is invalid")
+    mode = value.get("mode")
+    if not isinstance(mode, str) or mode not in {"normal", "priority", "ultrafast", "auto", "cold"}:
+        raise AttemptError("initialization_error", "Fast snapshot mode is invalid")
+    expires_at = value.get("expires_at")
+    if mode in {"auto", "cold"}:
+        try:
+            finite_expiry = math.isfinite(float(expires_at))
+        except (OverflowError, TypeError, ValueError):
+            finite_expiry = False
+        if (
+            isinstance(expires_at, bool)
+            or not isinstance(expires_at, (int, float))
+            or not finite_expiry
+            or expires_at < 0
+        ):
+            raise AttemptError("initialization_error", "bounded Fast snapshot expiry is invalid")
+    elif expires_at is not None:
+        raise AttemptError("initialization_error", "static Fast snapshot must not have an expiry")
+    return dict(value)
+
+
+def _validate_attempt_fast_provenance(
+    request: dict[str, Any], *, home: Path, attempt_dir: Path
+) -> dict[str, Any]:
+    job_root = home / "plugin-data" / "model-router" / "jobs"
+    job_dir = job_root / request["job_id"]
+    snapshot_path = job_dir / "snapshot.json"
+    if (
+        snapshot_path.is_symlink()
+        or not snapshot_path.is_file()
+        or snapshot_path.resolve(strict=True).parent != job_dir.resolve(strict=True)
+        or not _no_symlink_path(snapshot_path, home)
+        or attempt_dir.parent.parent.resolve(strict=True) != job_dir.resolve(strict=True)
+        or snapshot_path.stat().st_size > 1024 * 1024
+    ):
+        raise AttemptError("initialization_error", "Fast job snapshot path is invalid")
+    try:
+        job_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AttemptError("initialization_error", "Fast job snapshot is unreadable") from exc
+    if (
+        not isinstance(job_snapshot, dict)
+        or type(job_snapshot.get("schema")) is not int
+        or job_snapshot["schema"] != 1
+        or job_snapshot.get("job_id") != request["job_id"]
+        or job_snapshot.get("profile") != request["profile"]
+        or "fast_snapshot" not in job_snapshot
+        or job_snapshot.get("fast_snapshot") != request.get("fast_snapshot")
+    ):
+        raise AttemptError("initialization_error", "attempt Fast snapshot differs from immutable job provenance")
+    return _validate_fast_snapshot_shape(
+        request.get("fast_snapshot"),
+        profile=request["profile"],
+        parent_session_id=job_snapshot.get("parent_session_id"),
+    )
+
+
 def _validate_request(request: Any, request_path: Path | None = None) -> tuple[dict[str, Any], Path, Path]:
-    if not isinstance(request, dict) or set(request) != REQUEST_FIELDS:
-        raise AttemptError("initialization_error", "request fields do not match schema 1")
-    if isinstance(request.get("schema"), bool) or request.get("schema") != SCHEMA:
+    if not isinstance(request, dict):
+        raise AttemptError("initialization_error", "request must contain an object")
+    schema = request.get("schema")
+    if type(schema) is not int or schema not in {1, 2}:
         raise AttemptError("initialization_error", "unsupported request schema")
+    expected_fields = REQUEST_FIELDS_V1 if schema == 1 else REQUEST_FIELDS_V2
+    if set(request) != expected_fields:
+        raise AttemptError("initialization_error", f"request fields do not match schema {schema}")
+    if schema == 1 and "fast_snapshot" in request:
+        raise AttemptError("initialization_error", "schema 1 cannot claim Fast inheritance")
     if not _canonical_uuid(request.get("attempt_id")) or not _canonical_uuid(request.get("job_id")):
         raise AttemptError("initialization_error", "attempt and job IDs must be canonical UUIDs")
     profile = request.get("profile")
@@ -172,6 +252,11 @@ def _validate_request(request: Any, request_path: Path | None = None) -> tuple[d
         raise AttemptError("initialization_error", "request artifact is unreadable") from exc
     if on_disk != request:
         raise AttemptError("initialization_error", "request object differs from its bound artifact")
+    validated_fast_snapshot = None
+    if schema == 2:
+        validated_fast_snapshot = _validate_attempt_fast_provenance(
+            request, home=home, attempt_dir=attempt_dir
+        )
     if expected_result.is_symlink() or not _no_symlink_path(attempt_dir, home):
         raise AttemptError("initialization_error", "result path contains a symlink")
     # Keep normalized paths only in memory; the request artifact remains the source of truth.
@@ -181,6 +266,8 @@ def _validate_request(request: Any, request_path: Path | None = None) -> tuple[d
     normalized["budget_seconds"] = budget
     normalized["route"] = dict(route)
     normalized["toolsets"] = list(toolsets)
+    if validated_fast_snapshot is not None:
+        normalized["fast_snapshot"] = validated_fast_snapshot
     return normalized, request_path, expected_result
 
 
@@ -259,6 +346,39 @@ def _dependency(dependencies: Any, name: str, default: Any = None) -> Any:
     if isinstance(dependencies, dict):
         return dependencies.get(name, default)
     return getattr(dependencies, name, default)
+
+
+def _without_stale_fast_options(value: Any) -> Any:
+    """Remove profile-paid Fast hints while preserving unrelated runtime overrides."""
+    if not isinstance(value, dict):
+        return value
+    cleaned = copy.deepcopy(value)
+    for key in ("service_tier", "speed"):
+        cleaned.pop(key, None)
+    extra_body = cleaned.get("extra_body")
+    if isinstance(extra_body, dict):
+        for key in ("service_tier", "speed"):
+            extra_body.pop(key, None)
+    return cleaned
+
+
+def _active_fast_binding_matches(module: types.ModuleType, request: dict[str, Any]) -> bool:
+    """Do not run a managed attempt if the verified controller did not bind it."""
+    try:
+        binding_var = getattr(module, "_ROUTED_FAST", None)
+        home_key = getattr(module, "_home_key", None)
+        current = binding_var.get() if callable(getattr(binding_var, "get", None)) else None
+        expected_home = Path(request["home"]).resolve(strict=True)
+        return (
+            current is not None
+            and callable(home_key)
+            and current.profile == request["profile"]
+            and current.home_key == home_key(expected_home)
+            and current.session_id == request["session_id"]
+            and current.snapshot == request["fast_snapshot"]
+        )
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
 
 
 def _public_progress_class() -> Any:
@@ -516,6 +636,83 @@ def _resolve_registered_observer(profile_home: Path, plugin_root: Path) -> types
         raise AttemptError("initialization_error", "profile-scoped observer registration could not be verified") from exc
 
 
+def _resolve_registered_fast_inheritance(
+    profile_home: Path, plugin_root: Path, observer: types.ModuleType, profile: str
+) -> types.ModuleType:
+    """Resolve Fast binding only from this profile's already registered plugin namespace."""
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        profile_home = profile_home.resolve(strict=True)
+        plugin_root = plugin_root.resolve(strict=True)
+        manager = get_plugin_manager()
+        if Path(manager.home_path).resolve(strict=True) != profile_home:
+            raise AttemptError("initialization_error", "Fast controller belongs to a different Hermes profile")
+        loaded = manager._plugins.get("model-router")
+        package = getattr(loaded, "module", None)
+        if (
+            loaded is None or not loaded.enabled or loaded.error
+            or not isinstance(package, types.ModuleType)
+            or sys.modules.get(getattr(package, "__name__", "")) is not package
+        ):
+            raise AttemptError("initialization_error", "registered Fast controller is unavailable")
+        expected_init = (plugin_root / "__init__.py").resolve(strict=True)
+        if (
+            Path(getattr(package, "__file__", "")).resolve(strict=True) != expected_init
+            or [Path(item).resolve(strict=True) for item in getattr(package, "__path__", ())]
+            != [plugin_root]
+        ):
+            raise AttemptError("initialization_error", "registered Fast plugin root is not trusted")
+        package_name = package.__name__
+        if observer.__name__ != f"{package_name}.model_router.attempt_observer":
+            raise AttemptError("initialization_error", "Fast and observer modules do not share a registered namespace")
+        expected_origin = (plugin_root / "model_router" / "fast_inheritance.py").resolve(strict=True)
+        candidates = [
+            (f"{package_name}.model_router.fast_inheritance", expected_origin),
+        ]
+        registered = []
+        for name, origin_path in candidates:
+            module = sys.modules.get(name)
+            if module is None:
+                continue
+            origin = getattr(getattr(module, "__spec__", None), "origin", None)
+            if (
+                not isinstance(module, types.ModuleType)
+                or not origin
+                or Path(origin).resolve(strict=True) != origin_path
+            ):
+                raise AttemptError("initialization_error", "registered Fast module origin is untrusted")
+            registered.append(module)
+        if len(registered) != 1:
+            raise AttemptError("initialization_error", "registered Fast module is missing or ambiguous")
+        module = registered[0]
+        for name in ("validate_fast_snapshot", "bind_routed_fast_snapshot"):
+            function = getattr(module, name, None)
+            implementation = getattr(function, "__wrapped__", function)
+            if (
+                not callable(function)
+                or getattr(function, "__module__", None) != module.__name__
+                or getattr(implementation, "__module__", None) != module.__name__
+                or getattr(implementation, "__globals__", None) is not module.__dict__
+            ):
+                raise AttemptError("initialization_error", "registered Fast module interface is invalid")
+        controller_getter = getattr(module, "_registered_controller", None)
+        controller = controller_getter(profile_home, profile) if callable(controller_getter) else None
+        if (
+            controller is None
+            or type(controller).__module__ != module.__name__
+            or getattr(controller, "profile", None) != profile
+            or Path(getattr(controller, "home", "")).resolve(strict=True) != profile_home
+            or getattr(controller, "closed", True) is True
+        ):
+            raise AttemptError("initialization_error", "registered Fast controller does not own this profile home")
+        return module
+    except AttemptError:
+        raise
+    except Exception as exc:
+        raise AttemptError("initialization_error", "registered Fast binding could not be verified") from exc
+
+
 def _default_prepare_runtime(request: dict[str, Any]) -> dict[str, Any]:
     """Hermes-supported profile/bootstrap/config/runtime setup for the live adapter."""
     core_root = _trusted_core_root()
@@ -575,6 +772,18 @@ def _default_prepare_runtime(request: dict[str, Any]) -> dict[str, Any]:
     from hermes_cli.plugins import discover_plugins
     discover_plugins()
     observer_module = _resolve_registered_observer(Path(request["home"]), plugin_root)
+    fast_inheritance_module = None
+    if request.get("schema") == 2:
+        fast_inheritance_module = _resolve_registered_fast_inheritance(
+            Path(request["home"]), plugin_root, observer_module, request["profile"]
+        )
+        validated_fast = fast_inheritance_module.validate_fast_snapshot(
+            request["fast_snapshot"],
+            profile=request["profile"],
+            parent_session_id=request["fast_snapshot"]["parent_session_id"],
+        )
+        if validated_fast != request["fast_snapshot"]:
+            raise AttemptError("initialization_error", "registered Fast validator changed the immutable intent")
     from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
     ensure_mcp_discovery_before_agent_build(logger=__import__("logging").getLogger(__name__), single_query=True)
 
@@ -628,6 +837,7 @@ def _default_prepare_runtime(request: dict[str, Any]) -> dict[str, Any]:
         "plugin_root": plugin_root,
         "core_root": core_root,
         "observer": observer_module,
+        "fast_inheritance": fast_inheritance_module,
     }
 
 
@@ -754,6 +964,32 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
                 observer = prepared.get("observer")
             if observer is None:
                 raise AttemptError("initialization_error", "profile-scoped observer is unavailable")
+            fast_module = None
+            fast_binding = None
+            if request.get("schema") == 2:
+                fast_module = _resolve_registered_fast_inheritance(
+                    Path(request["home"]), Path(__file__).resolve().parents[1], observer,
+                    request["profile"],
+                )
+                prepared_fast = prepared.get("fast_inheritance")
+                if prepared_fast is not None and prepared_fast is not fast_module:
+                    raise AttemptError("initialization_error", "runtime Fast module differs from registered controller")
+                validated_fast = fast_module.validate_fast_snapshot(
+                    request["fast_snapshot"],
+                    profile=request["profile"],
+                    parent_session_id=request["fast_snapshot"]["parent_session_id"],
+                )
+                if validated_fast != request["fast_snapshot"]:
+                    raise AttemptError("initialization_error", "Fast attempt differs from immutable job provenance")
+                fast_binding = fast_module.bind_routed_fast_snapshot(
+                    request["fast_snapshot"],
+                    session_id=request["session_id"],
+                    home=Path(request["home"]).resolve(strict=True),
+                )
+                if not callable(getattr(fast_binding, "__enter__", None)) or not callable(
+                    getattr(fast_binding, "__exit__", None)
+                ):
+                    raise AttemptError("initialization_error", "registered Fast binding is not a context manager")
             reset = getattr(observer, "reset_for_tests", None)
             if callable(reset):
                 reset()
@@ -804,7 +1040,10 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
                 "api_mode": runtime.get("api_mode"),
                 "model": request["route"]["model"],
                 "credential_pool": runtime.get("credential_pool"),
-                "request_overrides": runtime.get("request_overrides"),
+                "request_overrides": (
+                    _without_stale_fast_options(runtime.get("request_overrides"))
+                    if request.get("schema") == 2 else runtime.get("request_overrides")
+                ),
                 "fallback_model": [],
                 "session_id": request["session_id"],
                 "parent_session_id": request["parent_session_id"],
@@ -822,6 +1061,10 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
                 "interim_assistant_callback": interim_assistant_callback,
                 "tool_start_callback": tool_start_callback,
             })
+            if request.get("schema") == 2:
+                # The inherited snapshot, never profile paid tier config, is the sole
+                # managed Fast authority. The request middleware binds it per turn.
+                options["service_tier"] = None
             agent = agent_type(**options)
             # Match native delegate_tool before the first lazy session-row write.
             # source=subagent alone does not exclude a child from resume traversal.
@@ -833,7 +1076,13 @@ def run_attempt(request: dict, dependencies: Any = None) -> dict[str, Any]:
             runner = getattr(agent, "run_conversation", None)
             if not callable(runner):
                 raise AttemptError("initialization_error", "Hermes AIAgent does not expose run_conversation")
-            run_result = runner(request["prompt"], task_id=request["task_id"])
+            if fast_binding is not None:
+                with fast_binding:
+                    if fast_module is None or not _active_fast_binding_matches(fast_module, request):
+                        raise AttemptError("initialization_error", "registered Fast controller did not bind this routed session")
+                    run_result = runner(request["prompt"], task_id=request["task_id"])
+            else:
+                run_result = runner(request["prompt"], task_id=request["task_id"])
             if not isinstance(run_result, dict):
                 raise AttemptError("provider_error", "Hermes returned an invalid turn result")
             final_response = run_result.get("final_response") or ""

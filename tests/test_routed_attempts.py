@@ -357,6 +357,46 @@ def test_approved_exhaustion_runs_one_fresh_same_role_sdk_attempt(tmp_path, monk
     assert not list((fixture["job_dir"] / "attempts").rglob("config.yaml"))
 
 
+def test_fast_intent_is_immutable_across_primary_fallback_attempt_lineage(tmp_path, monkeypatch):
+    original_parent = "native-parent-A"
+    fixture = _fixture(tmp_path, parent_session_id=original_parent)
+    fast_snapshot = {
+        "schema": 1,
+        "profile": "claire",
+        "origin_session_id": "fast-origin-A",
+        "parent_session_id": original_parent,
+        "mode": "auto",
+        "expires_at": 2_000_000_000.0,
+    }
+    job_snapshot_path = fixture["job_dir"] / "snapshot.json"
+    job_snapshot = json.loads(job_snapshot_path.read_text(encoding="utf-8"))
+    job_snapshot["fast_snapshot"] = fast_snapshot
+    job_snapshot_path.write_text(json.dumps(job_snapshot), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(fixture["home"]))
+    _commands, requests = _install_fake_adapter(
+        monkeypatch,
+        [
+            _exhaustion,
+            lambda request: _result(request, completed=True, final_response="fallback answer"),
+        ],
+    )
+
+    assert runner.run_scoped_attempts(_args(fixture)) == 0
+    assert len(requests) == 2
+    assert [request["schema"] for request in requests] == [2, 2]
+    assert all(request["fast_snapshot"] == fast_snapshot for request in requests)
+    assert all("service_tier" not in request and "speed" not in request for request in requests)
+    assert requests[0]["parent_session_id"] == original_parent
+    assert requests[1]["parent_session_id"] == requests[0]["session_id"]
+    assert all(request["fast_snapshot"]["parent_session_id"] == original_parent for request in requests)
+    for request in requests:
+        attempt_dir = fixture["job_dir"] / "attempts" / request["attempt_id"]
+        validated, _request_path, _result_path = __import__(
+            "model_router.scoped_agent", fromlist=["_validate_request"]
+        )._validate_request(request, attempt_dir / "attempt-request.json")
+        assert validated["fast_snapshot"] == fast_snapshot
+
+
 def test_historical_snapshot_without_parent_session_id_keeps_standalone_primary(tmp_path, monkeypatch):
     fixture = _fixture(tmp_path)
     snapshot_path = fixture["job_dir"] / "snapshot.json"

@@ -34,7 +34,9 @@ def test_cached_telegram_dispatch_retains_native_process_parent(monkeypatch, sur
         def routing_config(self, profile): return {'enabled': True}
         def active_profile(self): return 'wallace'
     class Router:
-        def __init__(self, service): self.runtime = None
+        def __init__(self, service, *, runtime=None, fast_snapshot=None):
+            self.runtime = runtime
+            assert fast_snapshot is None  # fake context exposes no Fast controller authority
         def start(self, *args, **kwargs):
             observed.append((self.runtime.parent_session_id, self.runtime.session_key,
                              session_context.get_session_env('HERMES_SESSION_ID')))
