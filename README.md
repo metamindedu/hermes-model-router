@@ -1,10 +1,73 @@
 # Hermes Model Router
 
+Profile-scoped model settings and opt-in Heavy/Light task routing for **Hermes Agent**, with a native Desktop settings page. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
+
+[한국어 안내](#한국어-안내) · [Installation](INSTALL.md) · [Security and disclosures](SECURITY.md) · [MIT license](LICENSE)
+
+## Install
+
+Install the unified Python/Desktop package into each existing profile where you want to use it:
+
+```text
+hermes --profile default plugins install metamindedu/hermes-model-router
+```
+
+The public repository does not require GitHub login. Provider authentication remains with Hermes; this package does not include accounts, keys, profile configuration, conversations or job records. Review the install scanner and dependency prompts. Python activation, Desktop UI activation and routing opt-in are separate. Installing does **not** enable routing, change your models or authorize paid fallback.
+
+For reproducibility, use a reviewed full commit SHA with `--ref <40-character-SHA>`. Catalog installation by name is available **only after** the owner-submitted entry is reviewed and merged by a Hermes maintainer; a public repository or an open PR is not a catalog listing.
+
+## Features
+
+- Manage main, delegation, compression and title models across explicitly selected installed profiles.
+- Configure separate conversation, routed-job and native-delegation fallback scopes; preserve untouched scopes.
+- Choose Heavy and Light routes independently of routing-enabled profile membership. Use Heavy for planning and independent semantic review; Light for bounded implementation and mechanical work.
+- Set independent native-child, Light and Heavy total-runtime budgets. The UI uses minutes; APIs and persistence use seconds. Native inactivity timeouts are a different policy.
+- Inherit the **actual parent session's Fast selection** into new native and routed children on supported first-party OpenAI API/Codex paths. Preserve the original bounded expiry; strip inherited paid fields on unsupported/fallback routes.
+- Track routed work in the existing Background rail with bounded, sanitized activity and native cancellation/completion handling. Verified route identity is not a semantic GO verdict.
+- Apply settings through explicit scoped saves, revision/CAS checks, one-shot plans and exact readback. Ambiguous writes are not automatically repeated.
+
+## First use
+
+![Actual Desktop Fast-inheritance notice, cropped to exclude profile names and conversations](docs/fast-inheritance.png)
+
+Enable the package's Desktop half and open **모델 및 라우팅** (Models and routing). Load a profile, review actual provider/model availability, select routing-enabled profiles and save only your intended scope. Model/fallback/copy target selections are independent; an initially checked target list does not itself authorize writes. Start a new session for updated Python tools. Existing model presets are editable examples, not live availability recommendations.
+
+## Security and cost disclosures
+
+This plugin reads installed Hermes profile configuration and its own model-routing/job data. Explicit saves invoke the supported Hermes config CLI and may update selected profiles. Opted-in routed jobs launch background Hermes processes with normal tools, configured providers and MCP integrations; prompts, results and job evidence are stored under that profile's plugin data. Treat those artifacts as private. The manual historical source-repair script can modify exact validated session rows only when explicitly applied.
+
+It uses Hermes's **own** provider/authentication layer, not another vendor CLI's token store. Normal Hermes-owned OAuth refresh may occur. It has no separate credential store, telemetry endpoint, self-updater or automatic approval bypass. Provider/MCP network access is inherited from the user's Hermes setup. Read [SECURITY.md](SECURITY.md) before enabling routing or multi-profile settings writes.
+
+Fast and fallback requests can increase API charges or subscription-credit usage. A requested tier does not prove the provider's processing tier or billing. A native "primary restored" notice means the request path was restored, not that a successful model response was observed. Core retry/backoff remains core-owned.
+
+## Compatibility and current limitations
+
+- The Desktop UI is currently **Korean-first**; the package overview and policy skill include English guidance.
+- Runtime/SDK regression and Desktop validation were performed on Windows. Linux/macOS installation/runtime support has not been fully exercised; the catalog entry must disclose that scope.
+- Requires a Hermes build supporting unified Python/Desktop packages and the request/tool middleware used here. Features whose supported native hooks are unavailable do not gain an alternate private-core patch.
+- Fast inheritance does not cover transports that bypass the observed request middleware, including `codex_app_server`. Native/routed children keep their creation-time policy; later parent toggles are not retroactive.
+- Python tools in existing sessions may remain deferred until a new session. Mid-run activation is not a forced replacement of every existing tool callback.
+- Install scanning can report CAUTION for fixed subprocess execution and the manual repair script. Admission/installation must inspect those warnings; the plugin does not disable the scanner.
+
+## Development
+
+Use an isolated test environment with the corresponding Hermes source/dependencies available. The full native integration suite is host-dependent; do not interpret a missing Hermes checkout as runtime success.
+
+```text
+node --test tests/*.mjs
+hermes plugins validate . --json
+hermes plugins doctor . --ci
+```
+
+Release dependencies are bounded (`PyYAML>=6,<7`). No credentials or local state should be committed. Install/update only through Hermes; catalog updates require a new reviewed SHA-pin PR. Licensed under MIT, copyright NewMetaW.
+
+## 한국어 안내
+
 Hermes Desktop의 **모델 및 라우팅** 페이지에서 프로필별 모델과 코딩·복잡한 비코딩 판단 작업의 Heavy/Light 경로를 관리하는 네이티브 플러그인입니다. 설정 관리와 라우팅 사용 여부는 별개입니다.
 
 ## 다른 PC에 설치
 
-개인 비공개 저장소 `metamindedu/hermes-model-router`에서 설치합니다. 새 PC에서 GitHub 접근 권한과 Hermes 모델 인증을 준비한 뒤 다음 명령을 실행합니다.
+공개 저장소 `metamindedu/hermes-model-router`에서 설치합니다. GitHub 로그인 없이 설치할 수 있으며, 새 PC의 Hermes 모델 제공자 인증은 별도로 준비합니다.
 
 ```text
 hermes --profile default plugins install metamindedu/hermes-model-router

@@ -1,6 +1,6 @@
 name: model-router
-version: 0.4.0
-description: "프로필별 모델 설정과 안전한 작업 라우팅 — 코딩·복잡한 비코딩 판단, 실행 검증, 동봉 스킬"
+version: 0.4.1
+description: "Profile model settings, opt-in Heavy/Light task routing, fallback controls, runtime limits, and session Fast inheritance"
 author: NewMetaW
 provides_tools:
   - coding_route
@@ -12,3 +12,7 @@ provides_hooks:
   - post_tool_call
   - subagent_start
   - subagent_stop
+provides_middleware:
+  - tool_execution
+  - llm_request
+requires_env: []

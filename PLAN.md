@@ -1,5 +1,9 @@
 # Model Router implementation contract
 
+## 2026-10-10: Public repository and catalog submission
+
+Latest explicit user request authorizes pushing the reviewed Model Router changes, making metamindedu/hermes-model-router public, and submitting its pinned community entry to the official Hermes catalog. User selected MIT. This supersedes historical push pauses only for this plugin. Audit all reachable Git history and the tracked package for secrets before publication; do not publish ignored private receipts, profile credentials/state, conversations or job artifacts. Prepare truthful bounded dependencies/capability declarations and English overview/security disclosures; keep the existing reviewed runtime unchanged. Verify public remote SHA and anonymous fresh-home installation. Catalog admission is a maintainer-merged PR, not local validation or PR submission. No core edits, production model/billing tests, default activation repair, profile settings writes or shared restart in this publication task.
+
 ## 2026-10-10: Plugin-only Fast inheritance and fallback clarification
 
 Current user requests inheritance of the MAIN SESSION Fast selection by BOTH native delegate_task and coding_route children, plus fallback-recovery improvements possible without core edits. The user explicitly selected common-code rollout to ALL already-installed profiles after implementation/verification/independent Heavy review. Preserve models, fallback consent/chains, time limits, membership, config/auth bytes and unrelated work. No core modifications, private native-state writes/monkeypatch, shared restart, forced session reload, new daemon/panel/recovery button, or GitHub push under this request. Exact Git baseline rollback is sufficient; no ad-hoc backup.
