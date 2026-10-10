@@ -112,10 +112,13 @@ def _validate_legacy_attempt_job_binding(data: dict[str, Any], *, home: Path, pr
     job_dir = home / "plugin-data" / "model-router" / "jobs" / data["job_id"]
     snapshot_path = job_dir / "snapshot.json"
     try:
+        try:
+            snapshot_path.lstat()
+        except FileNotFoundError:
+            # Only confirmed absence is legacy; metadata errors hit the outer denial.
+            return True
         if snapshot_path.is_symlink():
             return False
-        if not snapshot_path.exists():
-            return True
         if (
             not snapshot_path.is_file()
             or snapshot_path.resolve(strict=True).parent != job_dir.resolve(strict=True)

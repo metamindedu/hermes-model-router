@@ -2,6 +2,8 @@
 from contextvars import copy_context
 from types import SimpleNamespace
 import json
+from pathlib import Path
+import errno
 
 import pytest
 
@@ -89,3 +91,76 @@ def test_observer_rejects_schema_downgrade_for_a_fast_job(attempt, monkeypatch):
     observed = attempt_observer.snapshot()
     assert observed['observed_routes'] == []
     assert observed['evidence_complete'] is False
+
+
+def _check_legacy_boundary(attempt, monkeypatch, consumer, *, rejected):
+    if consumer == 'adapter':
+        if rejected:
+            prepared = []
+            result = scoped_agent.run_attempt(attempt['request'], dependencies={
+                'prepare_runtime': lambda request: prepared.append(request),
+            })
+            assert result['error']['kind'] == 'initialization_error'
+            assert prepared == []
+        else:
+            validated, _, _ = scoped_agent._validate_request(attempt['request'], attempt['request_path'])
+            assert validated['schema'] == 1
+    else:
+        attempt_observer.reset_for_tests()
+        monkeypatch.setenv('HERMES_HOME', str(attempt['home']))
+        monkeypatch.setenv('HERMES_PROFILE', 'claire')
+        monkeypatch.setenv('MODEL_ROUTER_ATTEMPT_REQUEST', str(attempt['request_path']))
+        _emit_api_events(attempt)
+        observed = attempt_observer.snapshot()
+        assert bool(observed['observed_routes']) is not rejected
+        if rejected:
+            assert observed['evidence_complete'] is False
+        attempt_observer.reset_for_tests()
+
+
+@pytest.mark.parametrize('consumer', ['adapter', 'observer'])
+@pytest.mark.parametrize('error_kind', ['permission', 'io'])
+def test_legacy_snapshot_metadata_error_cannot_masquerade_as_missing(attempt, monkeypatch, consumer, error_kind):
+    _normal_fast_job(attempt)
+    target = attempt['attempt_dir'].parent.parent / 'snapshot.json'
+    original_lstat, original_exists, original_symlink = Path.lstat, Path.exists, Path.is_symlink
+    def broken_lstat(path, *args, **kwargs):
+        if path == target:
+            if error_kind == 'permission':
+                raise PermissionError(errno.EACCES, 'fixture metadata denied')
+            raise OSError(errno.EIO, 'fixture metadata I/O failure')
+        return original_lstat(path, *args, **kwargs)
+    # Model pathlib's lossy boolean helpers without hiding unrelated path errors.
+    monkeypatch.setattr(Path, 'exists', lambda path: False if path == target else original_exists(path))
+    monkeypatch.setattr(Path, 'is_symlink', lambda path: False if path == target else original_symlink(path))
+    monkeypatch.setattr(Path, 'lstat', broken_lstat)
+    _check_legacy_boundary(attempt, monkeypatch, consumer, rejected=True)
+
+
+@pytest.mark.parametrize('consumer', ['adapter', 'observer'])
+@pytest.mark.parametrize('snapshot_present', [False, True])
+def test_unambiguous_missing_and_normal_legacy_snapshot_stay_compatible(attempt, monkeypatch, consumer, snapshot_present):
+    target = attempt['attempt_dir'].parent.parent / 'snapshot.json'
+    if snapshot_present:
+        target.write_text(json.dumps({'schema': 1, 'job_id': attempt['request']['job_id'], 'profile': 'claire'}), encoding='utf-8')
+    else:
+        with pytest.raises(FileNotFoundError):
+            target.lstat()
+    _check_legacy_boundary(attempt, monkeypatch, consumer, rejected=False)
+
+
+@pytest.mark.parametrize('consumer', ['adapter', 'observer'])
+@pytest.mark.parametrize('error_kind', ['permission', 'utf8'])
+def test_legacy_snapshot_unreadable_or_invalid_utf8_fails_closed(attempt, monkeypatch, consumer, error_kind):
+    target = attempt['attempt_dir'].parent.parent / 'snapshot.json'
+    if error_kind == 'utf8':
+        target.write_bytes(b'\xff\xfe\x00')
+    else:
+        target.write_text(json.dumps({'schema': 1, 'job_id': attempt['request']['job_id'], 'profile': 'claire'}), encoding='utf-8')
+        original_read_text = Path.read_text
+        def broken_read_text(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError(errno.EACCES, 'fixture read denied')
+            return original_read_text(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'read_text', broken_read_text)
+    _check_legacy_boundary(attempt, monkeypatch, consumer, rejected=True)

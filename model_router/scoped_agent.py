@@ -169,10 +169,15 @@ def _validate_legacy_attempt_job_binding(
     """
     job_dir = home / "plugin-data" / "model-router" / "jobs" / request["job_id"]
     snapshot_path = job_dir / "snapshot.json"
+    try:
+        snapshot_path.lstat()
+    except FileNotFoundError:
+        # Only confirmed absence is a legacy job; boolean exists() hides I/O errors.
+        return
+    except OSError as exc:
+        raise AttemptError("initialization_error", "legacy job snapshot metadata is unreadable") from exc
     if snapshot_path.is_symlink():
         raise AttemptError("initialization_error", "legacy job snapshot must not be linked")
-    if not snapshot_path.exists():
-        return
     if (
         not snapshot_path.is_file()
         or snapshot_path.resolve(strict=True).parent != job_dir.resolve(strict=True)
