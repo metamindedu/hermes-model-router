@@ -1099,3 +1099,49 @@ def test_schema2_malformed_expiry_is_rejected_without_float_overflow(attempt):
     attempt["request_path"].write_text(json.dumps(request), encoding="utf-8")
     with pytest.raises(scoped_agent.AttemptError, match="expiry"):
         scoped_agent._validate_request(request, attempt["request_path"])
+
+
+def test_schema1_attempt_keeps_valid_legacy_job_snapshot_compatibility(attempt):
+    job_dir = attempt["attempt_dir"].parent.parent
+    (job_dir / "snapshot.json").write_text(json.dumps({
+        "schema": 1,
+        "job_id": attempt["request"]["job_id"],
+        "profile": attempt["request"]["profile"],
+        "parent_session_id": None,
+    }), encoding="utf-8")
+    validated, _path, _result = scoped_agent._validate_request(
+        attempt["request"], attempt["request_path"],
+    )
+    assert validated["schema"] == 1
+
+
+def test_schema1_attempt_rejects_malformed_linked_job_snapshot_before_runtime(attempt):
+    job_dir = attempt["attempt_dir"].parent.parent
+    (job_dir / "snapshot.json").write_text("{malformed", encoding="utf-8")
+    prepared = []
+    result = scoped_agent.run_attempt(
+        attempt["request"],
+        dependencies={"prepare_runtime": lambda request: prepared.append(request)},
+    )
+    assert result["error"]["kind"] == "initialization_error"
+    assert prepared == []
+
+
+def test_schema1_attempt_rejects_symlinked_job_snapshot_before_runtime(attempt):
+    job_dir = attempt["attempt_dir"].parent.parent
+    outside = attempt["base"] / "external-job-snapshot.json"
+    outside.write_text(
+        json.dumps({"schema": 1, "job_id": attempt["request"]["job_id"], "profile": "claire"}),
+        encoding="utf-8",
+    )
+    try:
+        (job_dir / "snapshot.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable in this test environment: {exc}")
+    prepared = []
+    result = scoped_agent.run_attempt(
+        attempt["request"],
+        dependencies={"prepare_runtime": lambda request: prepared.append(request)},
+    )
+    assert result["error"]["kind"] == "initialization_error"
+    assert prepared == []

@@ -165,15 +165,22 @@ def test_routed_snapshot_schema_to_registered_native_request_middleware(
     assert persisted_request["parent_session_id"] == parent_session_id
 
     monkeypatch.setattr(fast_module, "_native_resolver", lambda **_kwargs: {"service_tier": "priority"})
-    monkeypatch.setattr(fast_module, "_get_active_parent", lambda: SimpleNamespace(session_id=requests[0]["session_id"]))
+    stats: dict[str, Any] = {"close": 0, "release": 0, "options": None, "agent": None}
+    monkeypatch.setattr(fast_module, "_get_active_parent", lambda: stats["agent"])
     observed_requests: list[dict[str, Any]] = []
-    stats: dict[str, Any] = {"close": 0, "release": 0, "options": None}
     api_mode = "chat_completions"
 
     class FakeAgent:
         def __init__(self, **kwargs):
             stats["options"] = kwargs
+            stats["agent"] = self
             self.kwargs = kwargs
+            self.session_id = kwargs["session_id"]
+            self.model = kwargs["model"]
+            self.provider = kwargs["provider"]
+            self.base_url = kwargs["base_url"]
+            self.api_mode = kwargs["api_mode"]
+            self.platform = kwargs["platform"]
             self._session_init_model_config = {}
 
         def run_conversation(self, prompt, *, task_id):

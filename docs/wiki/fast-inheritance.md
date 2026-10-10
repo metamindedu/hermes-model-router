@@ -26,6 +26,9 @@ native runtime-restored 알림은 메인 요청 경로가 복원됐다는 의미
 
 - 실제 디렉터리 플러그인 로더 namespace와 등록 middleware가 동일한 상속 상태 인스턴스를 사용해야 한다. 별도 import의 동명이인 전역 상태를 성공으로 보고하지 않는다.
 - 요청한 tier와 실제 제공자 처리 tier·청구는 다르다. native middleware와 실제 SDK 직렬화 MockTransport 검증은 요청 전달 증거이며 live 과금·복귀 성공 증거가 아니다.
+- 활성 agent의 모델·제공자·전송과 middleware 문맥뿐 아니라 실제 요청 model/extra_body.model도 일치해야 유료 등급을 추가한다. Codex alias는 기존 native 메타데이터가 인정하는 관계만 허용한다.
+- 전역 native child 캐시의 TTL/크기 정리가 유료 옵션 정제를 해제하면 안 된다. native 생성 dispatch가 복사한 문맥에 정확한 child 계보 증거를 유지하고, stop/unload·외부 프로필·다른 child ID에 적용하지 않는다. 실제 생성 dispatch 없이 hook만 호출한 빈 캐시 테스트는 이 경계를 검증하지 못한다.
+- 새 Fast job은 구형 schema 1 attempt로 낮춰 실행할 수 없다. consumer와 observer가 연결된 job의 의도를 함께 확인한다. Fast 필드가 없는 실제 legacy job의 호환성은 별개로 유지한다.
 - 테스트는 현재 PM 관리형 Python/의존성 generation을 확인한다. 과거 checkout .venv에서 pytest가 먼저 import되면 re-exec를 막으면서 다른 ABI 의존성이 활성화되어 compiled-extension 오류가 날 수 있다. 테스트 의존성을 운영 runtime에 설치하지 않는다.
 
 관련: [[index]], [[fallback-boundaries]], [[profile-boundaries]].

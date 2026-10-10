@@ -139,6 +139,70 @@ def test_registered_observer_accepts_only_schema2_snapshot_bound_to_job(attempt,
     observer.reset_for_tests()
 
 
+def test_registered_observer_keeps_legacy_job_snapshot_without_fast_field(attempt, loaded, monkeypatch):
+    _manager, observer = loaded
+    job_dir = attempt["attempt_dir"].parent.parent
+    (job_dir / "snapshot.json").write_text(json.dumps({
+        "schema": 1,
+        "job_id": attempt["request"]["job_id"],
+        "profile": "claire",
+        "parent_session_id": None,
+    }), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(attempt["home"]))
+    monkeypatch.setenv("HERMES_PROFILE", "claire")
+    monkeypatch.setenv("MODEL_ROUTER_ATTEMPT_REQUEST", str(attempt["request_path"]))
+    assert observer._load_verified_state() is not None
+    observer.reset_for_tests()
+
+    (job_dir / "snapshot.json").write_text("{malformed", encoding="utf-8")
+    assert observer._load_verified_state() is None
+    observer.reset_for_tests()
+
+
+def test_registered_observer_rejects_schema1_downgrade_from_fast_job(attempt, loaded, monkeypatch):
+    _manager, observer = loaded
+    job_dir = attempt["attempt_dir"].parent.parent
+    fast_snapshot = {
+        "schema": 1,
+        "profile": "claire",
+        "origin_session_id": "host-parent",
+        "parent_session_id": "host-parent",
+        "mode": "normal",
+        "expires_at": None,
+    }
+    (job_dir / "snapshot.json").write_text(json.dumps({
+        "schema": 1,
+        "job_id": attempt["request"]["job_id"],
+        "profile": "claire",
+        "parent_session_id": "host-parent",
+        "fast_snapshot": fast_snapshot,
+    }), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(attempt["home"]))
+    monkeypatch.setenv("HERMES_PROFILE", "claire")
+    monkeypatch.setenv("MODEL_ROUTER_ATTEMPT_REQUEST", str(attempt["request_path"]))
+    assert observer._load_verified_state() is None
+    observer.reset_for_tests()
+
+
+def test_registered_observer_rejects_symlinked_legacy_job_snapshot(attempt, loaded, monkeypatch):
+    _manager, observer = loaded
+    job_dir = attempt["attempt_dir"].parent.parent
+    outside = attempt["base"] / "external-job-snapshot.json"
+    outside.write_text(
+        json.dumps({"schema": 1, "job_id": attempt["request"]["job_id"], "profile": "claire"}),
+        encoding="utf-8",
+    )
+    try:
+        (job_dir / "snapshot.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable in this test environment: {exc}")
+    monkeypatch.setenv("HERMES_HOME", str(attempt["home"]))
+    monkeypatch.setenv("HERMES_PROFILE", "claire")
+    monkeypatch.setenv("MODEL_ROUTER_ATTEMPT_REQUEST", str(attempt["request_path"]))
+    assert observer._load_verified_state() is None
+    observer.reset_for_tests()
+
+
 def test_registered_observer_rejects_foreign_profile_and_wrong_root(attempt, loaded):
     _manager, _observer = loaded
     other = attempt['base'] / 'other'

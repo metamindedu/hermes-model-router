@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import contextvars
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import math
 import os
@@ -39,6 +39,8 @@ _FAST_FIELDS = frozenset({"service_tier", "speed"})
 # or a task-runtime limit. Expired snapshots still retain their original expiry.
 BINDING_TTL_SECONDS = 7 * 24 * 60 * 60
 MAX_CHILD_BINDINGS = 1024
+# Creator proofs live only in the native dispatch ContextVar and are released with
+# that dispatch's copied contexts; the process-wide lookup cache remains bounded.
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class _DispatchBinding:
     parent_session_id: str
     parent_identity: int
     snapshot: dict[str, Any]
+    creator_children: OrderedDict[str, "_ChildBinding"] = field(default_factory=OrderedDict)
 
 
 @dataclass(frozen=True)
@@ -301,9 +304,43 @@ def _native_resolver(**kwargs: Any) -> Any:
     return resolve_fast_mode_overrides(**kwargs)
 
 
+def _permitted_wire_models(model: str, provider: str, api_mode: str) -> frozenset[str]:
+    """Return only the runtime model and Hermes-metadata-approved Codex wire alias."""
+    permitted = {model}
+    if provider == "openai-codex" and api_mode == "codex_responses":
+        try:
+            from agent.model_metadata import is_codex_context_variant, strip_codex_context_variant_suffix
+
+            if is_codex_context_variant(model):
+                canonical = strip_codex_context_variant_suffix(model)
+                if isinstance(canonical, str) and canonical and canonical != model:
+                    permitted.add(canonical)
+        except Exception:
+            # Missing metadata must not turn an unverified alias into a paid route.
+            pass
+    return frozenset(permitted)
+
+
+def _request_model_matches_runtime(
+    request: Mapping[str, Any], *, model: str, provider: str, api_mode: str,
+) -> bool:
+    """Check both the SDK model and any extra_body model that can override it."""
+    permitted = _permitted_wire_models(model, provider, api_mode)
+    request_model = request.get("model")
+    if type(request_model) is not str or request_model not in permitted:
+        return False
+    extra_body = request.get("extra_body")
+    if isinstance(extra_body, Mapping) and "model" in extra_body:
+        override_model = extra_body.get("model")
+        if type(override_model) is not str or override_model not in permitted:
+            return False
+    return True
+
+
 def apply_fast_snapshot(
     request: Mapping[str, Any], snapshot: Mapping[str, Any] | None, *,
     model: str | None, provider: str | None, base_url: str | None, api_mode: str | None,
+    runtime_verified: bool = True,
     wall_clock: Callable[[], float] = time.time,
     resolver: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
@@ -343,6 +380,12 @@ def apply_fast_snapshot(
 
     provider_name = provider.lower() if isinstance(provider, str) else ""
     base = base_url if isinstance(base_url, str) else ""
+    if (runtime_verified is not True or not isinstance(model, str)
+            or not isinstance(provider, str) or not isinstance(api_mode, str)
+            or not _request_model_matches_runtime(
+                request, model=model, provider=provider, api_mode=api_mode,
+            )):
+        return result
     if (provider_name not in _OPENAI_PROVIDERS or api_mode not in _API_MODES
             or not isinstance(model, str) or not model
             or not _first_party_route(provider_name, base)):
@@ -420,7 +463,24 @@ class FastInheritanceController:
         while len(self._children) > MAX_CHILD_BINDINGS:
             self._children.popitem(last=False)
 
-    def _read_child_snapshot(self, session_id: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _native_child_identity(agent: Any, session_id: str) -> tuple[str, str | None] | None:
+        """Read exact native lineage scalars; never trust a session token alone."""
+        if agent is None or _safe_identifier(getattr(agent, "session_id", None)) != session_id:
+            return None
+        if getattr(agent, "platform", None) != "subagent":
+            return None
+        parent_session_id = _safe_identifier(getattr(agent, "_parent_session_id", None))
+        raw_subagent_id = getattr(agent, "_subagent_id", None)
+        child_subagent_id = _safe_identifier(raw_subagent_id) if raw_subagent_id is not None else None
+        if parent_session_id is None or (raw_subagent_id is not None and child_subagent_id is None):
+            return None
+        return parent_session_id, child_subagent_id
+
+    def _read_child_snapshot(self, session_id: str, *, agent: Any) -> dict[str, Any] | None:
+        identity = self._native_child_identity(agent, session_id)
+        if identity is None:
+            return None
         try:
             now = float(self._now())
             if not math.isfinite(now):
@@ -433,13 +493,42 @@ class FastInheritanceController:
             self._prune_locked(now)
             binding = self._children.get(session_id)
             if (binding is None or binding.profile != self.profile or binding.home_key != self.home_key
-                    or binding.child_session_id != session_id):
+                    or binding.child_session_id != session_id
+                    or binding.parent_session_id != identity[0]
+                    or (identity[1] is not None and binding.child_subagent_id != identity[1])):
                 return None
             try:
                 return validate_fast_snapshot(binding.snapshot, profile=self.profile)
             except (TypeError, ValueError):
                 self._children.pop(session_id, None)
                 return None
+
+    def _creator_child_snapshot(self, session_id: str, agent: Any) -> dict[str, Any] | None:
+        """Use only exact child-generation evidence carried by the native creator context."""
+        identity = self._native_child_identity(agent, session_id)
+        binding = _ACTIVE_DISPATCH.get()
+        if (identity is None or binding is None or binding.controller is not self
+                or binding.kind != "native" or binding.profile != self.profile
+                or binding.home_key != self.home_key or not self._scope_is_current()):
+            return None
+        try:
+            now = float(self._now())
+            if not math.isfinite(now):
+                return None
+        except (TypeError, ValueError, OverflowError):
+            return None
+        proof = binding.creator_children.get(session_id)
+        if (proof is None or proof.profile != self.profile or proof.home_key != self.home_key
+                or proof.parent_session_id != identity[0] or identity[1] is None
+                or proof.child_subagent_id != identity[1]
+                or proof.child_session_id != session_id or proof.created_at > now):
+            return None
+        try:
+            return validate_fast_snapshot(
+                proof.snapshot, profile=self.profile, parent_session_id=proof.parent_session_id,
+            )
+        except (TypeError, ValueError):
+            return None
 
     def _inherited_for_parent(self, parent_session_id: str) -> dict[str, Any] | None:
         routed = _ROUTED_FAST.get()
@@ -451,7 +540,11 @@ class FastInheritanceController:
                 return None
         # A nested native child may inherit an outer routed ContextVar. Its
         # exact native generation hook is stronger identity for this session.
-        return self._read_child_snapshot(parent_session_id)
+        parent = self._active_agent(parent_session_id)
+        if parent is None:
+            return None
+        snapshot = self._read_child_snapshot(parent_session_id, agent=parent)
+        return snapshot if snapshot is not None else self._creator_child_snapshot(parent_session_id, parent)
 
     def _capture_dispatch(self, session_id: Any) -> tuple[str, int, dict[str, Any]] | None:
         if not self._scope_is_current():
@@ -591,6 +684,11 @@ class FastInheritanceController:
             if self._closed:
                 return
             self._prune_locked(now)
+            creator_existing = binding.creator_children.get(child_session_id)
+            if creator_existing is not None:
+                # A creator context cannot rebind one exact session token to a
+                # second child identity, even if cache eviction removed its row.
+                return
             existing = self._children.get(child_session_id)
             if existing is not None:
                 # Do not merge a recycled session token or a different native child.
@@ -600,6 +698,10 @@ class FastInheritanceController:
                 return
             self._children[child_session_id] = child
             self._children.move_to_end(child_session_id)
+            # This exact proof is local to the creator ContextVar object and is
+            # released with its native dispatch contexts, not kept as a global tombstone.
+            binding.creator_children[child_session_id] = child
+            binding.creator_children.move_to_end(child_session_id)
             self._prune_locked(now)
 
     def on_subagent_stop(self, **payload: Any) -> None:
@@ -616,6 +718,13 @@ class FastInheritanceController:
                     and binding.child_session_id == child_session_id
                     and binding.profile == self.profile and binding.home_key == self.home_key):
                 self._children.pop(child_session_id, None)
+        dispatch = _ACTIVE_DISPATCH.get()
+        if (dispatch is not None and dispatch.controller is self
+                and dispatch.parent_session_id == parent_session_id):
+            proof = dispatch.creator_children.get(child_session_id)
+            if (proof is not None and proof.parent_session_id == parent_session_id
+                    and proof.child_session_id == child_session_id):
+                dispatch.creator_children.pop(child_session_id, None)
 
     def llm_request_middleware(self, **kwargs: Any) -> dict[str, Any] | None:
         """Apply only to a registered native child or exact routed child request."""
@@ -635,20 +744,39 @@ class FastInheritanceController:
         else:
             # A native child can run with an outer routed ContextVar copied
             # from its parent; only its own exact child binding may authorize it.
-            snapshot = self._read_child_snapshot(session_id)
+            agent = self._active_agent(session_id)
+            if agent is None:
+                return None
+            snapshot = self._read_child_snapshot(session_id, agent=agent)
+            if snapshot is None:
+                snapshot = self._creator_child_snapshot(session_id, agent)
         if snapshot is None:
             return None
         request = kwargs.get("request")
         if not isinstance(request, Mapping):
             return None
+        agent = self._active_agent(session_id)
+        if agent is None:
+            return None
+        runtime_model = getattr(agent, "model", None)
+        runtime_provider = getattr(agent, "provider", None)
+        runtime_base_url = getattr(agent, "base_url", None)
+        runtime_api_mode = getattr(agent, "api_mode", None)
+        runtime_verified = all((
+            type(runtime_model) is str and runtime_model == kwargs.get("model"),
+            type(runtime_provider) is str and runtime_provider == kwargs.get("provider"),
+            type(runtime_base_url) is str and runtime_base_url == kwargs.get("base_url"),
+            type(runtime_api_mode) is str and runtime_api_mode == kwargs.get("api_mode"),
+        ))
         try:
             updated = apply_fast_snapshot(
                 request,
                 snapshot,
-                model=kwargs.get("model"),
-                provider=kwargs.get("provider"),
-                base_url=kwargs.get("base_url"),
-                api_mode=kwargs.get("api_mode"),
+                model=runtime_model if isinstance(runtime_model, str) else None,
+                provider=runtime_provider if isinstance(runtime_provider, str) else None,
+                base_url=runtime_base_url if isinstance(runtime_base_url, str) else None,
+                api_mode=runtime_api_mode if isinstance(runtime_api_mode, str) else None,
+                runtime_verified=runtime_verified,
             )
         except (TypeError, ValueError):
             return None

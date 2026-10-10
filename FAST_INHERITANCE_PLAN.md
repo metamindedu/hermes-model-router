@@ -28,6 +28,10 @@ schema2 attempt has EXACT existing schema1 fields PLUS fast_snapshot (non-null v
 
 Files: routing.py, job_worker.py, lib/run_routed_agent.py, scoped_agent.py, attempt_observer.py + associated tests. Observer strict schema acceptance updated consistently; no unrelated result schema/route evidence changes. Reuse existing observer namespace verification for Fast module/controller. Existing observations/fallback gating/common deadline/cleanup/native completion contract remain unchanged.
 
+## Independent-review boundary fixes
+
+The first immutable candidate's Heavy review returned C/H=0 but NO-GO for three Medium boundaries. Reproduce and close final SDK model/extra_body mismatch, native binding TTL/cap cleanup fail-open, and schema-1 attempt downgrade against a Fast-bearing immutable job. Runtime/context/wire identity must agree (native-recognized Codex aliases only); exact child-creation evidence may travel in native copied dispatch contexts without agent-object retention or unbounded global tombstones. Stop/unload/profile/lineage isolation remains required. Both adapter and observer reject a Fast job's legacy-shaped attempt before runtime; genuinely legacy jobs retain compatibility. Parent regression execution after fixes: 630 Python passed, 10 skipped; 109 JavaScript passed. Independent delta verdict and live installation remain separate gates.
+
 ## Parent ownership
 
 Main owns __init__.py registration/handler wiring, desktop/plugin.js fallback/Fast explanatory copy, related JS contract tests, README/wiki/PLAN, cross-worker tests, installation/readbacks. No new Fast settings/cards/cost checkbox needed: inherits operator's existing session choice. Explain inherited Fast can increase API charges/Codex credit use and requested tier is not actual provider processing proof. Existing unsupported routes run without inherited paid tier.

@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-10 | fast-inheritance-review-boundaries
+- 실제 요청 모델/extra_body 덮어쓰기와 활성 런타임의 일치, TTL/cap 정리 후에도 생성 문맥의 정확한 child 증거로 정제 유지, Fast job의 legacy attempt downgrade 거부 경계를 보완.
+- 실제 native sync/async dispatch와 SDK MockTransport 검증을 강화. provider의 실제 처리 등급·과금 검증과 설치/활성화는 별도의 증거로 유지한다.
+
 ## 2026-10-10 | session-fast-inheritance
 - 사용자 요청: 부모 세션의 Fast 선택을 기본 위임과 코드 라우팅 모두에 상속하고, 기존 설치 프로필 전체에 공통 코드를 적용한다. 설치는 별도 실제 검증/독립 검수 후 진행하며 모델·폴백·시간 제한·활성화 설정은 보존한다.
 - 불변 부모 승인·원본 bounded 만료·실제 지원 endpoint별 요청 적용·비-OpenAI 폴백 정제, native 복귀 알림과 실제 응답 성공의 구분을 기록. 요청 wire 검증과 실제 제공자 처리/과금은 서로 다른 증거다.

@@ -40,6 +40,21 @@ def snap(mode="priority", *, profile="custom", origin="root-A", parent="root-A",
     }
 
 
+def native_child(session_id, parent_session_id, subagent_id):
+    return SimpleNamespace(
+        session_id=session_id, _parent_session_id=parent_session_id, _subagent_id=subagent_id,
+        platform="subagent", service_tier=None, model="gpt-6-astra", provider="openai-api",
+        base_url="https://api.openai.com/v1", api_mode="chat_completions",
+    )
+
+
+def routed_child(session_id):
+    return SimpleNamespace(
+        session_id=session_id, platform="subagent", service_tier=None, model="gpt-6-astra",
+        provider="openai-api", base_url="https://api.openai.com/v1", api_mode="chat_completions",
+    )
+
+
 class Registration:
     def __init__(self, dispose):
         self._dispose = dispose
@@ -275,6 +290,30 @@ def test_supported_openai_api_and_codex_use_native_resolver_without_ultrafast_do
     assert "service_tier" not in foreign_provider and "speed" not in foreign_provider
 
 
+def test_codex_context_picker_alias_uses_only_native_metadata_canonical_wire_model():
+    calls = []
+    alias = "gpt-6-astra-900k"
+    canonical = "gpt-6-astra"
+    request = {"model": canonical, "input": "fixture", "service_tier": "stale"}
+    result = fi.apply_fast_snapshot(
+        request, snap("priority"), model=alias, provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex", api_mode="codex_responses",
+        resolver=lambda **kwargs: calls.append(kwargs) or {"service_tier": "priority"},
+    )
+    assert result["service_tier"] == "priority"
+    assert calls == [{
+        "model_id": alias, "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api/codex", "tier": None,
+    }]
+
+    unknown = fi.apply_fast_snapshot(
+        {**request, "model": "gpt-6-astra-999k"}, snap("priority"), model=alias,
+        provider="openai-codex", base_url="https://chatgpt.com/backend-api/codex",
+        api_mode="codex_responses", resolver=lambda **_kwargs: {"service_tier": "priority"},
+    )
+    assert "service_tier" not in unknown
+
+
 def test_unavailable_snapshot_is_inert_but_invalid_snapshot_fails_closed():
     source = {"model": "gpt-6-astra", "service_tier": "keep", "extra_body": {"speed": "fast"}}
     untouched = fi.apply_fast_snapshot(
@@ -385,8 +424,12 @@ def test_native_ids_bind_multi_child_nested_snapshots_and_retire_exactly(monkeyp
     assert execute(tool_name="delegate_task", args={}, session_id="root-A", next_call=dispatch) == "queued"
     llm = next(cb for kind, cb in ctx.middleware if kind == "llm_request")
 
+    child_bindings = dict(controller._children)
+
     def apply(session_id):
-        monkeypatch.setattr(fi, "_get_active_parent", lambda: SimpleNamespace(session_id=session_id, service_tier=None))
+        binding = controller._children.get(session_id) or child_bindings.get(session_id)
+        agent = native_child(session_id, binding.parent_session_id, binding.child_subagent_id)
+        monkeypatch.setattr(fi, "_get_active_parent", lambda: agent)
         request = {"model": "gpt-6-astra", "messages": [], "service_tier": "stale"}
         result = llm(request=request, session_id=session_id, model="gpt-6-astra", provider="openai-api",
                      base_url="https://api.openai.com/v1", api_mode="chat_completions")
@@ -396,7 +439,7 @@ def test_native_ids_bind_multi_child_nested_snapshots_and_retire_exactly(monkeyp
     second = apply("child-B")
     assert first["service_tier"] == second["service_tier"] == "priority"
 
-    child_parent = SimpleNamespace(session_id="child-A", service_tier=None)
+    child_parent = native_child("child-A", "root-A", "native-A")
     monkeypatch.setattr(fi, "_get_active_parent", lambda: child_parent)
     nested = execute(
         tool_name="delegate_task", args={"action": "spawn"}, session_id="child-A",
@@ -415,6 +458,92 @@ def test_native_ids_bind_multi_child_nested_snapshots_and_retire_exactly(monkeyp
     stop(parent_session_id="child-A", child_session_id="grandchild-A")
 
 
+def test_creator_context_proof_requires_exact_native_scalars_and_is_revoked_on_stop(monkeypatch, home):
+    from contextvars import copy_context
+
+    parent = SimpleNamespace(session_id="creator-root", service_tier="priority")
+    ctx, controller = register(monkeypatch, home, parent)
+    execute = next(cb for kind, cb in ctx.middleware if kind == "tool_execution")
+    start = ctx.hooks["subagent_start"][0]
+    stop = ctx.hooks["subagent_stop"][0]
+    llm = next(cb for kind, cb in ctx.middleware if kind == "llm_request")
+    now = [10.0]
+    monkeypatch.setattr(controller, "_now", lambda: now[0])
+    creator = []
+
+    def dispatch():
+        start(parent_session_id="creator-root", child_session_id="creator-child", child_subagent_id="creator-native")
+        creator.append(copy_context())
+
+    execute(tool_name="delegate_task", args={}, session_id="creator-root", next_call=dispatch)
+    now[0] += fi.BINDING_TTL_SECONDS + 1
+    request = {"model": "gpt-6-astra", "service_tier": "stale", "speed": "fast"}
+    child = native_child("creator-child", "creator-root", "creator-native")
+    wrong_id = native_child("creator-child", "creator-root", "other-native")
+    missing_id = native_child("creator-child", "creator-root", "creator-native")
+    del missing_id._subagent_id
+
+    def invoke(agent):
+        monkeypatch.setattr(fi, "_get_active_parent", lambda: agent)
+        return llm(
+            request=request, session_id=agent.session_id, model=agent.model, provider=agent.provider,
+            base_url=agent.base_url, api_mode=agent.api_mode,
+        )
+
+    assert creator[0].run(lambda: invoke(wrong_id)) is None
+    assert creator[0].run(lambda: invoke(missing_id)) is None
+    inherited = creator[0].run(lambda: invoke(child))
+    assert inherited["request"]["service_tier"] == "priority"
+
+    creator[0].run(lambda: stop(parent_session_id="foreign-parent", child_session_id="creator-child"))
+    assert creator[0].run(lambda: invoke(child))["request"]["service_tier"] == "priority"
+    creator[0].run(lambda: stop(parent_session_id="creator-root", child_session_id="creator-child"))
+    assert creator[0].run(lambda: invoke(child)) is None
+
+
+def test_nested_native_child_inherits_expiry_from_creator_proof_after_cache_pruning(monkeypatch, home):
+    import time
+    from contextvars import copy_context
+
+    parent = SimpleNamespace(session_id="bounded-root", service_tier="auto", _fast_until=time.monotonic() + 600)
+    ctx, controller = register(monkeypatch, home, parent)
+    execute = next(cb for kind, cb in ctx.middleware if kind == "tool_execution")
+    start = ctx.hooks["subagent_start"][0]
+    now = [100.0]
+    monkeypatch.setattr(controller, "_now", lambda: now[0])
+    creator = []
+
+    def initial_dispatch():
+        start(
+            parent_session_id="bounded-root", child_session_id="bounded-child",
+            child_subagent_id="bounded-native",
+        )
+        creator.append(copy_context())
+
+    execute(
+        tool_name="delegate_task", args={}, session_id="bounded-root", next_call=initial_dispatch,
+    )
+    original = controller._children["bounded-child"].snapshot
+    assert original["mode"] == "auto" and original["expires_at"] is not None
+    now[0] += fi.BINDING_TTL_SECONDS + 1
+    nested_parent = native_child("bounded-child", "bounded-root", "bounded-native")
+    monkeypatch.setattr(fi, "_get_active_parent", lambda: nested_parent)
+    creator[0].run(
+        lambda: execute(
+            tool_name="delegate_task", args={"action": "spawn"}, session_id="bounded-child",
+            next_call=lambda: start(
+                parent_session_id="bounded-child", child_session_id="bounded-grandchild",
+                child_subagent_id="bounded-grandchild-native",
+            ),
+        )
+    )
+    nested = controller._children["bounded-grandchild"].snapshot
+    assert nested["origin_session_id"] == "bounded-root"
+    assert nested["parent_session_id"] == "bounded-child"
+    assert nested["mode"] == "auto"
+    assert nested["expires_at"] == original["expires_at"]
+
+
 def test_native_explicit_normal_cleans_stale_tiers_but_unavailable_is_inert(monkeypatch, home):
     parent = SimpleNamespace(session_id="normal-parent", service_tier=None)
     ctx, controller = register(monkeypatch, home, parent)
@@ -428,7 +557,8 @@ def test_native_explicit_normal_cleans_stale_tiers_but_unavailable_is_inert(monk
         next_call=lambda: start(parent_session_id="normal-parent", child_session_id="normal-child",
                                 child_subagent_id="normal-native-id"),
     )
-    normal_child = SimpleNamespace(session_id="normal-child", service_tier=None)
+    normal_binding = controller._children["normal-child"]
+    normal_child = native_child("normal-child", normal_binding.parent_session_id, normal_binding.child_subagent_id)
     monkeypatch.setattr(fi, "_get_active_parent", lambda: normal_child)
     normal = llm(request=request, session_id="normal-child", model="gpt-6-astra", provider="openai-api",
                  base_url="https://api.openai.com/v1", api_mode="chat_completions")
@@ -465,8 +595,8 @@ def test_routed_contextvar_binds_only_exact_session_home_and_actual_module(monke
         with fi.bind_routed_fast_snapshot(snap("priority"), session_id="route-child", home=home.parent):
             pass
 
-    routed_child = SimpleNamespace(session_id="route-child", service_tier=None)
-    monkeypatch.setattr(fi, "_get_active_parent", lambda: routed_child)
+    routed_agent = routed_child("route-child")
+    monkeypatch.setattr(fi, "_get_active_parent", lambda: routed_agent)
     with fi.bind_routed_fast_snapshot(snap("priority"), session_id="route-child", home=home):
         result = llm(request=request, session_id="route-child", model="gpt-6-astra", provider="openai-api",
                      base_url="https://api.openai.com/v1", api_mode="chat_completions")
@@ -480,14 +610,14 @@ def test_routed_contextvar_binds_only_exact_session_home_and_actual_module(monke
             next_call=lambda: start(parent_session_id="route-child", child_session_id="route-native-child",
                                     child_subagent_id="route-native-id"),
         )
-        nested_parent = SimpleNamespace(session_id="route-native-child", service_tier=None)
+        nested_parent = native_child("route-native-child", "route-child", "route-native-id")
         monkeypatch.setattr(fi, "_get_active_parent", lambda: nested_parent)
         nested_request = llm(request=request, session_id="route-native-child", model="gpt-6-astra",
                              provider="openai-api", base_url="https://api.openai.com/v1",
                              api_mode="chat_completions")
         assert nested_request["request"]["service_tier"] == "priority"
         stop(parent_session_id="route-child", child_session_id="route-native-child")
-        monkeypatch.setattr(fi, "_get_active_parent", lambda: routed_child)
+        monkeypatch.setattr(fi, "_get_active_parent", lambda: routed_agent)
 
         foreign = llm(request=request, session_id="other-child", model="gpt-6-astra", provider="openai-api",
                       base_url="https://api.openai.com/v1", api_mode="chat_completions")
@@ -512,15 +642,22 @@ def test_registration_failure_unload_and_bounded_child_state(monkeypatch, home):
     ctx, controller = register(monkeypatch, home, parent)
     assert controller is not None
     start = ctx.hooks["subagent_start"][0]
+    execute = next(cb for kind, cb in ctx.middleware if kind == "tool_execution")
     now = [100.0]
     monkeypatch.setattr(controller, "_now", lambda: now[0])
     for index in range(fi.MAX_CHILD_BINDINGS + 2):
-        start(parent_session_id="root-A", child_session_id=f"child-{index}", child_subagent_id=f"native-{index}")
+        execute(
+            tool_name="delegate_task", args={}, session_id="root-A",
+            next_call=lambda index=index: start(
+                parent_session_id="root-A", child_session_id=f"child-{index}", child_subagent_id=f"native-{index}"
+            ),
+        )
     assert len(controller._children) <= fi.MAX_CHILD_BINDINGS
     now[0] += fi.BINDING_TTL_SECONDS + 1
     llm = next(cb for kind, cb in ctx.middleware if kind == "llm_request")
     last_child = f"child-{fi.MAX_CHILD_BINDINGS + 1}"
-    monkeypatch.setattr(fi, "_get_active_parent", lambda: SimpleNamespace(session_id=last_child, service_tier=None))
+    last_agent = native_child(last_child, "root-A", f"native-{fi.MAX_CHILD_BINDINGS + 1}")
+    monkeypatch.setattr(fi, "_get_active_parent", lambda: last_agent)
     clean = llm(request={"model": "gpt-6-astra", "service_tier": "stale"}, session_id=last_child,
                 model="gpt-6-astra", provider="openai-api", base_url="https://api.openai.com/v1",
                 api_mode="chat_completions")

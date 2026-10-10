@@ -85,9 +85,20 @@ def _managed_request(runtime, *, session, model, provider, base_url, api_mode, p
     from agent.subagent_lifecycle import bind_subagent_parent
     from hermes_cli.middleware import apply_llm_request_middleware
 
-    # The request hook must see the current child agent identity, not merely a
-    # matching session_id supplied by a caller.
-    child_agent = SimpleNamespace(session_id=session, service_tier=None, _fast_until=0.0)
+    # The request hook must see the current child agent identity and configured
+    # runtime, not merely matching caller-supplied metadata.
+    binding = runtime.controller._children.get(session)
+    child_fields = {}
+    if binding is not None:
+        child_fields = {
+            "_parent_session_id": binding.parent_session_id,
+            "_subagent_id": binding.child_subagent_id,
+            "platform": "subagent",
+        }
+    child_agent = SimpleNamespace(
+        session_id=session, service_tier=None, model=model, provider=provider,
+        base_url=base_url, api_mode=api_mode, **child_fields,
+    )
     with bind_subagent_parent(child_agent):
         return apply_llm_request_middleware(
             payload, session_id=session, model=model, provider=provider, base_url=base_url,
@@ -120,7 +131,13 @@ def test_actual_loader_tool_dispatch_hooks_and_async_nested_child_inheritance(na
     assert inherited_a["service_tier"] == inherited_b["service_tier"] == "priority"
     assert "speed" not in inherited_a["extra_body"] and inherited_a["extra_body"]["keep"] == 1
 
-    nested_parent = SimpleNamespace(session_id="native-child-a", service_tier=None, _fast_until=0.0)
+    native_parent_binding = runtime.controller._children["native-child-a"]
+    nested_parent = SimpleNamespace(
+        session_id="native-child-a", _parent_session_id=native_parent_binding.parent_session_id,
+        _subagent_id=native_parent_binding.child_subagent_id, platform="subagent", service_tier=None,
+        model="gpt-6-astra", provider="openai-api", base_url="https://api.openai.com/v1",
+        api_mode="chat_completions", _fast_until=0.0,
+    )
 
     async def native_async_build(_args):
         await asyncio.sleep(0)
@@ -224,6 +241,8 @@ def test_real_delegate_task_child_builder_emits_fast_hooks_with_total_zero(nativ
             self.provider = kwargs["provider"]
             self.base_url = kwargs["base_url"]
             self.api_mode = kwargs["api_mode"]
+            self.platform = kwargs["platform"]
+            self._parent_session_id = kwargs["parent_session_id"]
             self.service_tier = None
             self.tool_progress_callback = kwargs.get("tool_progress_callback")
             self._session_init_model_config = {}
@@ -393,3 +412,183 @@ def test_actual_sdk_streaming_keeps_managed_tier_on_the_wire(native_plugin):
         client.close()
     assert captured[0]["service_tier"] == "priority"
     assert "speed" not in captured[0]
+
+
+def test_actual_sdk_wire_model_and_paid_tier_stay_coupled_after_middleware(native_plugin):
+    runtime = native_plugin
+    parent = SimpleNamespace(session_id="mismatch-root", service_tier="priority", _fast_until=0.0)
+    _spawn_through_native_middleware(runtime, parent, child_session="mismatch-child", subagent_id="mismatch-native-id")
+    captured = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        captured.append(body)
+        return httpx.Response(200, json={
+            "id": "chatcmpl-mismatch-fixture", "object": "chat.completion", "created": 1,
+            "model": body["model"], "choices": [{"index": 0,
+                "message": {"role": "assistant", "content": "offline"}, "finish_reason": "stop"}],
+        })
+
+    client = OpenAI(
+        api_key="offline-test-only", base_url="https://api.openai.com/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    cases = (
+        {"model": "untrusted-wire-model", "messages": [{"role": "user", "content": "offline"}],
+         "service_tier": "stale", "speed": "fast"},
+        {"model": "gpt-6-astra", "messages": [{"role": "user", "content": "offline"}],
+         "service_tier": "stale", "extra_body": {"model": "untrusted-extra-model",
+                                                    "service_tier": "stale", "speed": "fast"}},
+    )
+    try:
+        for payload in cases:
+            kwargs = _managed_request(
+                runtime, session="mismatch-child", model="gpt-6-astra", provider="openai-api",
+                base_url="https://api.openai.com/v1", api_mode="chat_completions", payload=payload,
+            )
+            response = client.chat.completions.create(**kwargs)
+            assert response.choices[0].message.content == "offline"
+    finally:
+        client.close()
+
+    assert [body["model"] for body in captured] == ["untrusted-wire-model", "untrusted-extra-model"]
+    assert all("service_tier" not in body and "speed" not in body for body in captured)
+
+
+def test_native_runtime_context_mismatch_only_cleans_managed_fast_fields(native_plugin):
+    runtime = native_plugin
+    parent = SimpleNamespace(session_id="runtime-root", service_tier="priority", _fast_until=0.0)
+    _spawn_through_native_middleware(runtime, parent, child_session="runtime-child", subagent_id="runtime-native-id")
+    binding = runtime.controller._children["runtime-child"]
+    from agent.subagent_lifecycle import bind_subagent_parent
+    from hermes_cli.middleware import apply_llm_request_middleware
+
+    child = SimpleNamespace(
+        session_id="runtime-child", _parent_session_id=binding.parent_session_id,
+        _subagent_id=binding.child_subagent_id, platform="subagent", service_tier=None,
+        model="gpt-6-astra", provider="openai-api", base_url="https://api.openai.com/v1",
+        api_mode="chat_completions",
+    )
+    request = {"model": "gpt-6-astra", "service_tier": "stale", "speed": "fast",
+               "extra_body": {"service_tier": "stale", "speed": "fast", "keep": True}}
+    with bind_subagent_parent(child):
+        result = apply_llm_request_middleware(
+            request, session_id=child.session_id, model="different-runtime-model", provider=child.provider,
+            base_url=child.base_url, api_mode=child.api_mode, api_call_count=1,
+        ).payload
+    assert "service_tier" not in result and "speed" not in result
+    assert result["extra_body"] == {"keep": True}
+
+
+def test_creator_proof_survives_actual_native_async_and_daemon_child_dispatch(native_plugin, monkeypatch):
+    import threading
+
+    from agent.subagent_lifecycle import bind_subagent_parent
+    from hermes_cli import middleware
+    from tools import async_delegation, delegate_tool, delegate_tool_dispatch
+    from tools.daemon_pool import DaemonThreadPoolExecutor
+
+    runtime = native_plugin
+    monkeypatch.setattr(runtime.fast, "MAX_CHILD_BINDINGS", 1)
+    parent = SimpleNamespace(session_id="queued-root", service_tier="priority", _fast_until=0.0)
+    children = [
+        SimpleNamespace(
+            session_id=f"queued-child-{index}", _parent_session_id=parent.session_id,
+            _subagent_id=f"queued-native-{index}", platform="subagent", service_tier=None,
+            model="gpt-6-astra", provider="openai-api", base_url="https://api.openai.com/v1",
+            api_mode="chat_completions",
+        )
+        for index in (0, 1)
+    ]
+    observed = {}
+    observed_lock = threading.Lock()
+    finished = threading.Event()
+    completion = {}
+    executors = []
+
+    monkeypatch.setattr(async_delegation, "_persist_dispatch", lambda _record: None)
+    monkeypatch.setattr(async_delegation, "_persist_completion", lambda *_args: None)
+
+    def capture_completion(_record, result, status):
+        completion.update(result=result, status=status)
+        finished.set()
+
+    monkeypatch.setattr(async_delegation, "_push_completion_event", capture_completion)
+
+    def make_executor(max_workers):
+        executor = DaemonThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="mfr-test-async")
+        executors.append(executor)
+        return executor
+
+    monkeypatch.setattr(async_delegation, "_get_executor", make_executor)
+    monkeypatch.setattr(delegate_tool_dispatch, "_report_child_done", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(delegate_tool_dispatch, "_record_finished_child", lambda *_args, **_kwargs: None)
+
+    def run_single(*, task_index, child, **_kwargs):
+        payload = {
+            "model": child.model, "messages": [], "service_tier": "stale", "speed": "fast",
+            "extra_body": {"service_tier": "stale", "speed": "fast", "keep": task_index},
+        }
+        with bind_subagent_parent(child):
+            clean = middleware.apply_llm_request_middleware(
+                payload, session_id=child.session_id, model=child.model, provider=child.provider,
+                base_url=child.base_url, api_mode=child.api_mode, api_call_count=1,
+            ).payload
+        with observed_lock:
+            observed[child.session_id] = clean
+        return {"task_index": task_index, "status": "completed", "duration_seconds": 0.0}
+
+    monkeypatch.setattr(delegate_tool, "_run_single_child", run_single)
+    tasks = [{"goal": "offline queued fixture A"}, {"goal": "offline queued fixture B"}]
+    batch = SimpleNamespace(
+        task_list=tasks,
+        children=[(index, tasks[index], child) for index, child in enumerate(children)],
+        parent_agent=parent,
+        max_children=2,
+        live_deleg_id=None,
+        live_paths=[],
+        unit_id=None,
+        run_child=lambda index, task, child: run_single(task_index=index, child=child),
+    )
+
+    def background_runner():
+        results = []
+        delegate_tool_dispatch._run_children_parallel(batch, results, honor_parent_interrupt=False)
+        return {"status": "completed", "results": results}
+
+    def native_queue_dispatch(_args):
+        for child in children:
+            runtime.manager.invoke_hook(
+                "subagent_start", parent_session_id=parent.session_id,
+                child_session_id=child.session_id, child_subagent_id=child._subagent_id,
+                child_role="leaf", child_goal="PRIVATE_QUEUED_GOAL_NOT_RETAINED",
+            )
+        # Child 0 is deliberately evicted from the bounded global cache when 1 registers.
+        assert "queued-child-0" not in runtime.controller._children
+        return async_delegation.dispatch_async_delegation(
+            goal="offline async queue fixture", context=None, toolsets=None, role="leaf", model=None,
+            session_key="fixture-session", parent_session_id=parent.session_id,
+            runner=background_runner, max_async_children=2,
+        )
+
+    try:
+        with bind_subagent_parent(parent):
+            handle = middleware.run_tool_execution_middleware(
+                "delegate_task", {}, native_queue_dispatch, session_id=parent.session_id,
+            )
+        assert handle["status"] == "dispatched"
+        assert finished.wait(timeout=30), "actual async delegation queue did not finish its offline fixture"
+        assert completion["status"] == "completed"
+        assert set(observed) == {child.session_id for child in children}
+        assert all(row["service_tier"] == "priority" for row in observed.values())
+        assert all("speed" not in row and "service_tier" not in row["extra_body"] for row in observed.values())
+    finally:
+        for executor in executors:
+            executor.shutdown(wait=True, cancel_futures=True)
+        if "handle" in locals() and handle.get("delegation_id"):
+            with async_delegation._records_lock:
+                async_delegation._records.pop(handle["delegation_id"], None)
+        for child in children:
+            runtime.manager.invoke_hook(
+                "subagent_stop", parent_session_id=parent.session_id, child_session_id=child.session_id,
+            )

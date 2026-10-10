@@ -158,6 +158,45 @@ def _validate_attempt_fast_provenance(
     )
 
 
+def _validate_legacy_attempt_job_binding(
+    request: dict[str, Any], *, home: Path, attempt_dir: Path,
+) -> None:
+    """Reject schema downgrade when a linked job snapshot records Fast intent.
+
+    Truly old attempts with no job snapshot remain readable. If the linked file
+    exists, however, it must be a valid same-job/profile schema-1 snapshot and
+    must not carry the additive Fast provenance field.
+    """
+    job_dir = home / "plugin-data" / "model-router" / "jobs" / request["job_id"]
+    snapshot_path = job_dir / "snapshot.json"
+    if snapshot_path.is_symlink():
+        raise AttemptError("initialization_error", "legacy job snapshot must not be linked")
+    if not snapshot_path.exists():
+        return
+    if (
+        not snapshot_path.is_file()
+        or snapshot_path.resolve(strict=True).parent != job_dir.resolve(strict=True)
+        or not _no_symlink_path(snapshot_path, home)
+        or attempt_dir.parent.parent.resolve(strict=True) != job_dir.resolve(strict=True)
+        or snapshot_path.stat().st_size > 1024 * 1024
+    ):
+        raise AttemptError("initialization_error", "legacy job snapshot path is invalid")
+    try:
+        job_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AttemptError("initialization_error", "legacy job snapshot is unreadable") from exc
+    if (
+        not isinstance(job_snapshot, dict)
+        or type(job_snapshot.get("schema")) is not int
+        or job_snapshot.get("schema") != 1
+        or job_snapshot.get("job_id") != request["job_id"]
+        or job_snapshot.get("profile") != request["profile"]
+    ):
+        raise AttemptError("initialization_error", "legacy job snapshot identity is invalid")
+    if "fast_snapshot" in job_snapshot:
+        raise AttemptError("initialization_error", "Fast job cannot use a schema-1 attempt")
+
+
 def _validate_request(request: Any, request_path: Path | None = None) -> tuple[dict[str, Any], Path, Path]:
     if not isinstance(request, dict):
         raise AttemptError("initialization_error", "request must contain an object")
@@ -257,6 +296,8 @@ def _validate_request(request: Any, request_path: Path | None = None) -> tuple[d
         validated_fast_snapshot = _validate_attempt_fast_provenance(
             request, home=home, attempt_dir=attempt_dir
         )
+    else:
+        _validate_legacy_attempt_job_binding(request, home=home, attempt_dir=attempt_dir)
     if expected_result.is_symlink() or not _no_symlink_path(attempt_dir, home):
         raise AttemptError("initialization_error", "result path contains a symlink")
     # Keep normalized paths only in memory; the request artifact remains the source of truth.

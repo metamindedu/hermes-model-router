@@ -107,6 +107,35 @@ def _validate_attempt_fast_snapshot(data: dict[str, Any], *, home: Path, profile
         return False
 
 
+def _validate_legacy_attempt_job_binding(data: dict[str, Any], *, home: Path, profile: str) -> bool:
+    """Keep old jobs readable but reject schema downgrade from a Fast job."""
+    job_dir = home / "plugin-data" / "model-router" / "jobs" / data["job_id"]
+    snapshot_path = job_dir / "snapshot.json"
+    try:
+        if snapshot_path.is_symlink():
+            return False
+        if not snapshot_path.exists():
+            return True
+        if (
+            not snapshot_path.is_file()
+            or snapshot_path.resolve(strict=True).parent != job_dir.resolve(strict=True)
+            or not _no_symlink_component(snapshot_path, home)
+            or snapshot_path.stat().st_size > 1024 * 1024
+        ):
+            return False
+        job_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        return bool(
+            isinstance(job_snapshot, dict)
+            and type(job_snapshot.get("schema")) is int
+            and job_snapshot.get("schema") == 1
+            and job_snapshot.get("job_id") == data["job_id"]
+            and job_snapshot.get("profile") == profile
+            and "fast_snapshot" not in job_snapshot
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def _load_verified_state() -> _State | None:
     """Verify the environment-bound request and artifact path; return None on any ambiguity."""
     global _state
@@ -159,6 +188,8 @@ def _load_verified_state() -> _State | None:
         if not _no_symlink_component(request_path, home):
             return None
         if schema == 2 and not _validate_attempt_fast_snapshot(data, home=home, profile=profile):
+            return None
+        if schema == 1 and not _validate_legacy_attempt_job_binding(data, home=home, profile=profile):
             return None
         if (
             os.path.normcase(str(home)) != os.path.normcase(str(Path(home_text).resolve(strict=True)))
