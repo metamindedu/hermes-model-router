@@ -48,5 +48,5 @@ test('tool identifier, purpose enum, profile gate and runtime contract remain un
   assert.match(registration, /coding and complex non-coding judgment/)
   assert.match(registration, /Profile-enabled coding and complex non-coding orchestration/)
   assert.doesNotMatch(registration, /Profile-enabled coding orchestration|코딩 라우팅이 꺼져/)
-  assert.match(read('plugin.yaml'), /코딩·복잡한 비코딩 판단/)
+  assert.match(read('plugin.yaml'), /Profile model settings, opt-in Heavy\/Light task routing/)
 })

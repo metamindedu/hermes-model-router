@@ -1,5 +1,9 @@
 # Model Router implementation contract
 
+## 2026-10-11: Publish retired-Tirith startup compatibility v0.4.2
+
+The current user explicitly requests completion of the follow-up: commit and publish the already-installed startup compatibility patch, release v0.4.2, and submit a new exact-SHA/version update PR to the official Hermes catalog. Preserve the existing narrow runtime delta: skip only the exact absence of `tools.tirith_security`; retain the initializer on legacy hosts and propagate unrelated import/dependency/initializer errors. No Hermes core, model/auth/config/fallback/timeout changes, shared restart or rerun of failed customer jobs. Recheck the frozen public candidate, native package admission and independent Heavy review; verify public remote/release, anonymous exact-SHA installation and all existing installed startup bytes. Catalog submission/green CI is not maintainer merge; report the actual gate state without bypassing it. Existing Git rollback is sufficient; no ad-hoc backups.
+
 ## 2026-10-10: Public repository and catalog submission
 
 Latest explicit user request authorizes pushing the reviewed Model Router changes, making metamindedu/hermes-model-router public, and submitting its pinned community entry to the official Hermes catalog. User selected MIT. This supersedes historical push pauses only for this plugin. Audit all reachable Git history and the tracked package for secrets before publication; do not publish ignored private receipts, profile credentials/state, conversations or job artifacts. Prepare truthful bounded dependencies/capability declarations and English overview/security disclosures; keep the existing reviewed runtime unchanged. Verify public remote SHA and anonymous fresh-home installation. Catalog admission is a maintainer-merged PR, not local validation or PR submission. No core edits, production model/billing tests, default activation repair, profile settings writes or shared restart in this publication task.

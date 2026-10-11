@@ -65,7 +65,13 @@ def test_messaging_dispatch_real_router_observer(tmp_path, monkeypatch, spawn_fa
         launches.append(command)
         if spawn_fails:
             raise OSError('fixture spawn failure')
-        process = actual_popen([sys.executable, '-c', 'import time; time.sleep(0.4)'], **kwargs)
+        # This child is a stdlib timing stub, not a Hermes/dependency probe.
+        # Windows venv forwarding launchers can remain alive with the routed
+        # detached flags; use the same interpreter's base executable while
+        # retaining every profile env, owner, deadline and exit assertion.
+        fixture_python = (getattr(sys, '_base_executable', sys.executable)
+                          if sys.platform == 'win32' else sys.executable)
+        process = actual_popen([fixture_python, '-c', 'import time; time.sleep(0.4)'], **kwargs)
         processes.append(process)
         return process
     monkeypatch.setattr(routing.subprocess, 'Popen', launch)

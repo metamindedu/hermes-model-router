@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-11 | retired-tirith-startup-compatibility
+- 현재 Hermes에서 제거된 Tirith의 필수 import 때문에 라우팅 자식이 모델/도구 이전에 실패하는 호환성 경계를 기록.
+- 정확한 optional 모듈 누락만 허용하고 legacy initializer·다른 실패 전파를 유지한다. 로컬 설치·공개 릴리스·공식 카탈로그 SHA 갱신은 별개로 실제 검증한다.
+
 ## 2026-10-10 | fast-inheritance-review-boundaries
 - 실제 요청 모델/extra_body 덮어쓰기와 활성 런타임의 일치, TTL/cap 정리 후에도 생성 문맥의 정확한 child 증거로 정제 유지, Fast job의 legacy attempt downgrade 거부 경계를 보완.
 - 실제 native sync/async dispatch와 SDK MockTransport 검증을 강화. provider의 실제 처리 등급·과금 검증과 설치/활성화는 별도의 증거로 유지한다.

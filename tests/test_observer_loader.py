@@ -225,14 +225,19 @@ def test_strict_real_config_valid_snapshot_has_no_recovery(attempt, monkeypatch)
     assert raw == path.read_bytes()
 
 
-def test_real_default_bootstrap_prepares_copied_plugin_without_provider_call(attempt, monkeypatch):
+@pytest.mark.parametrize('legacy_available', [False, True])
+def test_real_default_bootstrap_prepares_copied_plugin_without_provider_call(attempt, monkeypatch, legacy_available):
     import importlib.util
     import shutil
     monkeypatch.syspath_prepend(str(CORE))
     monkeypatch.setenv('HERMES_DISABLE_LAZY_INSTALLS', '1')
     from hermes_cli import env_loader, runtime_provider, plugins, mcp_startup, profiles
     monkeypatch.setattr(profiles, '_get_default_hermes_home', lambda: attempt['home'])
-    from tools import tirith_security
+    import types
+    tirith_security = types.ModuleType('tools.tirith_security')
+    tirith_security.ensure_installed = lambda **kw: None
+    monkeypatch.setitem(sys.modules, 'tools.tirith_security',
+                        tirith_security if legacy_available else None)
     destination = attempt['home'] / 'plugins/model-router'
     destination.mkdir(parents=True)
     for name in ('plugin.yaml', '__init__.py'):
@@ -261,8 +266,9 @@ def test_real_default_bootstrap_prepares_copied_plugin_without_provider_call(att
         assert prepared['observer'].__name__.startswith('hermes_plugins.model_router')
         assert Path(prepared['observer'].__file__).resolve().parent.parent == destination.resolve()
         assert prepared['resolve_runtime_provider'] is forbidden_provider
-        assert calls[:3] == ['env', 'tirith', 'mcp']
-        assert all(call == 'env' for call in calls[3:])
+        expected_startup = ['env', 'tirith', 'mcp'] if legacy_available else ['env', 'mcp']
+        assert calls[:len(expected_startup)] == expected_startup
+        assert all(call == 'env' for call in calls[len(expected_startup):])
         plugins.get_plugin_manager().unload('model-router')
 
 

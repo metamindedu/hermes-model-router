@@ -40,8 +40,13 @@ def test_native_owner_guard_and_kill_stop_actual_worker_runner_adapter_tree(tmp_
         runner_code = "import subprocess,sys,time; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',%r]); Path(%r).write_text(str(p.pid)); time.sleep(20)" % (grandchild_code, str(tmp_path / 'adapter.pid'))
         root_code = "import subprocess,sys,time; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',%r]); Path(%r).write_text(str(p.pid)); time.sleep(20)" % (runner_code, str(tmp_path / 'runner.pid'))
         flags = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == 'win32' else {'start_new_session': True}
+        # These are stdlib process-tree fixtures, not dependency/runtime probes.
+        # Avoid the Windows venv forwarding layer; retain the same process-group
+        # flags, six-second startup gate, native owner denial and full-tree kill.
+        fixture_python = (getattr(sys, '_base_executable', sys.executable)
+                          if sys.platform == 'win32' else sys.executable)
         with (tmp_path / 'job.log').open('wb') as out:
-            process = subprocess.Popen([sys.executable, '-c', root_code], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True, **flags)
+            process = subprocess.Popen([fixture_python, '-c', root_code], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True, **flags)
         runtime = RouteRuntime('parent', 'owner-key', 'owner-task', registry, lambda *a: True)
         process_id = runtime.track(process, job_id='cancel-test', purpose='mechanical', cwd=str(tmp_path))
         deadline = time.monotonic() + 6

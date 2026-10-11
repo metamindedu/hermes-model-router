@@ -811,10 +811,16 @@ def _default_prepare_runtime(request: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise AttemptError("initialization_error", "profile config could not be applied safely") from exc
 
-    # Match normal CLI startup: ensure Tirith readiness, discover profile plugins, and
-    # complete the finite one-shot MCP snapshot before AIAgent captures its tools.
-    from tools.tirith_security import ensure_installed
-    ensure_installed(log_failures=False)
+    # Current Hermes no longer bundles Tirith. Keep the initializer on older
+    # hosts, but do not hide a broken parent package or a legacy dependency.
+    try:
+        from tools.tirith_security import ensure_installed
+    except ModuleNotFoundError as exc:
+        if exc.name != "tools.tirith_security":
+            raise
+    else:
+        ensure_installed(log_failures=False)
+    # Complete normal plugin discovery/MCP startup before AIAgent captures tools.
     from hermes_cli.plugins import discover_plugins
     discover_plugins()
     observer_module = _resolve_registered_observer(Path(request["home"]), plugin_root)

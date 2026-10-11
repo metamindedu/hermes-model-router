@@ -1,5 +1,5 @@
 name: model-router
-version: 0.4.1
+version: 0.4.2
 description: "Profile model settings, opt-in Heavy/Light task routing, fallback controls, runtime limits, and session Fast inheritance"
 author: NewMetaW
 provides_tools:

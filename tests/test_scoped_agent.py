@@ -534,7 +534,11 @@ def test_invalid_or_recovered_profile_config_stops_before_tools_or_provider(atte
     from hermes_cli.config_read_errors import FailedConfigRead
     from hermes_cli import plugins
     from hermes_cli import runtime_provider
-    from tools import tirith_security
+    # This negative-config fixture instruments legacy startup independently of
+    # whether the current host still bundles that retired optional module.
+    tirith_security = types.ModuleType("tools.tirith_security")
+    tirith_security.ensure_installed = lambda **_kwargs: None
+    monkeypatch.setitem(sys.modules, "tools.tirith_security", tirith_security)
 
     home = attempt["home"]
     from hermes_cli import profiles

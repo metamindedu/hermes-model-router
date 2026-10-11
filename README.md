@@ -42,6 +42,10 @@ Fast and fallback requests can increase API charges or subscription-credit usage
 
 ## Compatibility and current limitations
 
+### v0.4.2 startup compatibility fix
+
+Hermes builds that retired the bundled Tirith scanner no longer provide `tools.tirith_security`. Earlier Model Router versions still imported it unconditionally, so routed children could fail during startup before a model request or tool execution. Version 0.4.2 skips only that exact missing optional module. On older hosts the original initializer still runs; missing parent packages, other dependencies and initializer errors still stop startup. This is a plugin-only compatibility fix, not an approval/security bypass or a change to Fast inheritance, models, fallback consent or runtime limits. Catalog users receive it only after the new exact-SHA pin is maintainer-reviewed and merged.
+
 - The Desktop UI is currently **Korean-first**; the package overview and policy skill include English guidance.
 - Runtime/SDK regression and Desktop validation were performed on Windows. Linux/macOS installation/runtime support has not been fully exercised; the catalog entry must disclose that scope.
 - Requires a Hermes build supporting unified Python/Desktop packages and the request/tool middleware used here. Features whose supported native hooks are unavailable do not gain an alternate private-core patch.
@@ -66,6 +70,8 @@ Release dependencies are bounded (`PyYAML>=6,<7`). No credentials or local state
 Hermes Desktop의 **모델 및 라우팅** 페이지에서 프로필별 모델과 코딩·복잡한 비코딩 판단 작업의 Heavy/Light 경로를 관리하는 네이티브 플러그인입니다. 설정 관리와 라우팅 사용 여부는 별개입니다.
 
 ## 다른 PC에 설치
+
+**v0.4.2 호환성 수정:** 현재 Hermes에서 제거된 `tools.tirith_security`를 이전 실행기가 필수로 불러와 라우팅 자식의 시작이 실패하던 문제를 수정했습니다. 해당 모듈의 정확한 누락만 허용하고 구버전 초기화와 다른 오류 차단은 유지합니다. Fast 상속·모델·폴백·시간 설정·승인 정책은 변경하지 않습니다. 공식 카탈로그의 버전 갱신은 별도 SHA 갱신 PR의 유지관리자 병합 후 반영됩니다.
 
 공개 저장소 `metamindedu/hermes-model-router`에서 설치합니다. GitHub 로그인 없이 설치할 수 있으며, 새 PC의 Hermes 모델 제공자 인증은 별도로 준비합니다.
 
