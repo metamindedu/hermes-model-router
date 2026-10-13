@@ -58,6 +58,20 @@ test('older SDK uses settings.plugins without restoring main sidebar', () => {
   assert.equal(ui.rpcCalls(), 0)
 })
 
+test('older SDK without the settings constant still registers the documented literal area', () => {
+  const ui = fixture()
+  const items = []
+  const ctx = { register: row => items.push(row), registerMany: rows => items.push(...rows) }
+  ui.plugin.register(ctx)
+  assert.deepEqual(items.map(row => row.area), ['settings.plugins', 'routes', 'palette'])
+  assert.equal(items[0].title, '모델 및 라우팅')
+  assert.equal(items[0].data.icon, 'settings-gear')
+  assert.equal(items[0].render().props.ctx, ctx)
+  items.find(row => row.id === 'open').data.run()
+  assert.deepEqual(ui.navigation, ['/settings?tab=plugins&plugin=model-router'])
+  assert.equal(ui.rpcCalls(), 0)
+})
+
 test('minimal old context preserves compatibility route and palette with no new sidebar or writes', () => {
   const ui = fixture()
   const items = []
