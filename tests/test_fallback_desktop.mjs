@@ -115,6 +115,7 @@ function harness(initial = statusFixture()) {
   Object.assign(imports, { useState, useRef, useEffect, jsx, jsxs: jsx, host,
     useValue: atom => atom.get(), useQuery: () => query })
   const executable = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
+    .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
     .replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
   const RouterPage = new Function(...Object.keys(imports), `${executable}\nreturn RouterPage`)(...Object.values(imports))
   const render = () => {

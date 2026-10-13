@@ -1,5 +1,9 @@
 # Wiki Log
 
+## 2026-10-13 | native-plugin-settings-placement
+- 사용자 요청: 모델 및 라우팅 설정을 메인 사이드바에서 설정 → 플러그인으로 옮기고 운영·GitHub·카탈로그 업데이트까지 수행한다.
+- 기존 페이지/컨텍스트/저장 계약과 프로필별 모델·라우팅·폴백·시간 설정을 보존한다. 실제 native 메뉴 관찰과 원격 카탈로그 병합은 소스 테스트/설치와 별도로 확인한다.
+
 ## 2026-10-11 | retired-tirith-startup-compatibility
 - 현재 Hermes에서 제거된 Tirith의 필수 import 때문에 라우팅 자식이 모델/도구 이전에 실패하는 호환성 경계를 기록.
 - 정확한 optional 모듈 누락만 허용하고 legacy initializer·다른 실패 전파를 유지한다. 로컬 설치·공개 릴리스·공식 카탈로그 SHA 갱신은 별개로 실제 검증한다.

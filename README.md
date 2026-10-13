@@ -30,7 +30,7 @@ For reproducibility, use a reviewed full commit SHA with `--ref <40-character-SH
 
 ![Actual Desktop Fast-inheritance notice, cropped to exclude profile names and conversations](docs/fast-inheritance.png)
 
-Enable the package's Desktop half and open **모델 및 라우팅** (Models and routing). Load a profile, review actual provider/model availability, select routing-enabled profiles and save only your intended scope. Model/fallback/copy target selections are independent; an initially checked target list does not itself authorize writes. Start a new session for updated Python tools. Existing model presets are editable examples, not live availability recommendations.
+Enable the package's Desktop half and open **Settings → Plugins → 모델 및 라우팅** (Models and routing). Load a profile, review actual provider/model availability, select routing-enabled profiles and save only your intended scope. Model/fallback/copy target selections are independent; an initially checked target list does not itself authorize writes. Start a new session for updated Python tools. Existing model presets are editable examples, not live availability recommendations.
 
 ## Security and cost disclosures
 
@@ -41,6 +41,10 @@ It uses Hermes's **own** provider/authentication layer, not another vendor CLI's
 Fast and fallback requests can increase API charges or subscription-credit usage. A requested tier does not prove the provider's processing tier or billing. A native "primary restored" notice means the request path was restored, not that a successful model response was observed. Core retry/backoff remains core-owned.
 
 ## Compatibility and current limitations
+
+### v0.4.3 settings placement
+
+The existing settings page now belongs under **Settings → Plugins**, using the public `registerSettingsPage` API (or its documented `settings.plugins` contribution). The main-sidebar row is removed; the command-palette shortcut opens the native settings entry. The old `/model-router` route remains only for existing bookmarks. This is a navigation-only change: the existing page, profile scope, draft/save/CAS protections, routing/model/fallback/Fast/runtime policies and activation choices are unchanged. Older hosts that cannot display plugin settings need a supported Hermes Desktop build; no private-core patch or new sidebar fallback is added.
 
 ### v0.4.2 startup compatibility fix
 
@@ -83,7 +87,7 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 
 ## 사용
 
-1. 사이드바 **모델 및 라우팅**을 엽니다.
+1. **설정 → 플러그인 → 모델 및 라우팅**을 엽니다. 메인 사이드바의 기존 항목은 제거되며, 명령 팔레트의 바로가기는 새 설정 경로를 엽니다.
 2. 기준 프로필의 설정을 불러오거나 **OpenAI / Non-OpenAI 프리셋**으로 네 모델 역할을 한 번에 채운 뒤, 필요하면 개별 값을 편집합니다. 프리셋 선택만으로 실제 설정은 바뀌지 않습니다.
 3. **모델 설정 적용 대상**은 화면을 처음 열거나 연결 범위가 바뀔 때 **모든 프로필이 선택**됩니다. **전체 선택 / 전체 해제**로 일괄 조정할 수 있습니다. 사용자가 해제한 선택은 기준 프로필 변경이나 상태 새로고침으로 다시 확대하지 않습니다. 라우팅만 변경하려면 모델 적용 대상을 전체 해제하세요.
 4. **라우팅 활성 프로필**은 기능을 켜고 끄는 목록입니다. **Heavy/Light 설정 적용 대상**은 편집한 경로를 복사할 프로필 목록이며, 처음에는 전체 선택됩니다. Heavy/Light 값을 수정하거나 대상 목록을 직접 선택한 뒤 저장하면 지정한 대상에만 경로를 적용합니다. 기존 값 그대로 여러 프로필에 복사하려면 **전체 선택**을 누르고 저장하세요. 단순히 활성 프로필만 바꾸거나 일반 모델만 저장하면 기존 경로는 보존됩니다.

@@ -7,7 +7,6 @@ import {
   Input,
   PALETTE_AREA,
   ROUTES_AREA,
-  SIDEBAR_NAV_AREA,
   Select,
   SelectContent,
   SelectItem,
@@ -17,6 +16,7 @@ import {
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
+import * as DesktopSDK from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -2176,19 +2176,34 @@ function RouterPage({ ctx: pluginContext }) {
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
+  version: '0.4.3',
   defaultEnabled: false,
   register(ctx) {
+    const page = {
+      id: 'settings',
+      title: '모델 및 라우팅',
+      icon: 'settings-gear',
+      render: () => jsx(RouterPage, { ctx })
+    }
+    if (typeof ctx.registerSettingsPage === 'function') {
+      ctx.registerSettingsPage(page)
+    } else if (typeof ctx.register === 'function') {
+      // Public low-level settings contribution for older SDKs; never a sidebar fallback.
+      ctx.register({
+        id: page.id,
+        area: DesktopSDK.SETTINGS_PLUGINS_AREA || 'settings.plugins',
+        title: page.title,
+        render: page.render,
+        data: { icon: page.icon }
+      })
+    }
     ctx.registerMany([
       {
         id: 'page',
         area: ROUTES_AREA,
         data: { path: ROUTE_PATH },
-        render: () => jsx(RouterPage, { ctx })
-      },
-      {
-        id: 'sidebar',
-        area: SIDEBAR_NAV_AREA,
-        data: { path: ROUTE_PATH, label: '모델 및 라우팅', codicon: 'settings-gear' }
+        // Compatibility for existing bookmarks only; there is no main-sidebar entry.
+        render: page.render
       },
       {
         id: 'open',
@@ -2197,7 +2212,9 @@ export default {
           id: 'model-router.open',
           label: '모델 및 라우팅 열기',
           keywords: ['model', 'routing', 'profile', '모델', '라우팅', '프로필'],
-          run: () => host.navigate(ROUTE_PATH)
+          run: () => host.navigate(typeof DesktopSDK.pluginSettingsHref === 'function'
+            ? DesktopSDK.pluginSettingsHref(PLUGIN_ID)
+            : '/settings?tab=plugins&plugin=model-router')
         }
       }
     ])
