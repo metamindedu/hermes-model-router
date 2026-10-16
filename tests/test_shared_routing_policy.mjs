@@ -11,6 +11,35 @@ const desktop = read('desktop/plugin.js')
 const registration = read('__init__.py')
 const readme = read('README.md')
 
+test('small bounded changes stay Main-owned before route discovery or configuration', () => {
+  for (const policy of [canonical, compatibility]) {
+    assert.match(policy, /Main implements small, bounded changes directly/)
+    assert.match(policy, /at least two substantive, independent workstreams/)
+    assert.match(policy, /Do not split a small task artificially/)
+    assert.match(policy, /startup, context transfer and coordination/)
+    assert.match(policy, /required Heavy or independent review/)
+  }
+  assert.ok(canonical.indexOf('## Direct-Main default') < canonical.indexOf('## First check'))
+  assert.match(canonical, /do not discover or query coding_route just to perform local work/)
+  assert.match(canonical, /Tests, lint, build and optional review of the same small edit do not count/)
+  assert.match(canonical, /Apply the same threshold to native delegate_task/)
+  assert.match(canonical, /A required single Heavy review is an exception/)
+  assert.match(canonical, /Small review-driven corrections stay with Main/)
+  assert.match(canonical, /User-facing visual\/motion design remains Main-owned/)
+  assert.doesNotMatch(canonical, /Medium: Main or Light implements|Light normally fixes findings/)
+})
+
+test('discovery and settings copy expose the direct-Main default without changing the router API', () => {
+  assert.match(registration, /Main handles small bounded changes directly/)
+  assert.match(registration, /at least two substantive independent workstreams/)
+  assert.match(registration, /required Heavy\/independent review remains mandatory/)
+  for (const copy of [desktop, readme]) {
+    assert.match(copy, /작고 범위가 명확한 수정은 메인 모델이 직접 처리/)
+    assert.match(copy, /독립적인 실작업 두 개 이상/)
+    assert.match(copy, /필수 Heavy·독립 검수/)
+  }
+})
+
 test('canonical and compatibility skill keep the name and share complex non-coding scope', () => {
   assert.match(canonical, /^name: adaptive-coding-orchestration$/m)
   assert.match(compatibility, /^name: adaptive-coding-orchestration$/m)

@@ -129,6 +129,19 @@ def test_active_profile_registers_scoped_tool_and_skill(plugin):
     assert state["bound"][-1] == "token"
 
 
+def test_registered_discovery_copy_defaults_small_work_to_main(plugin):
+    mod, ctx, state, tools, skills = plugin
+    mod.register(ctx)
+    description = tools[0]['schema']['description']
+    assert 'Main handles small bounded changes directly' in description
+    assert 'at least two substantive independent workstreams' in description
+    assert 'unless explicitly requested by the user' in description
+    assert 'required Heavy/independent review remains mandatory' in description
+    assert 'Main handles small bounded changes directly' in skills[0][2]
+    assert state['started'] == 0
+    assert tools[0]['schema']['parameters']['required'] == ['action']
+
+
 def test_public_title_schema_is_forwarded_without_changing_scope(plugin):
     mod, ctx, state, tools, _ = plugin
     mod.register(ctx)

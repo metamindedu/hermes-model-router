@@ -42,6 +42,10 @@ Fast and fallback requests can increase API charges or subscription-credit usage
 
 ## Compatibility and current limitations
 
+### v0.4.4 direct-Main default
+
+Main implements small, bounded changes and their focused checks directly, without calling `coding_route`. Ordinary implementation delegation must justify at least two substantive independent workstreams with a clear net parallel benefit after startup/context/coordination costs; do not manufacture a second task from tests, builds or optional review. The same threshold applies to native delegation. Explicit user delegation and required Heavy/independent review remain exceptions; high-risk judgment, production approvals, profile opt-in, models, fallback consent and runtime settings are unchanged. This is guidance, not a new runtime rejection or a two-child minimum on the API. Existing Python tool descriptions may require a new session.
+
 ### v0.4.3 settings placement
 
 The existing settings page now belongs under **Settings → Plugins**, using the public `registerSettingsPage` API (or its documented `settings.plugins` contribution). The main-sidebar row is removed; the command-palette shortcut opens the native settings entry. The old `/model-router` route remains only for existing bookmarks. This is a navigation-only change: the existing page, profile scope, draft/save/CAS protections, routing/model/fallback/Fast/runtime policies and activation choices are unchanged. Older hosts that cannot display plugin settings need a supported Hermes Desktop build; no private-core patch or new sidebar fallback is added.
@@ -119,6 +123,8 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 - 아직 전체 시간 enforcement 코드가 설치되지 않았거나 설정 파일을 안전하게 읽을 수 없는 프로필은 편집을 잠그고 기존 값을 보존합니다. Python middleware/hook가 필요한 기존 대화는 새 세션/지원되는 프로필 플러그인 reload가 필요할 수 있습니다.
 
 ## 라우팅 적용 범위
+
+작고 범위가 명확한 수정은 메인 모델이 직접 처리합니다. 작은 버그·문구·설정·UI 수정과 관련 테스트는 Main에서 끝냅니다. 일반 구현 위임은 독립적인 실작업 두 개 이상으로 나눌 가치가 있고, 시작·문맥 전달·조정 비용보다 병렬 처리 이득이 클 때만 사용합니다. 테스트·빌드·선택적 검수로 작업 수를 부풀리거나 작은 일을 억지로 쪼개지 않습니다. 이 기준은 `coding_route`와 기본 `delegate_task`에 함께 적용합니다. 사용자의 명시적 위임 요청과 필수 Heavy·독립 검수는 예외이며, 단일 필수 검수 때문에 구현 자식까지 추가하지 않습니다. 고위험 판단·운영 승인·프로필 활성화·모델·폴백·시간 설정은 그대로 유지합니다. 작업 수를 API에서 강제하는 변경이 아니라 에이전트 판단 지침입니다.
 
 동봉 정책은 프로필마다 동일합니다. 코딩뿐 아니라 근거가 충돌하거나 여러 근거를 종합해야 하는 판단, 내용 오류의 영향이 큰 학습자료·문항 검토, 반복된 개념적 실패가 있는 복잡한 비코딩 작업에도 Heavy 계획과 내용 검토를 적용합니다. 대량 콘텐츠는 범위를 나누고 저장된 체크포인트와 시간·재시도 예산을 두며, 확대 전 파일럿을 확인합니다. 외부 쓰기는 기존 승인 아래 직렬화합니다. 단순 글쓰기·번역·요약·정보 추출·한 단계 조회는 비코딩 작업이거나 길다는 이유만으로 Heavy에 보내지 않습니다.
 

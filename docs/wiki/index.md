@@ -1,5 +1,7 @@
 # 운영 지식 색인
 
+- [[direct-main-default]] — 작은 수정의 Main 직접 처리, 실질적인 병렬 작업 기준과 위임 오버헤드, 단일 필수 검수 예외, 설치별 로컬 지침 보존
+
 - [[settings-placement]] — 공식 설정 → 플러그인 배치, 기존 사이드바 제거와 구 링크 호환, 저장/프로필 정책 보존, app-wide source와 배포/활성화/카탈로그 구분
 
 - [[startup-compatibility]] — Hermes의 retired Tirith 모듈과 플러그인 시작 호환성, 정확한 optional import 누락만 허용하는 경계, 설치와 공개 릴리스·카탈로그 고정값의 구분

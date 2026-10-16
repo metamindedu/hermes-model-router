@@ -92,7 +92,7 @@ def register(ctx):
     ctx.register_skill(
         "adaptive-coding-orchestration",
         Path(__file__).parent / "skills/adaptive-coding-orchestration/SKILL.md",
-        "Profile-enabled coding and complex non-coding orchestration: Light bounded work, verified Heavy semantic review.",
+        "Profile-enabled coding and complex non-coding orchestration: Main handles small bounded changes directly; delegate implementation only for worthwhile parallel work; retain required Heavy review.",
     )
 
     def handler(args, **kwargs):
@@ -130,7 +130,7 @@ def register(ctx):
 
     schema = {
         "name": "coding_route",
-        "description": "Run profile-approved task and verification routes for coding and complex non-coding judgment. Read model-router:adaptive-coding-orchestration first. Heavy planning and semantic review apply to complex judgment; routine writing, translation, and simple extraction do not need Heavy. config reads effective roles; start launches one bounded job; status reads its evidence. implementation/mechanical/preliminary-review use Light; plan/semantic-final/independent-review use Heavy. Disabled profiles are denied. This tool never changes model settings. A verified model identity is not itself a semantic GO.",
+        "description": "Run profile-approved task and verification routes for coding and complex non-coding judgment. Main handles small bounded changes directly, including tests, without this tool. Delegate ordinary implementation only for at least two substantive independent workstreams with net parallel benefit, unless explicitly requested by the user; required Heavy/independent review remains mandatory. Read model-router:adaptive-coding-orchestration first. Heavy planning and semantic review apply to complex judgment; routine writing, translation, and simple extraction do not need Heavy. config reads effective roles; start launches one bounded job; status reads its evidence. implementation/mechanical/preliminary-review use Light; plan/semantic-final/independent-review use Heavy. Disabled profiles are denied. This tool never changes model settings. A verified model identity is not itself a semantic GO.",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {

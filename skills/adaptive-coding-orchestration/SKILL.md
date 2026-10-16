@@ -1,16 +1,24 @@
 ---
 name: adaptive-coding-orchestration
 description: Use for coding or complex non-coding judgment.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Adaptive Coding Orchestration — Model Router
 
 This policy is bundled with the model-router plugin. Model choices and profile enablement come from coding_route(action="config"), never from names in this file or a BAT. User/project instructions, production approval and secret protection remain binding.
 
+## Direct-Main default
+
+Main implements small, bounded changes directly, including narrow bug fixes, copy/config edits, small UI adjustments and their focused tests. When the work does not justify at least two substantive, independent workstreams, keep implementation and mechanical checks in Main rather than spawning a single implementation child. Compare expected time saved against startup, context transfer and coordination; delegate ordinary implementation only when parallel work has a clear net benefit. Do not split a small task artificially to reach two children. Tests, lint, build and optional review of the same small edit do not count as a second implementation workstream.
+
+Apply the same threshold to native delegate_task; it is not a workaround for avoiding this rule. For direct Main work, do not discover or query coding_route just to perform local work. Neither file count, a Medium label nor an available Light route is by itself a reason to delegate. The user may explicitly request delegation; otherwise use this default.
+
+This threshold does not waive required Heavy or independent review, high-risk semantic judgment, production approval or project-specific safety gates. A required single Heavy review is an exception, not a reason to add an implementation child or manufacture a second job. User-facing visual/motion design remains Main-owned; Light may gather evidence, run justified mechanical work or apply Main's exact specified corrections, not own the design.
+
 ## First check
 
-Load coding_route via tool discovery when absent from the current tool list. Query action=config. If the plugin/profile is disabled or the tool is unavailable, do not bypass the gate through an old script or global config change. Explain that a new session or plugin activation is needed. Safe local work may continue, but required Heavy review is unmet.
+Only when delegation is justified above or a required Heavy gate applies, load coding_route via tool discovery when absent from the current tool list and query action=config. If the plugin/profile is disabled or the tool is unavailable, do not bypass the gate through an old script or global config change. Explain that a new session or plugin activation is needed for routing. Safe local work may continue, but required Heavy review is unmet.
 
 Models are operator-assigned roles, not a claim about benchmark capability. Main may be Light or Heavy; do not infer class from a model name or reasoning effort. Heavy/Light may follow Main/Delegation or use separate overrides. The plugin resolves the actual profile setting at execution.
 
@@ -25,8 +33,8 @@ Use the existing approved tool purposes without changing the plugin implementati
 ## Classify work
 
 - Trivial: Main handles locally, minimal focused checks; no delegation or Heavy review ceremony.
-- Medium: Main or Light implements bounded existing patterns; escalate a real ambiguity/risk seam only.
-- Complex/high-risk: architecture, authentication, payments, privacy, migration, data loss, concurrency, critical contracts, repeated conceptual failures. Heavy plans/diagnoses and performs final semantic judgment; Light implements and runs mechanical checks.
+- Medium: Main implements bounded existing patterns by default; use Light implementation only after the substantive parallel-work threshold above is met (or the user explicitly requests delegation). Escalate a real ambiguity/risk seam only.
+- Complex/high-risk: architecture, authentication, payments, privacy, migration, data loss, concurrency, critical contracts, repeated conceptual failures. Heavy plans/diagnoses and performs final semantic judgment; Main may implement a bounded fix directly, while Light implementation still follows the threshold above.
 - Light may collect evidence and flag preliminary findings. This never satisfies a required Heavy or independent final review.
 - Explicit independent final review requires a fresh Heavy child, not Main's own review, even when Main is Heavy. Task wording (read-only, small diff, GO/NO-GO, timeboxed) cannot reduce the required class.
 
@@ -45,7 +53,7 @@ Use coding_route(action="start", title="짧고 구체적인 작업명", purpose=
 
 The call returns a job_id, not completion. Use coding_route(action="status", job_id=...) for bounded status checks. Respect tool-reported running/failed/unverified state; do not manufacture success. Each job records requested and actual model/provider evidence. route_verified proves identity, not correctness; read the review findings and candidate evidence before giving GO. If required Heavy is unavailable, leave the gate explicitly unmet; do not silently substitute Light or invent a paid route.
 
-Native delegate_task may still handle Light implementation/mechanical tasks after comparing its actual configured provider/model against the plugin's effective Light role. It is not a Heavy adapter. When native delegation differs from the selected Light override, use coding_route. Do not temporarily mutate delegation.model or global profile configuration around a task.
+After the delegation threshold is met, native delegate_task may handle Light implementation/mechanical tasks after comparing its actual configured provider/model against the plugin's effective Light role. It is not a Heavy adapter. When native delegation differs from the selected Light override, use coding_route only for already-justified delegation, not as a reason to delegate. Do not temporarily mutate delegation.model or global profile configuration around a task.
 
 ## Bounded handoff and implementation
 
@@ -63,7 +71,7 @@ Stop when acceptance criteria pass. Do not add refactors/docs/frameworks/new rev
 
 ## Review and completion
 
-Group significant risk seams into one bounded Heavy review. Provide original requirements, candidate identity/diff, actual tests and minimal architectural context without leading the reviewer to the implementer's conclusion. Keep review read-only. Light normally fixes findings; reassess only affected evidence after corrections.
+Group significant risk seams into one bounded Heavy review. Provide original requirements, candidate identity/diff, actual tests and minimal architectural context without leading the reviewer to the implementer's conclusion. Keep review read-only. Small review-driven corrections stay with Main; delegate fixes only if the implementation threshold is independently met. Reassess only affected evidence after corrections.
 
 Main owns final acceptance. Verify actual artifacts, tests, state-changing readbacks and route identity; never trust only a child summary. Do not repeat unchanged passing checks without new evidence. Separate tests/build status, route verification, semantic review and production authorization in the report.
 
