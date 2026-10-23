@@ -444,14 +444,7 @@ class Router:
         }
         if primary["HEAVYWEIGHT"]["reasoning"] not in RUNNER_OPERATOR_EFFORTS or primary["LIGHTWEIGHT"]["reasoning"] not in RUNNER_OPERATOR_EFFORTS:
             raise RoutingError("selected primary reasoning effort is unsupported by the bundled route runner")
-        if (
-            primary["HEAVYWEIGHT"]["provider"],
-            primary["HEAVYWEIGHT"]["model"],
-        ) == (
-            primary["LIGHTWEIGHT"]["provider"],
-            primary["LIGHTWEIGHT"]["model"],
-        ):
-            raise RoutingError("enabled Heavy and Light routes must resolve to distinct models")
+        # Roles define independent jobs and review contracts, not model identity.
         fallback = _as_mapping(config.get("fallback"))
         configured_fallback_enabled = fallback.get("enabled")
         if not isinstance(configured_fallback_enabled, bool):

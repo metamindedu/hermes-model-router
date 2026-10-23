@@ -1,6 +1,6 @@
 # Hermes Model Router
 
-Profile-scoped model settings and opt-in Heavy/Light task routing for **Hermes Agent**, with a native Desktop settings page. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
+Profile-scoped model settings and default-on Heavy/Light task routing for **Hermes Agent**, with a native Desktop settings page. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
 [한국어 안내](#한국어-안내) · [Installation](INSTALL.md) · [Security and disclosures](SECURITY.md) · [MIT license](LICENSE)
 
@@ -12,7 +12,7 @@ Install the unified Python/Desktop package into each existing profile where you 
 hermes --profile default plugins install metamindedu/hermes-model-router
 ```
 
-The public repository does not require GitHub login. Provider authentication remains with Hermes; this package does not include accounts, keys, profile configuration, conversations or job records. Review the install scanner and dependency prompts. Python activation, Desktop UI activation and routing opt-in are separate. Installing does **not** enable routing, change your models or authorize paid fallback.
+The public repository does not require GitHub login. Provider authentication remains with Hermes; this package does not include accounts, keys, profile configuration, conversations or job records. Review the install scanner and dependency prompts. Hermes install trust, dependency consent and Python/Desktop activation remain required. Once enabled, an installed profile without a saved routing choice defaults ON. Existing saved OFF choices and explicit skill opt-outs remain OFF; uninstalled profiles are not enabled. Installation does not change models, authorize paid fallback, rewrite budgets or launch jobs.
 
 For reproducibility, use a reviewed full commit SHA with `--ref <40-character-SHA>`. Catalog installation by name is available **only after** the owner-submitted entry is reviewed and merged by a Hermes maintainer; a public repository or an open PR is not a catalog listing.
 
@@ -34,13 +34,17 @@ Enable the package's Desktop half and open **Settings → Plugins → 모델 및
 
 ## Security and cost disclosures
 
-This plugin reads installed Hermes profile configuration and its own model-routing/job data. Explicit saves invoke the supported Hermes config CLI and may update selected profiles. Opted-in routed jobs launch background Hermes processes with normal tools, configured providers and MCP integrations; prompts, results and job evidence are stored under that profile's plugin data. Treat those artifacts as private. The manual historical source-repair script can modify exact validated session rows only when explicitly applied.
+This plugin reads installed Hermes profile configuration and its own model-routing/job data. Explicit saves invoke the supported Hermes config CLI and may update selected profiles. Enabled routed jobs launch background Hermes processes with normal tools, configured providers and MCP integrations; prompts, results and job evidence are stored under that profile's plugin data. Treat those artifacts as private. The manual historical source-repair script can modify exact validated session rows only when explicitly applied.
 
 It uses Hermes's **own** provider/authentication layer, not another vendor CLI's token store. Normal Hermes-owned OAuth refresh may occur. It has no separate credential store, telemetry endpoint, self-updater or automatic approval bypass. Provider/MCP network access is inherited from the user's Hermes setup. Read [SECURITY.md](SECURITY.md) before enabling routing or multi-profile settings writes.
 
 Fast and fallback requests can increase API charges or subscription-credit usage. A requested tier does not prove the provider's processing tier or billing. A native "primary restored" notice means the request path was restored, not that a successful model response was observed. Core retry/backoff remains core-owned.
 
 ## Compatibility and current limitations
+
+### v0.4.5 first-save fix and default-on routing
+
+First settings saves preserve the raw `skills.disabled` CAS baseline, including omitted/null/legacy forms, rather than comparing a normalized empty list with missing storage. New installed profiles without saved choices default ON without a settings migration. Existing explicit OFF choices remain OFF, and opt-out controls move under advanced routing settings. Heavy/Light may use the same provider/model/effort in separate jobs; role-specific verification and budgets remain distinct. Same-model review is not different-model review diversity. Models, fallback consent, native approvals and stored budgets are not changed on installation.
 
 ### v0.4.4 direct-Main default
 
@@ -87,15 +91,15 @@ Hermes Desktop의 **모델 및 라우팅** 페이지에서 프로필별 모델�
 hermes --profile default plugins install metamindedu/hermes-model-router
 ```
 
-설치/의존성 동의와 Desktop UI 활성화를 확인하세요. 라우팅은 프로필별로 별도 선택·적용하며, 공통 정책을 배포해도 모든 프로필을 자동 활성화하지 않습니다. 기존 활성 프로필 선택과 모델·폴백·승인 설정은 바뀌지 않으며, 개인 프로필 설정이나 대화 자료도 복사하지 않습니다. 프로필별 설치, 버전 고정, 확인·업데이트 절차는 [INSTALL.md](INSTALL.md)를 참고하세요.
+설치 신뢰·의존성 동의와 Python/Desktop 활성화를 확인하세요. 플러그인이 설치되고 별도 라우팅 선택을 저장하지 않은 프로필은 기본 ON입니다. 기존에 저장한 OFF와 명시적 스킬 비활성화는 보존하며, 플러그인이 없는 프로필은 켜지 않습니다. 모델·폴백·승인·시간값과 개인 프로필 설정·대화 자료는 설치만으로 변경하거나 복사하지 않습니다. 프로필별 설치, 버전 고정, 확인·업데이트 절차는 [INSTALL.md](INSTALL.md)를 참고하세요.
 
 ## 사용
 
 1. **설정 → 플러그인 → 모델 및 라우팅**을 엽니다. 메인 사이드바의 기존 항목은 제거되며, 명령 팔레트의 바로가기는 새 설정 경로를 엽니다.
 2. 기준 프로필의 설정을 불러오거나 **OpenAI / Non-OpenAI 프리셋**으로 네 모델 역할을 한 번에 채운 뒤, 필요하면 개별 값을 편집합니다. 프리셋 선택만으로 실제 설정은 바뀌지 않습니다.
 3. **모델 설정 적용 대상**은 화면을 처음 열거나 연결 범위가 바뀔 때 **모든 프로필이 선택**됩니다. **전체 선택 / 전체 해제**로 일괄 조정할 수 있습니다. 사용자가 해제한 선택은 기준 프로필 변경이나 상태 새로고침으로 다시 확대하지 않습니다. 라우팅만 변경하려면 모델 적용 대상을 전체 해제하세요.
-4. **라우팅 활성 프로필**은 기능을 켜고 끄는 목록입니다. **Heavy/Light 설정 적용 대상**은 편집한 경로를 복사할 프로필 목록이며, 처음에는 전체 선택됩니다. Heavy/Light 값을 수정하거나 대상 목록을 직접 선택한 뒤 저장하면 지정한 대상에만 경로를 적용합니다. 기존 값 그대로 여러 프로필에 복사하려면 **전체 선택**을 누르고 저장하세요. 단순히 활성 프로필만 바꾸거나 일반 모델만 저장하면 기존 경로는 보존됩니다.
-5. Heavy는 메인 모델, Light는 서브에이전트 모델을 따라가는 것이 기본이며 별도 지정도 가능합니다. 따라가기를 복사하면 각 대상 프로필의 모델을 사용합니다. 활성 상태·폴백·비용 허용은 Heavy/Light 복사 대상이 아닙니다. 수동 대상 선택은 불러온 프로필 변경·새로고침 후에도 유지하지만, 일회 복사 의도는 초기화됩니다.
+4. **라우팅 세부 설정 → 고급: 라우팅 일시 중지 및 프로필 사용 여부**에서 필요할 때만 프로필별로 끕니다. **라우팅 활성 프로필**은 이 고급 설정 안의 목록입니다. **Heavy/Light 설정 적용 대상**은 편집한 경로를 복사할 프로필 목록이며, 처음에는 전체 선택됩니다. Heavy/Light 값을 수정하거나 대상 목록을 직접 선택한 뒤 저장하면 지정한 대상에만 경로를 적용합니다. 기존 값 그대로 여러 프로필에 복사하려면 **전체 선택**을 누르고 저장하세요. 단순히 활성 프로필만 바꾸거나 일반 모델만 저장하면 기존 경로는 보존됩니다.
+5. Heavy는 메인 모델, Light는 서브에이전트 모델을 따라가는 것이 기본이며 별도 지정도 가능합니다. Heavy/Light에 동일 모델을 사용해도 각 작업은 별도 컨텍스트로 실행합니다. 따라가기를 복사하면 각 대상 프로필의 모델을 사용합니다. 활성 상태·폴백·비용 허용은 Heavy/Light 복사 대상이 아닙니다. 수동 대상 선택은 불러온 프로필 변경·새로고침 후에도 유지하지만, 일회 복사 의도는 초기화됩니다.
 6. 편집 중 **저장할 내용 · 실시간 참고**에서 대상과 변경 범위를 확인합니다. **모델 설정 저장**, **라우팅 설정 저장**, **시간 제한 저장** 및 각 폴백 카드의 저장 버튼은 해당 범위만 저장합니다. **전체 설정 저장**은 여러 섹션을 함께 저장할 때 사용합니다. 다른 섹션에 남아 있는 편집값은 개별 저장에 포함하지 않습니다. 별도 미리보기 버튼이나 확인 체크 단계는 없습니다. 저장 중에는 편집·중복 저장을 막고 서버에서 최신 상태 충돌을 검사합니다.
 
 저장한 설정과 실제 프로필 설정이 다른 경우 drift로 표시합니다. 실행 중인 세션의 모델/도구는 즉시 바뀐다고 가정하지 않습니다. 변경 후 라우팅 작업은 새 세션에서 시작하세요.

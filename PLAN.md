@@ -1,5 +1,11 @@
 # Model Router implementation contract
 
+## 2026-10-23: First-save repair and default-on routing (v0.4.5)
+
+The current user requests fixing the whole-settings save on a fresh installation, enabling routing by default after installation, and explicitly approves using the same model for Heavy/Light in separate purpose-bound jobs. Preserve raw stored skills.disabled values for CAS and write-before checks; normalize only desired values. For installed profiles without a canonical choice, derive ON read-only while honoring explicit bare/namespaced skill opt-outs. Keep stored OFF choices and profiles without the package OFF. Do not run config migrations or change models, fallback consent, budgets, auth, existing sessions or host trust/activation gates on installation. Retain manual opt-out only under advanced routing settings.
+
+Allow identical Heavy/Light primary models/efforts through service, runtime and operator-cache validation without weakening literal validation, distinct primary/spare checks, role-specific verification/budgets, ownership, cancellation or fresh-job separation. Use RED/GREEN tests and isolated actual CLI preview/apply/readback; never launch provider calls or rewrite the user's settings merely to test. Required independent review precedes local default-profile deployment. User requested GitHub connection and pull, not push/release/catalog publication. Keep changes local unless separately authorized.
+
 ## 2026-10-16: Direct-Main default for small changes (v0.4.4)
 
 Current user requests avoiding coding-route implementation delegation for small work that does not warrant two or more useful children, deploying the guidance, pushing GitHub and updating the official catalog. Main owns this bounded policy/copy/test change. Require at least two substantive independent implementation workstreams and net parallel benefit for ordinary delegation; forbid artificial splitting and counting the same edit's tests/build/optional review. Keep explicit delegation, high-risk Heavy judgment and required independent review as narrow exceptions. Apply the default before tool discovery/config lookup and to native delegation too. Preserve Main-owned visual design and existing profile-local handoff additions.

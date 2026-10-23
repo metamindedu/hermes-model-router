@@ -213,17 +213,29 @@ def test_copy_preserves_distinct_target_fallbacks_and_consents(tmp_path, monkeyp
     assert after['default']['fallback_consent']['routing'] != after['p2']['fallback_consent']['routing']
 
 
-def test_target_only_heavy_light_collision_emits_no_plan(tmp_path, monkeypatch):
-    service, _cli, body = setup(tmp_path, monkeypatch)
+def test_same_model_primary_routes_copy_only_selected_target(tmp_path, monkeypatch):
+    service, cli, body = setup(tmp_path, monkeypatch)
     body['routing_targets'] = ['p2']
     same = route('operator', 'same-target-only-route', 'high')
     body['routing']['heavy'] = {'follow': 'custom', 'custom': copy.deepcopy(same)}
     body['routing']['light'] = {'follow': 'custom', 'custom': copy.deepcopy(same)}
-    before = service.store_path.read_bytes()
-    with pytest.raises(ValueError, match='distinct'):
-        service.preview(body)
-    assert service.store_path.read_bytes() == before
-    assert not list((service.store_path.parent / 'plans').glob('*.json'))
+    before_bytes = service.store_path.read_bytes()
+    before = json.loads(before_bytes)['profiles']
+    cli_before = copy.deepcopy(cli.values)
+    plan = service.preview(body)
+    assert service.store_path.read_bytes() == before_bytes
+    assert service.apply(plan['plan_id'])['status'] == 'applied'
+    after = json.loads(service.store_path.read_bytes())['profiles']
+    assert service.routing_config('p2')['heavy'] == service.routing_config('p2')['light'] == same
+    for name in before:
+        if name != 'p2':
+            assert after[name] == before[name]
+        else:
+            for key in ('models', 'native_fallback', 'delegation_fallback', 'fallback_consent'):
+                assert after[name][key] == before[name][key]
+            assert after[name]['routing']['fallback'] == before[name]['routing']['fallback']
+            assert after[name]['routing']['enabled'] == before[name]['routing']['enabled']
+    assert cli.values == cli_before
 
 
 def test_bulk_routing_plan_is_one_shot(tmp_path, monkeypatch):

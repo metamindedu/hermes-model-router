@@ -52,14 +52,13 @@ def _require(condition: bool, message: str) -> None:
 
 
 def validate_operator_routes(routes: Any) -> None:
-    """Validate the literal Heavy/Light operator route override contract."""
+    """Validate literal role overrides; model identities may be shared."""
 
     _require(isinstance(routes, dict), "operator_routes must be an object")
     _require(
         set(routes) == set(OPERATOR_ROUTE_ROLES),
         "operator_routes must define exactly HEAVYWEIGHT and LIGHTWEIGHT",
     )
-    pairs: dict[str, tuple[str, str]] = {}
     required_fields = {"provider", "model_id", "reasoning_effort"}
     for role in OPERATOR_ROUTE_ROLES:
         route = routes[role]
@@ -81,11 +80,6 @@ def validate_operator_routes(routes: Any) -> None:
             isinstance(effort, str) and effort in OPERATOR_REASONING_EFFORTS,
             f"operator_routes.{role}.reasoning_effort must be one of {', '.join(sorted(OPERATOR_REASONING_EFFORTS))}",
         )
-        pairs[role] = (route["provider"], route["model_id"])
-    _require(
-        pairs["HEAVYWEIGHT"] != pairs["LIGHTWEIGHT"],
-        "HEAVYWEIGHT and LIGHTWEIGHT operator routes must not be identical",
-    )
 
 
 def _parse_iso(value: Any, field: str) -> None:

@@ -25,6 +25,7 @@ SCHEMA = 2
 STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
 STATE_RELATIVE = Path("plugin-data") / "model-router" / "recent_apply.json"
 SKILL_NAME = "adaptive-coding-orchestration"
+ROUTING_SKILL_IDS = frozenset({SKILL_NAME, "model-router:" + SKILL_NAME})
 COMPAT_SKILL_SOURCE = Path(__file__).resolve().parents[1] / "compat" / SKILL_NAME / "SKILL.md"
 PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 PROVIDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
@@ -566,14 +567,27 @@ class Service:
             "fallback": fallback,
         }
 
+    def _initial_routing(self, profile: str) -> dict[str, Any]:
+        """Installed, unconfigured profiles default on without persisting a migration."""
+        home = self._profile_home(profile)
+        manifest = home / "plugins" / "model-router" / "plugin.yaml"
+        try:
+            installed = manifest.is_file() and not manifest.is_symlink() and _inside(manifest, home)
+            enabled = installed and not ROUTING_SKILL_IDS.intersection(self._read_disabled(profile))
+        except (OSError, ServiceError):
+            enabled = False
+        return self._default_routing(enabled)
+
     @staticmethod
-    def _check_distinct_routes(routing: dict[str, Any], models: dict[str, dict[str, str]]) -> None:
+    def _check_primary_routes(routing: dict[str, Any], models: dict[str, dict[str, str]]) -> None:
         if not routing["enabled"]:
             return
         heavy = models["main"] if routing["heavy"]["follow"] == "main" else routing["heavy"]["custom"]
         light = models["delegation"] if routing["light"]["follow"] == "delegation" else routing["light"]["custom"]
-        if (heavy["provider"], heavy["model"]) == (light["provider"], light["model"]):
-            raise ValueError("enabled Heavy and Light routes must resolve to distinct models")
+        # Heavy/Light are task roles, not a requirement for separate models.
+        # Validate both routes while allowing the same provider/model/effort.
+        _route(heavy)
+        _route(light)
 
     @staticmethod
     def _check_changed_routing_fallbacks(before: dict, after: dict) -> None:
@@ -972,7 +986,7 @@ class Service:
                     if fallbacks is not None and item["routing"]["fallback"] == {"enabled": False, "heavy": None, "light": None}:
                         item["routing"]["fallback"] = self._fallback_for(name, fallbacks)
                     entries[name] = item
-                self._check_distinct_routes(entries[name]["routing"], entries[name]["models"])
+                self._check_primary_routes(entries[name]["routing"], entries[name]["models"])
             changed = stored is None or entries != stored["profiles"]
             revision = (stored["revision"] if stored else 0) + (1 if changed else 0)
             data = {"schema": SCHEMA, "revision": revision, "profiles": entries}
@@ -984,9 +998,9 @@ class Service:
                 want_enabled = name in selected
                 try:
                     disabled = self._read_disabled(name)
-                    currently_enabled = SKILL_NAME not in disabled
+                    currently_enabled = not ROUTING_SKILL_IDS.intersection(disabled)
                     if currently_enabled != want_enabled:
-                        updated = [item for item in disabled if item != SKILL_NAME]
+                        updated = [item for item in disabled if item not in ROUTING_SKILL_IDS]
                         if not want_enabled:
                             updated.append(SKILL_NAME)
                         self._backup_config(name, stamp)
@@ -1019,7 +1033,7 @@ class Service:
                 actual = {}
             if entry is None:
                 models = actual
-                routing = self._default_routing(False)
+                routing = self._initial_routing(name)
                 view_entry = {
                     "models": models,
                     "routing": routing,
@@ -1039,7 +1053,7 @@ class Service:
                         drift.append(f"models.{role}")
             try:
                 disabled = self._read_disabled(name)
-                if (SKILL_NAME not in disabled) != bool(routing.get("enabled")):
+                if (not ROUTING_SKILL_IDS.intersection(disabled)) != bool(routing.get("enabled")):
                     drift.append("skills.disabled")
             except ServiceError:
                 drift.append("skills.disabled_unavailable")
@@ -1072,13 +1086,13 @@ class Service:
         entry = stored["profiles"].get(profile) if stored else None
         if entry is None:
             models = self._actual_models(profile)
-            routing = self._default_routing(False)
+            routing = self._initial_routing(profile)
             revision = stored["revision"] if stored else 0
         else:
             models, routing, revision = entry["models"], entry["routing"], stored["revision"]
         heavy = models["main"] if routing["heavy"]["follow"] == "main" else routing["heavy"]["custom"]
         light = models["delegation"] if routing["light"]["follow"] == "delegation" else routing["light"]["custom"]
-        enabled = routing["enabled"] and SKILL_NAME not in self._read_disabled(profile)
+        enabled = routing["enabled"] and not ROUTING_SKILL_IDS.intersection(self._read_disabled(profile))
         consent = entry.get("fallback_consent", {}).get("routing") if entry else None
         approved = routing["fallback"]["enabled"] and fallback_policy.consent_matches(
             profile, "routing", routing["fallback"], consent
@@ -1110,7 +1124,7 @@ class Service:
         actual = self._actual_models(profile)
         return {
             "models": actual,
-            "routing": self._default_routing(False),
+            "routing": self._initial_routing(profile),
             "native_fallback": None,
             "delegation_fallback": None,
             "fallback_consent": {"native": None, "routing": None, "delegation": None},
@@ -1362,8 +1376,8 @@ class Service:
                 changes.append({"profile": name, "field": "routing.enabled", "before": old_enabled, "after": new_enabled})
             raw_disabled = self._read_key(name, "skills.disabled")
             disabled = self._read_disabled(name)
-            if old_enabled != new_enabled or (SKILL_NAME not in disabled) != new_enabled:
-                updated = [item for item in disabled if item != SKILL_NAME]
+            if old_enabled != new_enabled or (not ROUTING_SKILL_IDS.intersection(disabled)) != new_enabled:
+                updated = [item for item in disabled if item not in ROUTING_SKILL_IDS]
                 if not new_enabled:
                     updated.append(SKILL_NAME)
                 if scope == "routing":
@@ -1392,7 +1406,7 @@ class Service:
             for name in route_validation_names:
                 entry = after.get(name)
                 if entry is not None:
-                    self._check_distinct_routes(entry["routing"], entry["models"])
+                    self._check_primary_routes(entry["routing"], entry["models"])
             if not fallback_updates:
                 self._check_changed_routing_fallbacks(entries, after)
         state_changed = scope != "timeouts" and after != entries
@@ -1692,7 +1706,7 @@ class Service:
                     })
 
         for name, entry in after.items():
-            self._check_distinct_routes(entry["routing"], entry["models"])
+            self._check_primary_routes(entry["routing"], entry["models"])
         self._check_changed_routing_fallbacks(entries, after)
         state_changed = after != entries
         plan_id = uuid.uuid4().hex

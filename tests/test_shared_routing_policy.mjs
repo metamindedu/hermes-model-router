@@ -55,12 +55,12 @@ test('canonical and compatibility skill keep the name and share complex non-codi
   assert.match(compatibility, /not routine writing\/extraction/)
 })
 
-test('settings page explains broad routing scope without turning profile membership into opt-in', () => {
+test('settings page explains broad routing scope, default-on installation, and preserved explicit opt-outs', () => {
   assert.match(desktop, /코딩과 복잡한 비코딩 판단 작업에 공통 정책을 적용합니다/)
   assert.match(desktop, /근거 충돌/)
   assert.match(desktop, /단순 글쓰기·번역·요약·추출은 Heavy 대상이 아닙니다/)
-  assert.match(desktop, /공통 정책은 모든 프로필에서 같지만, 라우팅은 여기서 활성화한 프로필에서만 사용합니다/)
-  assert.match(desktop, /새 프로필은 기본적으로 활성화되지 않습니다/)
+  assert.match(desktop, /플러그인이 설치되고 별도 사용 여부를 저장하지 않은 프로필은 기본 활성화/)
+  assert.match(desktop, /기존에 저장한 OFF와 명시적인 스킬 비활성화는 보존/)
   assert.match(desktop, /작업·검증 라우팅 폴백/)
   assert.doesNotMatch(desktop, /코딩·검증 라우팅/)
   assert.match(readme, /동봉 정책은 프로필마다 동일합니다/)
@@ -77,5 +77,5 @@ test('tool identifier, purpose enum, profile gate and runtime contract remain un
   assert.match(registration, /coding and complex non-coding judgment/)
   assert.match(registration, /Profile-enabled coding and complex non-coding orchestration/)
   assert.doesNotMatch(registration, /Profile-enabled coding orchestration|코딩 라우팅이 꺼져/)
-  assert.match(read('plugin.yaml'), /Profile model settings, opt-in Heavy\/Light task routing/)
+  assert.match(read('plugin.yaml'), /Profile model settings, default-on Heavy\/Light task routing/)
 })

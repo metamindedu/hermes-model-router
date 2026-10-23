@@ -243,13 +243,154 @@ def test_runner_incompatible_primary_effort_fails_before_job_creation(tmp_path, 
     assert not (root / "profiles" / "claire" / "plugin-data").exists()
 
 
-def test_identical_enabled_routes_fail_before_job_creation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("light_effort", ["low", "high"], ids=["different-effort", "identical-route"])
+def test_same_model_routes_start_independent_purpose_jobs(tmp_path, monkeypatch, light_effort):
+    from lib import run_routed_agent as runner
+
     router, service, root, popen_calls = _make_router(tmp_path, monkeypatch)
-    service.light = dict(HEAVY)
-    with pytest.raises(routing.RoutingError, match="distinct models"):
-        _start(router, tmp_path)
-    assert popen_calls == []
-    assert not (root / "profiles" / "claire" / "plugin-data").exists()
+    service.light = {**HEAVY, "reasoning": light_effort}
+    original_config = service.routing_config
+    service.routing_config = lambda profile: {
+        **original_config(profile), "light_timeout_seconds": 1800, "heavy_timeout_seconds": 7200,
+    }
+    home = root / "profiles" / "claire"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "claire")
+    processes = []
+    tracked = []
+    observed = []
+
+    class Runtime:
+        parent_session_id = "same-model-parent"
+        ui_session_id = "same-model-ui"
+
+        def track(self, process, **metadata):
+            tracked.append((process, metadata))
+            return f"process-{metadata['job_id']}"
+
+        def observe(self, process, **metadata):
+            observed.append((process, metadata))
+
+    router.runtime = Runtime()
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append((list(command), kwargs))
+        process = FakeProcess()
+        process.pid = 987654 + len(processes)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(routing.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(routing, "_pid_alive", lambda pid: pid in {p.pid for p in processes})
+    expected_purposes = [
+        ("implementation", "LIGHTWEIGHT", "implementation", "none"),
+        ("mechanical", "LIGHTWEIGHT", "mechanical", "mechanical"),
+        ("preliminary-review", "LIGHTWEIGHT", "review", "none"),
+        ("plan", "HEAVYWEIGHT", "plan", "none"),
+        ("semantic-final", "HEAVYWEIGHT", "review", "semantic-final"),
+        ("independent-review", "HEAVYWEIGHT", "review", "independent-review"),
+    ]
+    jobs = []
+    output_paths = []
+    for purpose, role, mode, verification in expected_purposes:
+        prompt = f"Independent {purpose} task; never reuse another purpose's answer."
+        result = router.start(purpose, prompt, tmp_path)
+        jobs.append(result)
+        assert result["status"] == "running"
+        assert result["route_class"] == role
+        assert result["requested_provider"] == HEAVY["provider"]
+        assert result["requested_model"] == HEAVY["model"]
+        assert str(uuid.UUID(result["job_id"])) == result["job_id"]
+        job_dir = home / "plugin-data" / "model-router" / "jobs" / result["job_id"]
+        snapshot = _load(job_dir / "snapshot.json")
+        cache = _load(job_dir / "routing-cache.json")
+        assert snapshot["job_id"] == result["job_id"]
+        assert snapshot["profile"] == "claire"
+        assert snapshot["settings_revision"] == 17
+        assert snapshot["parent_session_id"] == "same-model-parent"
+        assert snapshot["ui_session_id"] == "same-model-ui"
+        assert snapshot["purpose"] == purpose
+        assert snapshot["route_class"] == role
+        assert snapshot["runner_mode"] == mode
+        assert snapshot["verification_kind"] == verification
+        timeout = 1800 if role == "LIGHTWEIGHT" else 7200
+        assert snapshot["timeout_seconds"] == timeout
+        assert snapshot["timeout_source"] == "profile"
+        evidence = snapshot["model_provider_evidence"]
+        assert evidence["purpose_role"] == role
+        assert evidence["requested"] == {"HEAVYWEIGHT": service.heavy, "LIGHTWEIGHT": service.light}
+        assert evidence["actual"] is None
+        assert (job_dir / "prompt.txt").read_text(encoding="utf-8") == prompt
+        assert cache["operator_routes"] == {
+            "HEAVYWEIGHT": {"provider": HEAVY["provider"], "model_id": HEAVY["model"], "reasoning_effort": "high"},
+            "LIGHTWEIGHT": {"provider": HEAVY["provider"], "model_id": HEAVY["model"], "reasoning_effort": light_effort},
+        }
+        # Exercise the actual runner/cache validation seam, not a mocked validator.
+        resolved = runner.resolve_route(job_dir / "routing-cache.json", role)
+        assert resolved["provider"] == HEAVY["provider"]
+        assert resolved["model_id"] == HEAVY["model"]
+        assert resolved["reasoning_effort"] == (light_effort if role == "LIGHTWEIGHT" else "high")
+        command, kwargs = popen_calls[-1]
+        assert Path(command[command.index("--job-dir") + 1]) == job_dir
+        assert command[command.index("--purpose") + 1] == purpose
+        assert float(command[command.index("--timeout") + 1]) == timeout
+        assert kwargs["cwd"] == str(job_dir)
+        assert kwargs["env"]["HERMES_HOME"] == str(home)
+        assert kwargs["close_fds"] is True
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert kwargs["stdout"] is not subprocess.PIPE
+        if os.name == "nt":
+            assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+            assert kwargs["creationflags"] & subprocess.DETACHED_PROCESS
+        else:
+            assert kwargs["start_new_session"] is True
+        assert _load(job_dir / "launch.json")["worker_pid"] == processes[-1].pid
+        process_id = f"process-{result['job_id']}"
+        assert result["process_id"] == process_id
+        assert _load(job_dir / "launch.json")["process_id"] == process_id
+        assert tracked[-1][0] is observed[-1][0] is processes[-1]
+        assert tracked[-1][1]["job_id"] == observed[-1][1]["job_id"] == result["job_id"]
+        assert tracked[-1][1]["role"] == role
+        assert tracked[-1][1]["reasoning"] == (light_effort if role == "LIGHTWEIGHT" else "high")
+        assert observed[-1][1]["process_id"] == process_id
+        assert observed[-1][1]["timeout"] == timeout
+        assert observed[-1][1]["home"] == home
+        runner_command = job_worker.build_runner_command(
+            python=sys.executable, runner=routing.RUNNER_PATH,
+            hermes_exe=Path(command[command.index("--hermes-exe") + 1]),
+            profile="claire", purpose=purpose, cwd=tmp_path, timeout=timeout,
+            job_dir=job_dir, snapshot=snapshot,
+        )
+        for flag, expected in (("--route-class", role), ("--mode", mode), ("--verification-kind", verification)):
+            assert runner_command[runner_command.index(flag) + 1] == expected
+        assert Path(runner_command[runner_command.index("--prompt-file") + 1]) == job_dir / "prompt.txt"
+        assert Path(runner_command[runner_command.index("--cache") + 1]) == job_dir / "routing-cache.json"
+        output_path = Path(runner_command[runner_command.index("--output") + 1])
+        assert output_path == job_dir / "runner-result.json"
+        assert not output_path.exists()
+        assert "--no-fallback" in runner_command
+        assert "--scoped-attempts" in runner_command
+        output_paths.append(output_path)
+        assert router.status(result["job_id"])["route_verified"] is False
+
+    assert len(popen_calls) == len(processes) == len(jobs) == 6
+    assert len(tracked) == len(observed) == 6
+    assert len({job["job_id"] for job in jobs}) == 6
+    assert len({id(process) for process in processes}) == 6
+    assert len(set(output_paths)) == 6
+    assert service.routing_calls == ["claire"] * 6
+    # A completed Heavy job must not become evidence or an answer for any sibling.
+    output_paths[-1].write_text(json.dumps({**_verified_runner_result(), "final_response": "Heavy-only result"}), encoding="utf-8")
+    completed = router.status(jobs[-1]["job_id"])
+    assert completed["status"] == "completed"
+    assert completed["answer"] == "Heavy-only result"
+    assert completed["verification_kind"] == "independent-review"
+    assert "semantic_go" not in completed
+    for sibling in jobs[:-1]:
+        status = router.status(sibling["job_id"])
+        assert status["status"] == "running"
+        assert status["route_verified"] is False
+        assert "answer" not in status
 
 
 def test_skill_only_drift_does_not_masquerade_as_model_drift(tmp_path, monkeypatch):

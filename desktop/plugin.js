@@ -1891,7 +1891,7 @@ function RouterPage({ ctx: pluginContext }) {
     style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '라우팅 활성 프로필' }),
-      jsx('p', { style: styles.hint, children: '공통 정책은 모든 프로필에서 같지만, 라우팅은 여기서 활성화한 프로필에서만 사용합니다. Heavy/Light 모델 복사 대상은 위의 별도 목록에서 선택하며 활성 멤버십은 복사하지 않습니다. 새 프로필은 기본적으로 활성화되지 않습니다.' }),
+      jsx('p', { style: styles.hint, children: '플러그인이 설치되고 별도 사용 여부를 저장하지 않은 프로필은 기본 활성화됩니다. 기존에 저장한 OFF와 명시적인 스킬 비활성화는 보존합니다. 진단·비교가 필요할 때만 여기서 끄세요. Heavy/Light 모델 복사 대상과 활성 멤버십은 별개입니다.' }),
       jsx('div', { style: styles.profileList, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `routing-profile-${row.name}`, label: row.name, checked: routingProfiles.includes(row.name), disabled, onChange: checked => toggleRoutingProfile(row.name, checked) }) }, row.name)) })
     ]
   })
@@ -1899,7 +1899,7 @@ function RouterPage({ ctx: pluginContext }) {
   const routingFields = draft ? jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' },
     children: [
-      jsx(CheckRow, { id: 'routing-enabled', label: '이 프로필에서 라우팅 사용', detail: '선택하면 이 프로필이 라우팅 활성 프로필 목록에도 포함됩니다.', checked: activeRoutes.enabled === true, disabled, onChange: toggleRoutingEnabled }),
+
       jsxs('div', { style: styles.roleGrid, children: [
         jsxs('article', { style: styles.roleCard, children: [jsx('h3', { style: styles.roleTitle, children: '무거운 작업' }), jsx(ChoiceField, { id: 'heavy-follow', label: '대상 기준', value: activeRoutes.heavy?.follow || 'main', disabled, onChange: value => changeFollow('heavy', value), options: [{ value: 'main', label: '기본 대화 모델 따라가기' }, { value: 'custom', label: '별도 모델 지정' }] }), activeRoutes.heavy?.follow === 'custom' ? jsx(RoleRouteFields, { prefix: 'heavy-custom', route: activeRoutes.heavy.custom, disabled, onChange: (field, value) => updateRoutingRoute('heavy', field, value) }) : jsx('p', { style: styles.hint, children: '선택한 프로필의 기본 대화 모델을 사용합니다.' })] }),
         jsxs('article', { style: styles.roleCard, children: [jsx('h3', { style: styles.roleTitle, children: '가벼운 작업' }), jsx(ChoiceField, { id: 'light-follow', label: '대상 기준', value: activeRoutes.light?.follow || 'delegation', disabled, onChange: value => changeFollow('light', value), options: [{ value: 'delegation', label: '작업 위임 모델 따라가기' }, { value: 'custom', label: '별도 모델 지정' }] }), activeRoutes.light?.follow === 'custom' ? jsx(RoleRouteFields, { prefix: 'light-custom', route: activeRoutes.light.custom, disabled, onChange: (field, value) => updateRoutingRoute('light', field, value) }) : jsx('p', { style: styles.hint, children: '선택한 프로필의 작업 위임 모델을 사용합니다.' })] })
@@ -2143,9 +2143,18 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length ? timeoutSettingsSection : null,
       profiles.length ? section('작업 라우팅', '작고 범위가 명확한 수정은 메인 모델이 직접 처리합니다. 일반 구현 위임은 독립적인 실작업 두 개 이상으로 나눌 가치가 있고 시작·문맥 전달·조정 비용보다 병렬 처리 이득이 클 때만 사용합니다. 작은 작업을 억지로 나누거나 테스트·빌드를 두 번째 실작업으로 세지 않습니다. 사용자의 명시적 위임 요청과 필수 Heavy·독립 검수는 예외이며 기존 안전 게이트를 유지합니다. 코딩과 복잡한 비코딩 판단 작업에 공통 정책을 적용합니다. 근거 충돌, 여러 근거를 종합하는 판단, 오류 영향이 큰 학습 자료·문항 검토, 반복된 개념적 실패가 예입니다. 단순 글쓰기·번역·요약·추출은 Heavy 대상이 아닙니다. Heavy/Light 모델 적용 대상과 라우팅 활성 프로필은 따로 선택하며, 정책을 공통 배포해도 기존 프로필 활성 멤버십은 바뀌지 않습니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { style: styles.hint, children: routingSummary }),
+        jsx('p', { id: 'routing-default-note', role: 'note', style: styles.hint, children: '새로 설치한 프로필의 작업 라우팅은 기본 활성화됩니다. Heavy/Light에 동일 모델을 사용할 수 있으며, 작업마다 별도 컨텍스트로 실행합니다. 같은 모델의 별도 검수는 서로 다른 모델을 통한 검수를 뜻하지 않습니다. 모델·폴백·시간값은 임의로 변경하지 않습니다.' }),
         jsxs('details', { style: styles.cardSection, children: [
           jsxs('summary', { style: { cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem', flexWrap: 'wrap' }, children: [jsx('strong', { children: '라우팅 세부 설정' }), jsx(Badge, { variant: 'muted', children: `활성 프로필 ${routingProfiles.length}개` })] }),
-          jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '0.9rem' }, children: [routingFields, routingTargetGroup, routingProfileGroup] })
+          jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '0.9rem' }, children: [routingFields, routingTargetGroup,
+            jsxs('details', { id: 'routing-activation-advanced', style: styles.cardSection, children: [
+              jsx('summary', { style: { cursor: 'pointer' }, children: '고급: 라우팅 일시 중지 및 프로필 사용 여부' }),
+              jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '0.9rem' }, children: [
+                jsx(CheckRow, { id: 'routing-enabled', label: '이 프로필에서 라우팅 사용', detail: '기본값은 ON입니다. 진단·비교용으로 중지할 수 있으며, 저장하기 전에는 실행 상태가 바뀌지 않습니다.', checked: activeRoutes.enabled === true, disabled, onChange: toggleRoutingEnabled }),
+                routingProfileGroup
+              ] })
+            ] })
+          ] })
         ] }),
         routingTargetError ? jsx('p', { role: 'alert', style: styles.warning, children: routingTargetError }) : null,
         sectionErrors.routing ? jsx('p', { role: 'alert', style: styles.warning, children: sectionErrors.routing }) : null,
@@ -2176,7 +2185,7 @@ function RouterPage({ ctx: pluginContext }) {
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.4.3',
+  version: '0.4.5',
   defaultEnabled: false,
   register(ctx) {
     const page = {

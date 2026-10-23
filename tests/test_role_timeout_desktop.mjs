@@ -184,3 +184,18 @@ test('schema-1 legacy capability omission does not enable editing or bulk select
   assert.equal(h.byId('timeout-target-claire').props.disabled, true)
   assert.match(text(h.tree()), /역할별 시간 제한 지원을 확인할 수 없는 백엔드/)
 })
+
+test('routing defaults are explained while explicit opt-out controls stay inside closed advanced settings', () => {
+  const h = harness()
+  const advanced = h.byId('routing-activation-advanced')
+  assert.equal(advanced.type, 'details')
+  assert.notEqual(advanced.props.open, true)
+  const ids = [...walk(advanced)].map(node => node.props?.id)
+  assert.ok(ids.includes('routing-enabled'))
+  assert.ok(ids.includes('routing-profile-default'))
+  assert.match(text(h.tree()), /기본 활성화/)
+  assert.match(text(h.tree()), /동일 모델/)
+  assert.equal(h.byId('routing-enabled').props.checked, true)
+  assert.equal(h.byId('routing-profile-default').props.checked, false)
+  assert.equal(h.calls.length, 0)
+})

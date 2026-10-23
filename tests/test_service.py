@@ -243,8 +243,10 @@ def test_preview_rejects_extra_fields_unsafe_tokens_and_collapsed_routes(tmp_pat
     same = route("one", "same-model")
     collapsed["routing"]["heavy"] = {"follow": "custom", "custom": same}
     collapsed["routing"]["light"] = {"follow": "custom", "custom": same}
-    with pytest.raises(ValueError, match="distinct"):
-        service.preview(collapsed)
+    plan = service.preview(collapsed)
+    assert service.apply(plan['plan_id'])['status'] == 'applied'
+    effective = service.routing_config('p1')
+    assert effective['heavy'] == effective['light'] == same
 
 
 def test_new_config_backed_profile_is_off_until_explicitly_selected(tmp_path, monkeypatch):
