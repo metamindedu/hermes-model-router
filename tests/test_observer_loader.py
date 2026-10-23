@@ -1,5 +1,9 @@
 """Actual Hermes loader/hook seam with fake API transport (no provider calls)."""
 import json
+import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,8 +12,167 @@ import pytest
 from model_router import attempt_observer, scoped_agent
 from test_scoped_agent import attempt, _fake_dependencies
 
-CORE = Path('C:/Users/ovpow/AppData/Local/hermes/hermes-agent')
+_BOOTSTRAP_SPEC = importlib.util.find_spec('hermes_bootstrap')
+if _BOOTSTRAP_SPEC is None or _BOOTSTRAP_SPEC.origin is None:
+    raise RuntimeError('the active Hermes bootstrap source is unavailable to this test runtime')
+CORE = Path(_BOOTSTRAP_SPEC.origin).resolve(strict=True).parent
 REPO = Path(__file__).resolve().parents[1]
+_CORE_MARKERS = (
+    'hermes_bootstrap.py', 'run_agent.py', 'agent/agent_init.py',
+    'hermes_cli/runtime_provider.py',
+)
+
+
+def _write_core_markers(root, *, omit=()):
+    for relative in _CORE_MARKERS:
+        if relative in omit:
+            continue
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('# fixture marker\n', encoding='utf-8')
+
+
+def _create_directory_redirect(path, target, *, force_junction=False):
+    if not force_junction:
+        try:
+            path.symlink_to(target, target_is_directory=True)
+            return
+        except OSError:
+            pass
+    # Windows directory junctions are available without symlink privileges.
+    try:
+        result = subprocess.run(
+            ['cmd.exe', '/c', 'mklink', '/J', str(path), str(target)],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f'directory links are unavailable in this test environment: {exc}')
+        return
+    if result.returncode != 0:
+        pytest.skip(f'directory links are unavailable in this test environment: {result.stderr}')
+        return
+    is_junction = getattr(path, 'is_junction', None)
+    if not force_junction and not path.is_symlink() and not (callable(is_junction) and is_junction()):
+        pytest.skip('directory link creation did not produce a symlink or junction')
+    if force_junction and (not callable(is_junction) or not is_junction()):
+        pytest.skip('junction creation did not produce a directory junction')
+
+
+def test_trusted_core_root_prefers_served_interpreter_workspace_over_stale_path(tmp_path, monkeypatch):
+    runtime = tmp_path / 'install' / 'environments' / 'served'
+    served_root = runtime / 'workspace'
+    stale_root = tmp_path / 'old-install' / 'workspace'
+    prefix = runtime / 'venv'
+    executable = tmp_path / 'base-python' / 'python'
+    _write_core_markers(served_root)
+    _write_core_markers(stale_root)
+    prefix.mkdir(parents=True)
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b'base interpreter target')
+    monkeypatch.setattr(scoped_agent.sys, 'prefix', str(prefix))
+    monkeypatch.setattr(scoped_agent.sys, 'base_prefix', str(executable.parent))
+    # A venv executable may resolve to this base interpreter on POSIX.
+    monkeypatch.setattr(scoped_agent.sys, 'executable', str(executable))
+    monkeypatch.setattr(scoped_agent.sys, 'path', [str(stale_root)])
+
+    assert scoped_agent._trusted_core_root() == served_root.resolve()
+
+
+@pytest.mark.parametrize('invalid_workspace', ['missing', 'incomplete', 'workspace_symlink', 'marker_symlink'])
+def test_trusted_core_root_fails_closed_for_invalid_served_workspace(tmp_path, monkeypatch, invalid_workspace):
+    runtime = tmp_path / 'install' / 'environments' / 'served'
+    prefix = runtime / 'venv'
+    workspace = runtime / 'workspace'
+    unrelated = tmp_path / 'unrelated-fake-source'
+    _write_core_markers(unrelated)
+    prefix.mkdir(parents=True)
+    executable = prefix / 'Scripts' / 'python.exe'
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b'fixture interpreter')
+    base_prefix = tmp_path / 'base-python'
+    base_prefix.mkdir()
+
+    if invalid_workspace == 'incomplete':
+        _write_core_markers(workspace, omit=('hermes_cli/runtime_provider.py',))
+    elif invalid_workspace == 'workspace_symlink':
+        _create_directory_redirect(workspace, unrelated)
+    elif invalid_workspace == 'marker_symlink':
+        workspace.mkdir(parents=True)
+        for relative in _CORE_MARKERS[1:]:
+            path = workspace / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('# fixture marker\n', encoding='utf-8')
+        shutil.rmtree(workspace / 'agent')
+        _create_directory_redirect(workspace / 'agent', unrelated / 'agent', force_junction=True)
+        # Exercise the resolve-based guard used on Python versions before 3.12.
+        monkeypatch.setattr(type(workspace), 'is_junction', lambda _path: False, raising=False)
+
+    monkeypatch.setattr(scoped_agent.sys, 'prefix', str(prefix))
+    monkeypatch.setattr(scoped_agent.sys, 'base_prefix', str(tmp_path / 'base-python'))
+    monkeypatch.setattr(scoped_agent.sys, 'executable', str(executable))
+    monkeypatch.setattr(scoped_agent.sys, 'path', [str(unrelated)])
+
+    with pytest.raises(scoped_agent.AttemptError, match='trusted Hermes'):
+        scoped_agent._trusted_core_root()
+
+
+@pytest.mark.parametrize('fallback', ['sys_path', 'find_spec'])
+def test_trusted_core_root_rejects_unbound_marker_roots(tmp_path, monkeypatch, fallback):
+    unrelated = tmp_path / 'unrelated-fake-source'
+    _write_core_markers(unrelated)
+    unbound_prefix = tmp_path / 'ordinary-python'
+    unbound_prefix.mkdir()
+    executable = unbound_prefix / 'python'
+    executable.write_bytes(b'ordinary interpreter')
+    monkeypatch.setattr(scoped_agent.sys, 'prefix', str(unbound_prefix))
+    monkeypatch.setattr(scoped_agent.sys, 'base_prefix', str(unbound_prefix))
+    monkeypatch.setattr(scoped_agent.sys, 'executable', str(executable))
+
+    if fallback == 'sys_path':
+        monkeypatch.setattr(scoped_agent.sys, 'path', [str(unrelated)])
+    else:
+        from types import SimpleNamespace
+        monkeypatch.setattr(scoped_agent.sys, 'path', [])
+        monkeypatch.setattr(
+            scoped_agent.importlib.util,
+            'find_spec',
+            lambda _name: SimpleNamespace(origin=str(unrelated / 'hermes_bootstrap.py')),
+        )
+
+    with pytest.raises(scoped_agent.AttemptError, match='trusted Hermes'):
+        scoped_agent._trusted_core_root()
+
+
+@pytest.mark.parametrize('venv_name', ['.venv', 'venv'])
+def test_trusted_core_root_accepts_interpreter_owned_legacy_source_venv(tmp_path, monkeypatch, venv_name):
+    source = tmp_path / 'legacy-hermes-source'
+    prefix = source / venv_name
+    base_prefix = tmp_path / 'base-python'
+    executable = base_prefix / 'bin' / 'python'
+    _write_core_markers(source)
+    prefix.mkdir(parents=True)
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b'base interpreter target')
+    monkeypatch.setattr(scoped_agent.sys, 'prefix', str(prefix))
+    monkeypatch.setattr(scoped_agent.sys, 'base_prefix', str(base_prefix))
+    monkeypatch.setattr(scoped_agent.sys, 'executable', str(executable))
+    monkeypatch.setattr(scoped_agent.sys, 'path', [])
+
+    assert scoped_agent._trusted_core_root() == source.resolve()
+
+
+def test_trusted_core_root_rejects_legacy_venv_name_without_interpreter_binding(tmp_path, monkeypatch):
+    source = tmp_path / 'legacy-hermes-source'
+    prefix = source / '.venv'
+    _write_core_markers(source)
+    prefix.mkdir(parents=True)
+    monkeypatch.setattr(scoped_agent.sys, 'prefix', str(prefix))
+    monkeypatch.setattr(scoped_agent.sys, 'base_prefix', str(prefix))
+    monkeypatch.setattr(scoped_agent.sys, 'executable', str(prefix / 'python'))
+    monkeypatch.setattr(scoped_agent.sys, 'path', [])
+
+    with pytest.raises(scoped_agent.AttemptError, match='trusted Hermes'):
+        scoped_agent._trusted_core_root()
 
 
 @pytest.fixture
@@ -270,6 +433,100 @@ def test_real_default_bootstrap_prepares_copied_plugin_without_provider_call(att
         assert calls[:len(expected_startup)] == expected_startup
         assert all(call == 'env' for call in calls[len(expected_startup):])
         plugins.get_plugin_manager().unload('model-router')
+
+
+def test_default_prepare_rejects_tampered_bootstrap_spec_origin(tmp_path, monkeypatch):
+    import importlib.util
+    import types
+
+    trusted_root = tmp_path / 'served' / 'workspace'
+    stale_root = tmp_path / 'stale' / 'workspace'
+    trusted_bootstrap = trusted_root / 'hermes_bootstrap.py'
+    stale_bootstrap = stale_root / 'hermes_bootstrap.py'
+    trusted_bootstrap.parent.mkdir(parents=True)
+    stale_bootstrap.parent.mkdir(parents=True)
+    trusted_bootstrap.write_text('# trusted fixture\n', encoding='utf-8')
+    stale_bootstrap.write_text('# stale fixture\n', encoding='utf-8')
+    tampered = types.ModuleType('hermes_bootstrap')
+    tampered.__file__ = str(trusted_bootstrap)
+    tampered.__spec__ = importlib.util.spec_from_file_location('hermes_bootstrap', stale_bootstrap)
+    setattr(tampered, 'harden_import_path', lambda _root: pytest.fail('tampered bootstrap must not execute'))
+    monkeypatch.setattr(scoped_agent, '_trusted_core_root', lambda: trusted_root)
+    monkeypatch.setitem(sys.modules, 'hermes_bootstrap', tampered)
+
+    with pytest.raises(scoped_agent.AttemptError, match='Hermes bootstrap origin changed'):
+        scoped_agent._default_prepare_runtime({'profile': 'default'})
+
+
+def test_child_process_prepares_copied_plugin_read_only_with_served_yaml(attempt):
+    destination = attempt['home'] / 'plugins/model-router'
+    destination.mkdir(parents=True)
+    for name in ('plugin.yaml', '__init__.py'):
+        shutil.copy2(REPO / name, destination / name)
+    shutil.copytree(REPO / 'model_router', destination / 'model_router', ignore=shutil.ignore_patterns('__pycache__'))
+    config_path = attempt['home'] / 'config.yaml'
+    config_bytes = (
+        'plugins:\n  enabled: [model-router]\n'
+        'agent:\n  max_turns: 7\n'
+        'security:\n  redact_secrets: true\n'
+    ).encode('utf-8')
+    config_path.write_bytes(config_bytes)
+    request = {**attempt['request'], 'profile': 'default'}
+    attempt['request_path'].write_text(json.dumps(request), encoding='utf-8')
+    (attempt['cwd'] / 'hermes_bootstrap.py').write_text(
+        "raise RuntimeError('untrusted cwd bootstrap was imported')\n", encoding='utf-8'
+    )
+
+    program = f'''\
+import importlib.util, json, sys
+from pathlib import Path
+core_root = {str(CORE)!r}
+home = Path({str(attempt['home'])!r})
+request_path = Path({str(attempt['request_path'])!r})
+source = Path({str(destination / 'model_router/scoped_agent.py')!r})
+from hermes_cli import env_loader, mcp_startup, plugins, profiles, runtime_provider
+env_loader.load_hermes_dotenv = lambda **_kwargs: []
+mcp_startup.ensure_mcp_discovery_before_agent_build = lambda **_kwargs: None
+runtime_provider.resolve_runtime_provider = lambda **_kwargs: (_ for _ in ()).throw(AssertionError('provider resolution called'))
+profiles._get_default_hermes_home = lambda: home
+sys.modules['tools.tirith_security'] = None
+spec = importlib.util.spec_from_file_location('read_only_child_scope', source)
+scope = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scope)
+request = json.loads(request_path.read_text(encoding='utf-8'))
+prepared = scope._default_prepare_runtime(request)
+import hermes_bootstrap, hermes_yaml
+parsed = hermes_yaml.safe_load('agent:\\n  max_turns: 7\\n')
+assert Path(prepared['core_root']).resolve() == Path(core_root).resolve()
+assert Path(hermes_bootstrap.__file__).resolve() == Path(core_root, 'hermes_bootstrap.py').resolve()
+assert Path(prepared['observer'].__file__).resolve().parent.parent == source.parents[1].resolve()
+assert prepared['resolve_runtime_provider'] is runtime_provider.resolve_runtime_provider
+assert parsed == {{'agent': {{'max_turns': 7}}}}
+plugins.get_plugin_manager().unload('model-router')
+print('PREPARE_RESULT=' + json.dumps({{'root': str(prepared['core_root']), 'yaml': hermes_yaml.__file__, 'config': prepared['config']['agent']['max_turns']}}))
+'''
+    child_env = os.environ.copy()
+    for key in ('PYTHONHOME', 'PYTHONPATH', 'VIRTUAL_ENV', 'HERMES_MANAGED_DIR'):
+        child_env.pop(key, None)
+    child_env.update({
+        'PYTHONPATH': str(CORE),
+        'HERMES_HOME': str(attempt['home']),
+        'HERMES_PROFILE': 'default',
+        'HERMES_DISABLE_LAZY_INSTALLS': '1',
+        'PYTHONUTF8': '1',
+    })
+    result = subprocess.run(
+        [sys.executable, '-B', '-c', program], env=child_env, cwd=attempt['cwd'],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = next(line.removeprefix('PREPARE_RESULT=') for line in result.stdout.splitlines()
+                   if line.startswith('PREPARE_RESULT='))
+    prepared_result = json.loads(payload)
+    assert Path(prepared_result['root']).resolve() == CORE.resolve()
+    assert Path(prepared_result['yaml']).resolve() == (CORE / 'hermes_yaml.py').resolve()
+    assert prepared_result['config'] == 7
+    assert config_path.read_bytes() == config_bytes
 
 
 @pytest.mark.parametrize('broken', ['security: [', '- invalid-root'])

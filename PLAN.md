@@ -1,5 +1,11 @@
 # Model Router implementation contract
 
+## 2026-10-23: Hosted-runtime compatibility and publication (v0.4.6)
+
+The current user explicitly requests checking tool registration after restart, resolving the four previously reproduced host-compatibility failures, deploying the reviewed plugin, pushing GitHub and updating the official catalog. This supersedes the previous local-only publication restriction. Keep changes inside the plugin; preserve models, fallback consent, budgets, auth ownership, approvals, current sessions and unrelated user changes. Diagnose the served Python/core separately from the older shell launcher. Use native Hermes YAML where available with exact-missing-module-only legacy fallback, preserve trusted bootstrap/code/dependency provenance, and test Desktop busy/Stop/exactly-once completion against the current native contract without patching core or weakening ownership.
+
+Require RED/GREEN for each failure, the whole Python/Node suite, fresh native PluginManager tool/policy registration plus a read-only coding_route config response, and immutable independent review before production deployment. Publish a new exact commit/version including the previously local first-save/default-on changes; preserve maintainer disclosures and submit a new SHA-bump catalog PR. Catalog merge/approval is maintainer-owned and must not be represented by submission or green CI alone. Do not use paid model calls as routine settings/registration smoke tests or force a shared process restart.
+
 ## 2026-10-23: First-save repair and default-on routing (v0.4.5)
 
 The current user requests fixing the whole-settings save on a fresh installation, enabling routing by default after installation, and explicitly approves using the same model for Heavy/Light in separate purpose-bound jobs. Preserve raw stored skills.disabled values for CAS and write-before checks; normalize only desired values. For installed profiles without a canonical choice, derive ON read-only while honoring explicit bare/namespaced skill opt-outs. Keep stored OFF choices and profiles without the package OFF. Do not run config migrations or change models, fallback consent, budgets, auth, existing sessions or host trust/activation gates on installation. Retain manual opt-out only under advanced routing settings.

@@ -2185,7 +2185,7 @@ function RouterPage({ ctx: pluginContext }) {
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.4.5',
+  version: '0.4.6',
   defaultEnabled: false,
   register(ctx) {
     const page = {

@@ -257,7 +257,7 @@ def read_key_scoped(
         managed_before = _file_signature(managed_path)
         # Hermes normalizes a scalar/list YAML root to {}, so its return type
         # alone cannot prove the source file is a valid editable mapping.
-        import yaml
+        from .yaml_compat import yaml
         original_root = yaml.safe_load(config_path.read_text(encoding="utf-8-sig"))
         if not isinstance(original_root, dict):
             raise EffectiveConfigUnavailable("profile config source is not a mapping")

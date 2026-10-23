@@ -1,7 +1,7 @@
 """Exact-byte read cache: speed without hiding external config edits."""
 import copy
 import pytest
-import yaml
+from model_router.yaml_compat import yaml
 
 from model_router.service import Service, ServiceError
 from test_integration import make_home

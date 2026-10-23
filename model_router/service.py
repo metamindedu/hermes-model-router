@@ -422,11 +422,18 @@ class Service:
         """Same loaded core/dependencies, never renderer paths or boot a new venv."""
         try:
             import hermes_cli
-            import yaml
+            from .yaml_compat import yaml
             import rich
             import pydantic
             modules = (hermes_cli, yaml, rich, pydantic)
-            return list(dict.fromkeys(str(Path(module.__file__).resolve().parents[1]) for module in modules))
+            paths = []
+            for module in modules:
+                origin = getattr(module, "__file__", None)
+                if not isinstance(origin, str):
+                    return []
+                source = Path(origin).resolve()
+                paths.append(str(source.parents[1] if hasattr(module, "__path__") else source.parent))
+            return list(dict.fromkeys(paths))
         except (ImportError, TypeError, OSError):
             return []
 
@@ -451,7 +458,7 @@ class Service:
     def _read_key(self, profile: str, key: str) -> Any:
         # Reads are local and narrowly selected; launching 143 CLI processes per
         # UI refresh was both slow and unnecessary. Writes still use Hermes CLI.
-        import yaml
+        from .yaml_compat import yaml
         self._require_profile(profile)
         try:
             raw = (self._profile_home(profile) / "config.yaml").read_bytes()

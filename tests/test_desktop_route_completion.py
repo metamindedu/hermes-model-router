@@ -19,7 +19,10 @@ def consumer(monkeypatch):
     # Only the external model/transport and config I/O seams are stubbed.
     # Ownership, queue, dedup, native turn admission and Stop latch stay real.
     monkeypatch.setattr(server, '_emit', lambda *a: emitted.append(a))
-    monkeypatch.setattr(server, '_notif_submit', lambda *a, **kw: submitted.append((a, kw)))
+    def submit(*args, **kwargs):
+        submitted.append((args, kwargs))
+        return True  # Native _notif_submit returns True only when its turn was accepted.
+    monkeypatch.setattr(server, '_notif_submit', submit)
     monkeypatch.setattr(server, '_session_profile_runtime_scope', lambda *a, **k: nullcontext())
     monkeypatch.setattr(server, '_load_cfg', lambda: {'display': {'background_process_notifications': 'concise'}})
     monkeypatch.setattr(server, '_sessions', {})

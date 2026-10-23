@@ -42,6 +42,10 @@ Fast and fallback requests can increase API charges or subscription-credit usage
 
 ## Compatibility and current limitations
 
+### v0.4.6 hosted-runtime compatibility
+
+Settings and effective-config inspection use Hermes's native YAML policy when available, with a legacy PyYAML fallback only when the native adapter itself is absent. A broken native dependency is not hidden by fallback. Routed children accept only source roots bound to Python's active venv: a managed `environments/<id>/venv` and its sibling workspace, or a conventional source-owned `.venv`/`venv`. Missing, incomplete, linked or unknown bindings fail closed; arbitrary `sys.path`/`find_spec` candidates are not trusted. The verified source precedes a job's working directory, and bootstrap file/spec origins must match it. The Desktop completion regression honors the native consumer's accepted-turn boolean, preserving busy/Stop requeue and exactly-once wake checks. Native PluginManager registration of `coding_route` and its policy skill is checked with PyYAML imports explicitly blocked in a fresh credential-free runtime, separately from the install Doctor's conditional probe. Existing-session registration is not assumed from files alone.
+
 ### v0.4.5 first-save fix and default-on routing
 
 First settings saves preserve the raw `skills.disabled` CAS baseline, including omitted/null/legacy forms, rather than comparing a normalized empty list with missing storage. New installed profiles without saved choices default ON without a settings migration. Existing explicit OFF choices remain OFF, and opt-out controls move under advanced routing settings. Heavy/Light may use the same provider/model/effort in separate jobs; role-specific verification and budgets remain distinct. Same-model review is not different-model review diversity. Models, fallback consent, native approvals and stored budgets are not changed on installation.

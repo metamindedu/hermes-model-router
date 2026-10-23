@@ -47,11 +47,15 @@ def test_spawn_preserves_native_runtime_without_foreign_pythonpath(tmp_path, mon
     program = ('import importlib.util,json; '
         f'spec=importlib.util.spec_from_file_location("scope",{str(source)!r}); '
         'scope=importlib.util.module_from_spec(spec); spec.loader.exec_module(scope); '
-        'import yaml; print(json.dumps({"root":str(scope._trusted_core_root()),"yaml":yaml.__file__}))')
+        'import hermes_yaml; parsed=hermes_yaml.safe_load("agent:\\n  max_turns: 7\\n"); '
+        'print(json.dumps({"root":str(scope._trusted_core_root()),"yaml":hermes_yaml.__file__,"parsed":parsed}))')
     result = actual_run([sys.executable, '-B', '-c', program], env=env,
         cwd=calls[0][1]['cwd'], capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)['root'] == str(Path(hermes_bootstrap.__file__).resolve().parent)
+    child = json.loads(result.stdout)
+    assert child['root'] == str(Path(hermes_bootstrap.__file__).resolve().parent)
+    assert Path(child['yaml']).resolve() == Path(child['root']) / 'hermes_yaml.py'
+    assert child['parsed'] == {'agent': {'max_turns': 7}}
 
 
 def test_real_desktop_missing_ui_id_cannot_borrow_global_ui(monkeypatch):

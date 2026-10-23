@@ -477,46 +477,112 @@ def _public_progress_class() -> Any:
 
 
 def _trusted_core_root() -> Path:
-    """Find the runtime's Hermes source root without trusting cwd or project modules."""
+    """Resolve Hermes source only through the venv that owns this interpreter."""
     plugin_root = Path(__file__).resolve().parents[1]
-    current = Path.cwd().resolve()
-    candidates: list[Path] = []
-    executable = Path(sys.executable).resolve()
-    candidates.extend(executable.parents)
-    for raw in tuple(sys.path):
-        if not raw:
-            continue
+    current = Path.cwd().resolve(strict=True)
+
+    def path_has_redirect(path: Path) -> bool:
         try:
-            path = Path(raw).expanduser().resolve()
-            if path == current or path == plugin_root or current in path.parents or plugin_root in path.parents:
-                continue
-        except (OSError, RuntimeError):
-            continue
-        candidates.append(path)
-    for candidate in candidates:
-        root = candidate if candidate.is_dir() else candidate.parent
-        if all((root / member).is_file() for member in (
-            "hermes_bootstrap.py", "run_agent.py", "agent/agent_init.py", "hermes_cli/runtime_provider.py",
-        )):
-            resolved = root.resolve(strict=True)
-            if resolved != current and current not in resolved.parents and resolved != plugin_root and plugin_root not in resolved.parents:
-                return resolved
-    saved_path = list(sys.path)
+            if not path.is_absolute():
+                return True
+            current_path = Path(path.anchor)
+            for part in path.parts[1:]:
+                current_path = current_path / part
+                if current_path.is_symlink():
+                    return True
+                is_junction = getattr(current_path, "is_junction", None)
+                if callable(is_junction) and is_junction():
+                    return True
+                # Python <3.12 has no Path.is_junction(); resolve detects the
+                # redirection there, and also catches other reparse points.
+                if current_path.resolve(strict=False) != current_path.absolute():
+                    return True
+            return False
+        except (OSError, RuntimeError, ValueError):
+            return True
+
+    def verified_root(candidate: Path) -> Path | None:
+        """Require a real, non-linked source tree outside cwd and this plugin."""
+        try:
+            if path_has_redirect(candidate):
+                return None
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_dir():
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if (
+            resolved == current
+            or current in resolved.parents
+            or resolved in current.parents
+            or resolved == plugin_root
+            or plugin_root in resolved.parents
+            or resolved in plugin_root.parents
+        ):
+            return None
+        for member in (
+            "hermes_bootstrap.py", "run_agent.py", "agent/agent_init.py",
+            "hermes_cli/runtime_provider.py",
+        ):
+            marker = resolved / member
+            if path_has_redirect(marker) or not marker.is_file():
+                return None
+            try:
+                if resolved not in marker.resolve(strict=True).parents:
+                    return None
+            except (OSError, RuntimeError, ValueError):
+                return None
+        return resolved
+
+    def reject_untrusted_binding() -> None:
+        raise AttemptError("initialization_error", "trusted Hermes interpreter binding could not be verified")
+
+    # sys.prefix is the venv binding established by Python itself. In a POSIX
+    # venv, sys.executable may resolve through a symlink to the base interpreter,
+    # so executable ancestry is not a source-root authority.
     try:
-        sys.path[:] = [item for item in sys.path if item and Path(item).resolve() not in {current, plugin_root}]
-        spec = importlib.util.find_spec("hermes_bootstrap")
-        origin = Path(spec.origin).resolve(strict=True) if spec and spec.origin else None
-        if origin is not None:
-            root = origin.parent
-            if all((root / member).is_file() for member in (
-                "run_agent.py", "agent/agent_init.py", "hermes_cli/runtime_provider.py",
-            )) and root != current and root != plugin_root and plugin_root not in root.parents:
-                return root
-    except (ImportError, OSError, RuntimeError, ValueError):
-        pass
-    finally:
-        sys.path[:] = saved_path
-    raise AttemptError("initialization_error", "trusted Hermes import origin could not be verified")
+        raw_prefix = Path(sys.prefix)
+        raw_base_prefix = Path(sys.base_prefix)
+        if (
+            not raw_prefix.is_absolute()
+            or not raw_base_prefix.is_absolute()
+            or path_has_redirect(raw_prefix)
+        ):
+            reject_untrusted_binding()
+        prefix = raw_prefix.resolve(strict=True)
+        base_prefix = raw_base_prefix.resolve(strict=True)
+        if not prefix.is_dir() or not base_prefix.is_dir() or prefix == base_prefix:
+            reject_untrusted_binding()
+    except AttemptError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise AttemptError(
+            "initialization_error", "trusted Hermes interpreter binding could not be verified"
+        ) from exc
+
+    # Managed service environments are structurally bound as
+    # environments/<id>/venv beside the exact workspace. If that binding is
+    # recognized but its workspace is absent, incomplete, or redirected, never
+    # fall back to an older source checkout on sys.path.
+    if (
+        prefix.name.casefold() == "venv"
+        and prefix.parent.parent.name.casefold() == "environments"
+    ):
+        managed_root = verified_root(prefix.parent / "workspace")
+        if managed_root is None:
+            raise AttemptError(
+                "initialization_error", "trusted Hermes managed workspace could not be verified"
+            )
+        return managed_root
+
+    # Legacy installs are accepted only when Python identifies the interpreter
+    # prefix as the source checkout's conventional .venv/venv directory.
+    if prefix.name.casefold() in {".venv", "venv"}:
+        legacy_root = verified_root(prefix.parent)
+        if legacy_root is not None:
+            return legacy_root
+
+    reject_untrusted_binding()
 
 
 def _strict_profile_config(config_path: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
@@ -763,15 +829,34 @@ def _default_prepare_runtime(request: dict[str, Any]) -> dict[str, Any]:
     """Hermes-supported profile/bootstrap/config/runtime setup for the live adapter."""
     core_root = _trusted_core_root()
     plugin_root = Path(__file__).resolve().parents[1]
-    if str(core_root) not in sys.path:
-        sys.path.insert(0, str(core_root))
+    resolved_core = core_root.resolve(strict=True)
+    if not resolved_core.is_dir():
+        raise AttemptError("initialization_error", "trusted Hermes source root is not a directory")
+    preserved_paths = []
+    for item in sys.path:
+        try:
+            if item and Path(item).expanduser().resolve() == resolved_core:
+                continue
+        except (OSError, RuntimeError):
+            pass
+        preserved_paths.append(item)
+    sys.path[:] = [str(resolved_core), *preserved_paths]
     if str(plugin_root) not in sys.path:
-        sys.path.insert(0, str(plugin_root))
+        sys.path.insert(1, str(plugin_root))
     bootstrap = importlib.import_module("hermes_bootstrap")
     bootstrap_origin = Path(bootstrap.__file__).resolve(strict=True)
-    if bootstrap_origin.parent != core_root:
+    expected_bootstrap = (resolved_core / "hermes_bootstrap.py").resolve(strict=True)
+    bootstrap_spec = getattr(bootstrap, "__spec__", None)
+    spec_origin = getattr(bootstrap_spec, "origin", None)
+    if (
+        bootstrap_origin != expected_bootstrap
+        or (bootstrap_spec is not None and (
+            not isinstance(spec_origin, str)
+            or Path(spec_origin).resolve(strict=True) != expected_bootstrap
+        ))
+    ):
         raise AttemptError("initialization_error", "Hermes bootstrap origin changed during resolution")
-    bootstrap.harden_import_path(str(core_root))
+    bootstrap.harden_import_path(str(resolved_core))
     # The plugin root is trusted and must remain importable after Hermes removes cwd entries.
     if str(plugin_root) not in sys.path:
         sys.path.insert(1, str(plugin_root))
