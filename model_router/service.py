@@ -1360,18 +1360,21 @@ class Service:
                 entry["routing"] = dict(entry["routing"])
                 entry["routing"]["enabled"] = new_enabled
                 changes.append({"profile": name, "field": "routing.enabled", "before": old_enabled, "after": new_enabled})
+            raw_disabled = self._read_key(name, "skills.disabled")
             disabled = self._read_disabled(name)
             if old_enabled != new_enabled or (SKILL_NAME not in disabled) != new_enabled:
                 updated = [item for item in disabled if item != SKILL_NAME]
                 if not new_enabled:
                     updated.append(SKILL_NAME)
                 if scope == "routing":
-                    profile_values = snapshots.setdefault(name, {"skills.disabled": disabled})
+                    profile_values = snapshots.setdefault(name, {"skills.disabled": raw_disabled})
                 else:
                     profile_values = snapshots.setdefault(name, self._profile_digest_keys(name, entry["models"], True))
-                profile_values["skills.disabled"] = disabled
+                # Normalize only the desired list, never the raw CAS baseline.
+                # Missing/null/legacy JSON lists must match their stored form.
+                profile_values["skills.disabled"] = raw_disabled
                 if updated != disabled:
-                    writes.append({"profile": name, "key": "skills.disabled", "before": disabled, "after": updated})
+                    writes.append({"profile": name, "key": "skills.disabled", "before": raw_disabled, "after": updated})
                     changes.append({"profile": name, "field": "skills.disabled", "before": "enabled" if old_enabled else "disabled", "after": "enabled" if new_enabled else "disabled"})
             if new_enabled:
                 digest = self._skill_digest(name)
