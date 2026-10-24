@@ -1,5 +1,9 @@
 # Model Router implementation contract
 
+## Current authorization: verified v0.4.7 release and default-profile deployment
+
+The user explicitly requests publishing/deploying the verified router changes as a new version and continuing the independent YouTube work. Publish only after whole-range tests and Heavy independent review; include cold PM binding, the narrow default-local context, native completion opt-in, and Windows console suppression. Preserve all core files, models, fallback consent, budgets and unrelated changes. Local deployment is limited to the active default profile; historical all-profile instructions do not authorize modifying other profiles now. Do not claim arbitrary event replay is exactly-once: verify native result consumption and retain the unconsumed replay characterization. Keep source release, exact-SHA install, active registration and maintainer catalog admission separate. No repeated prompt to continue when an owned review finishes; consume its result and perform the next authorized action.
+
 ## 2026-10-23: Hosted-runtime compatibility and publication (v0.4.6)
 
 The current user explicitly requests checking tool registration after restart, resolving the four previously reproduced host-compatibility failures, deploying the reviewed plugin, pushing GitHub and updating the official catalog. This supersedes the previous local-only publication restriction. Keep changes inside the plugin; preserve models, fallback consent, budgets, auth ownership, approvals, current sessions and unrelated user changes. Diagnose the served Python/core separately from the older shell launcher. Use native Hermes YAML where available with exact-missing-module-only legacy fallback, preserve trusted bootstrap/code/dependency provenance, and test Desktop busy/Stop/exactly-once completion against the current native contract without patching core or weakening ownership.

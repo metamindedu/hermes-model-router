@@ -72,7 +72,8 @@ raise SystemExit(code)
         with scoped_current_session_id(parent):
             with (directory / 'job.log').open('ab') as log:
                 process = subprocess.Popen([sys.executable, '-c', script, str(routing.PLUGIN_ROOT), str(directory), outcome],
-                    env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, close_fds=True)
+                    env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, close_fds=True,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             runtime = RouteRuntime(parent, parent, parent, registry, lambda *a: True, 'ui-'+parent)
             pid = runtime.track(process, job_id=job_id, purpose='mechanical', cwd=str(tmp_path), profile=profile)
             row = registry.get(pid)

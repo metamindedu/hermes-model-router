@@ -42,6 +42,14 @@ Fast and fallback requests can increase API charges or subscription-credit usage
 
 ## Compatibility and current limitations
 
+### v0.4.7 cold-host binding, local completion and quiet Windows launches
+
+Normal base-Python hosts can load the native PM environment module before its optional adoption helper. The router now validates exactly one already imported generation under the verified native install root without importing that helper, switching generations or relaxing child interpreter checks. The default local launch context's explicitly empty profile name is matched narrowly to the default plugin scope; missing or foreign context remains rejected.
+
+Validated default-local routed jobs now request native completion notifications even when no UI-session ID is bound. Existing parent/lane ownership, Stop/busy and explicit notification opt-out remain host-owned. A completion is a wake to read the exact job result, not a successful review verdict. The parent should consume its owned native process result through terminal `process_manage wait` before returning idle; a partial/head log read is not acknowledgement, and raw re-delivery before result consumption is not an exactly-once guarantee. Additional automatic continuation may use the configured model's quota; installation does not start jobs or change model/fallback/budget choices.
+
+Noninteractive Windows worker, legacy runner and settings-CLI launches explicitly suppress console windows, without changing POSIX session handling. Native-process test fixtures also suppress their consoles. Source/runtime, native child binding, registration and live review success are verified separately; skipped platform/permission tests are not counted as passes. No core files are modified.
+
 ### v0.4.6 hosted-runtime compatibility
 
 Settings and effective-config inspection use Hermes's native YAML policy when available, with a legacy PyYAML fallback only when the native adapter itself is absent. A broken native dependency is not hidden by fallback. Routed children accept only source roots bound to Python's active venv: a managed `environments/<id>/venv` and its sibling workspace, or a conventional source-owned `.venv`/`venv`. Missing, incomplete, linked or unknown bindings fail closed; arbitrary `sys.path`/`find_spec` candidates are not trusted. The verified source precedes a job's working directory, and bootstrap file/spec origins must match it. The Desktop completion regression honors the native consumer's accepted-turn boolean, preserving busy/Stop requeue and exactly-once wake checks. Native PluginManager registration of `coding_route` and its policy skill is checked with PyYAML imports explicitly blocked in a fresh credential-free runtime, separately from the install Doctor's conditional probe. Existing-session registration is not assumed from files alone.
@@ -206,7 +214,7 @@ Windows에서는 플러그인의 작업 실행기·에이전트 실행 단계와
 
 UI, 설정 서비스, 라우팅 작업 실행기, 동봉 스킬을 한 패키지로 배포합니다. `compat/adaptive-coding-orchestration`은 기존 bare skill 자동 탐색을 위한 작은 진입점입니다. 실제 정책은 `model-router:adaptive-coding-orchestration`에 있습니다.
 
-초기 프로필 범위는 `docs/profile-audit.json`의 실제 스킬 탐색 결과를 보존합니다. 새 프로필은 라우팅 OFF가 기본입니다. Desktop UI는 앱 수준에서 공유되지만 런타임 도구와 작업 파일은 호출 프로필에 귀속됩니다.
+초기 프로필 범위는 `docs/profile-audit.json`의 실제 스킬 탐색 결과를 보존합니다. 패키지를 신뢰·활성화한 설치 프로필에 저장된 선택이 없으면 라우팅 기본값은 ON이며, 기존 OFF·스킬 비활성화 선택은 보존합니다. 패키지가 없는 프로필은 켜지지 않습니다. Desktop UI는 앱 수준에서 공유되지만 런타임 도구와 작업 파일은 호출 프로필에 귀속됩니다.
 
 ## 작업 표시와 자식 세션
 
@@ -224,11 +232,11 @@ Background의 작업명은 고정된 **작업명 · Heavy/Light · 대상 모델
 
 실제 ProcessRegistry가 실행/종료/중지의 권위입니다. 관찰자는 프로세스를 기다려 회수하거나 중지하지 않으며 native lifecycle/exit code를 바꾸지 않습니다. 중지와 자연 종료가 경합하면 native 종료 사유가 나중에 정정될 수 있으므로 상세 요약은 **프로세스 종료 확인과 소요 시간만** 고정하고, 종료 종류는 Background의 현재 상태를 따릅니다. 의미적 검수 GO를 추론하지 않습니다. 검수 내용과 실제 모델 증거는 기존 작업 결과로 확인합니다.
 
-Desktop에 결속된 새 라우팅 작업은 네이티브 **프로세스 완료 알림**을 통해 정확한 부모 대화를 깨웁니다. 공개용 작업 안내와 작업 ID는 native reader가 시작되기 전에 넣어 매우 빠른 종료에도 결과 조회 대상을 보존합니다. 정상 종료 시 실행기가 먼저 작업 결과/상태를 저장하고 종료하며, 부모는 깨어난 뒤 `coding_route(action="status", job_id=...)`로 실제 결과를 확인합니다. 실패·취소·타임아웃 알림도 성공이나 검수 GO를 뜻하지 않습니다. 원본 private 로그나 답변 전문은 완료 알림에 복사하지 않습니다.
+Desktop에 결속된 새 라우팅 작업은 네이티브 **프로세스 완료 알림**을 통해 정확한 부모 대화를 깨웁니다. 공개용 작업 안내와 작업 ID는 native reader가 시작되기 전에 넣어 매우 빠른 종료에도 결과 조회 대상을 보존합니다. 정상 종료 시 실행기가 먼저 작업 결과/상태를 저장하고 종료하며, 부모는 깨어난 뒤 정확한 process ID로 `process_manage(action="wait", session_id=...)`의 종료 결과를 소비하고 `coding_route(action="status", job_id=...)`로 실제 결과를 확인합니다. 실패·취소·타임아웃 알림도 성공이나 검수 GO를 뜻하지 않습니다. 원본 private 로그나 답변 전문은 완료 알림에 복사하지 않습니다.
 
-활동이 많은 작업의 완료 알림은 native 출력의 끝부분만 포함하여 최초 작업 ID가 잘릴 수 있습니다. 그 경우 알림의 정확한 process ID로 `process_manage(action="log", session_id=..., offset=0, limit=40)`를 호출해 시작 안내의 작업 ID를 복구한 뒤 해당 UUID만 상태 조회합니다. 같은 제목·다른 작업이나 인접 폴더에서 ID를 추측하지 않습니다. native 취소 이벤트는 발행 시점 snapshot이며 reader/kill 경합 뒤 최종 종료 사유가 정정될 수 있으므로, 최신 native receipt와 별도 작업 결과를 함께 확인합니다.
+활동이 많은 작업의 완료 알림은 native 출력의 끝부분만 포함하여 최초 작업 ID가 잘릴 수 있습니다. 그 경우 알림의 정확한 process ID로 `process_manage(action="log", session_id=..., offset=0, limit=40)`를 호출해 시작 안내의 작업 ID를 복구합니다. 앞부분 로그 조회만으로 완료를 소비했다고 보지 말고 정확한 process ID의 종료 결과를 `wait`로 확인한 뒤 해당 UUID만 상태 조회합니다. 같은 제목·다른 작업이나 인접 폴더에서 ID를 추측하지 않습니다. native 취소 이벤트는 발행 시점 snapshot이며 reader/kill 경합 뒤 최종 종료 사유가 정정될 수 있으므로, 최신 native receipt와 별도 작업 결과를 함께 확인합니다.
 
-부모가 이미 실행 중이면 native가 완료를 보류하고, Stop을 누른 경우에는 사용자 후속 입력 전 자동 재개하지 않습니다. 명시적인 `display.background_process_notifications: off`는 그대로 존중합니다. Goal의 대기·일시정지·예산은 native 정책을 따르며 플러그인이 Goal을 재설정하지 않습니다. 비-Desktop 실행과 이미 시작한 작업의 알림 계약은 변경하지 않습니다. `status.update`는 규격에 맞는 Background 새로고침일 뿐 완료 알림이 아닙니다.
+부모가 이미 실행 중이면 native가 완료를 보류하고, Stop을 누른 경우에는 사용자 후속 입력 전 자동 재개하지 않습니다. 명시적인 `display.background_process_notifications: off`는 그대로 존중합니다. Goal의 대기·일시정지·예산은 native 정책을 따르며 플러그인이 Goal을 재설정하지 않습니다. v0.4.7은 검증된 기본 로컬 세션에도 완료 알림을 요청하며, 다른 비-Desktop 실행과 이미 시작한 작업의 계약은 보존합니다. `status.update`는 규격에 맞는 Background 새로고침일 뿐 완료 알림이 아닙니다.
 
 상세 활동 수집은 새 작업에만 연결합니다. 기존 작업을 재실행하거나 과거 기록을 backfill하지 않습니다. 호스트 종료·소유권 소실·관찰 시간 한도(작업 제한 시간+30초)에는 관찰이 끝나며 실제 작업 상태를 위조하지 않습니다. 종료 후 덧붙인 상세 요약은 현재 호스트의 메모리 출력입니다. native 완료 알림/보존 결과가 먼저 저장될 수 있으므로 알림 본문이나 호스트 재시작·메모리 정리 후의 보존 출력에 마지막 활동·요약이 남는다고 보장하지 않습니다. 플러그인이 native 보존 결과를 덮어쓰지 않습니다.
 

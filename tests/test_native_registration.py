@@ -43,7 +43,8 @@ print('REGISTRATION:' + json.dumps({'registered': True, 'enabled': True}))
     for key in ('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV', 'HERMES_PROFILE'):
         env.pop(key, None)
     result = subprocess.run([sys.executable, '-B', '-c', program], env=env, cwd=source,
-        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
+        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     assert result.returncode == 0, result.stderr[-3000:]
     lines = [line for line in result.stdout.splitlines() if line.startswith('REGISTRATION:')]
     assert json.loads(lines[-1].split(':', 1)[1]) == {'registered': True, 'enabled': True}

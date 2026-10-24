@@ -116,7 +116,8 @@ def test_already_exited_real_process_is_seeded_before_native_reader(tmp_path, mo
         with scoped_current_session_id('parent-fast'):
             with (tmp_path/'private.log').open('wb') as out:
                 p = subprocess.Popen([sys.executable, '-c', "print('PRIVATE_STDOUT_CANARY')"],
-                    stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True)
+                    stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             assert p.wait(timeout=5) == 0
             runtime = RouteRuntime('parent-fast', 'parent-fast', 'parent-fast', registry, emit, ui_session)
             if emit_fails:

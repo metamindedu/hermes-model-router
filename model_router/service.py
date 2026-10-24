@@ -526,6 +526,7 @@ class Service:
                 self._command(profile, "config", "set", key, rendered, "--force"),
                 env=self._env(profile), shell=False, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=15, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ServiceError(f"could not write config key {key}") from exc

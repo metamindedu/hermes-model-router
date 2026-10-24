@@ -81,7 +81,7 @@ def test_plan_does_not_store_private_endpoint_and_clears_before_provider(tmp_pat
 
 
 def test_windows_pid_probe_does_not_terminate_child():
-    child = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(20)"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    child = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(20)"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     try:
         assert is_process_alive(child.pid)
         assert child.poll() is None
@@ -95,11 +95,13 @@ def test_windows_pid_probe_does_not_terminate_child():
 def run_launcher(command, env, timeout=30):
     """Use file handles instead of inherited pipes; failures remain failures."""
     import tempfile
-    scratch = Path(os.environ.get('TMPDIR') or Path.home() / 'AppData/Local/hermes/profiles/claire/cache/scratch')
+    from hermes_constants import get_hermes_home
+    scratch = Path(os.environ.get('TMPDIR') or Path(get_hermes_home()) / 'cache/scratch')
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryFile(dir=scratch) as out, tempfile.TemporaryFile(dir=scratch) as err:
         completed = subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
-                                   stdout=out, stderr=err, timeout=timeout, check=False)
+            stdout=out, stderr=err, timeout=timeout, check=False,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         out.seek(0)
         err.seek(0)
         completed.stdout = out.read().decode('utf-8', 'replace')

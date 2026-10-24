@@ -1,4 +1,4 @@
-"""No-network native Windows regression for a detached parent's adapter seam."""
+"""No-network native Windows regression for a windowless parent's adapter seam."""
 import json
 import os
 import subprocess
@@ -13,7 +13,7 @@ from model_router import job_worker
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Windows console allocation contract')
-def test_real_scoped_adapter_has_no_console_from_detached_parent(tmp_path):
+def test_real_scoped_adapter_has_no_console_from_windowless_parent(tmp_path):
     leaf = tmp_path / 'leaf.py'
     report = tmp_path / 'console.json'
     leaf.write_text('''import ctypes,json,sys
@@ -36,7 +36,7 @@ assert a[0] is None and a[1] is False and a[3]==0
 ''', encoding='utf-8')
     process = subprocess.Popen([sys.executable, '-B', str(driver)], stdin=subprocess.DEVNULL,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
-                               creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+                               creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
     try:
         assert process.wait(timeout=25) == 0
         assert json.loads(report.read_text(encoding='utf-8')) == {'attached': False, 'visible': False}

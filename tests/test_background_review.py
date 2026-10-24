@@ -61,7 +61,7 @@ def test_native_kill_reader_publication_race_does_not_mislabel(tmp_path, monkeyp
         signal_file = home / "release-child"
         script = "import pathlib,time,sys; p=pathlib.Path(sys.argv[1]);\nwhile not p.exists(): time.sleep(0.01)\nsys.exit(int(sys.argv[2]))"
         with scoped_current_session_id("parent-A"):
-            process = subprocess.Popen([sys.executable, "-c", script, str(signal_file), str(exit_code)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+            process = subprocess.Popen([sys.executable, "-c", script, str(signal_file), str(exit_code)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             session = registry.adopt_local(process, command="test-task", cwd=str(home), task_id="owner-A", owner_task_id="owner-A", session_key="key-A", notify_on_complete=False)
             job_id = str(uuid4())
             identity = dict(job_id=job_id, profile="claire", parent_session_id="parent-A", ui_session_id="ui-A")

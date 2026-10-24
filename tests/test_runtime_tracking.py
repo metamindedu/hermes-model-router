@@ -102,7 +102,7 @@ def test_real_registry_tracks_file_logged_worker_until_actual_exit(tmp_path, mon
         with scoped_current_session_id("native-parent"):
             runtime = capture_runtime(task_id="test-owner", registry=registry, get_env=lambda key, default="": {"HERMES_SESSION_ID": "native-parent", "HERMES_SESSION_KEY": "native-key"}.get(key, default), emit=lambda *a: events.append(a) or True)
             with (tmp_path / "job.log").open("wb") as out:
-                process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(0.6)"], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True)
+                process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(0.6)"], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             pid = runtime.track(process, job_id="real-job", purpose="mechanical", cwd=str(tmp_path))
             row = registry.get(pid)
             assert row.pid == process.pid and row.session_key == "native-key"

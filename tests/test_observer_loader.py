@@ -44,6 +44,7 @@ def _create_directory_redirect(path, target, *, force_junction=False):
         result = subprocess.run(
             ['cmd.exe', '/c', 'mklink', '/J', str(path), str(target)],
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         pytest.skip(f'directory links are unavailable in this test environment: {exc}')
@@ -518,6 +519,7 @@ print('PREPARE_RESULT=' + json.dumps({{'root': str(prepared['core_root']), 'yaml
     result = subprocess.run(
         [sys.executable, '-B', '-c', program], env=child_env, cwd=attempt['cwd'],
         capture_output=True, text=True, timeout=60,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
     )
     assert result.returncode == 0, result.stderr
     payload = next(line.removeprefix('PREPARE_RESULT=') for line in result.stdout.splitlines()

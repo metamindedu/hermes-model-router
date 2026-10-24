@@ -127,7 +127,7 @@ def test_start_snapshots_active_profile_routes_and_uses_detached_no_pipe_worker(
     assert kwargs["stderr"] is not subprocess.PIPE
     assert kwargs["close_fds"] is True
     if os.name == "nt":
-        assert kwargs["creationflags"] & subprocess.DETACHED_PROCESS
+        assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
         assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
     assert kwargs["env"]["HERMES_PROFILE"] == "claire"
     assert kwargs["env"]["HERMES_HOME"] == str(root / "profiles" / "claire")
@@ -341,7 +341,7 @@ def test_same_model_routes_start_independent_purpose_jobs(tmp_path, monkeypatch,
         assert kwargs["stdout"] is not subprocess.PIPE
         if os.name == "nt":
             assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
-            assert kwargs["creationflags"] & subprocess.DETACHED_PROCESS
+            assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
         else:
             assert kwargs["start_new_session"] is True
         assert _load(job_dir / "launch.json")["worker_pid"] == processes[-1].pid

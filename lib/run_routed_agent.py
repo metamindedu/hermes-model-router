@@ -398,6 +398,7 @@ def run_child_process(
             capture_output=True,
             timeout=timeout if timeout > 0 else None,
             check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return (
             completed.returncode,

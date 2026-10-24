@@ -37,9 +37,9 @@ def test_native_owner_guard_and_kill_stop_actual_worker_runner_adapter_tree(tmp_
     try:
         # root -> runner -> adapter; all task-owned and bounded even on failure.
         grandchild_code = 'import time; time.sleep(20)'
-        runner_code = "import subprocess,sys,time; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',%r]); Path(%r).write_text(str(p.pid)); time.sleep(20)" % (grandchild_code, str(tmp_path / 'adapter.pid'))
-        root_code = "import subprocess,sys,time; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',%r]); Path(%r).write_text(str(p.pid)); time.sleep(20)" % (runner_code, str(tmp_path / 'runner.pid'))
-        flags = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == 'win32' else {'start_new_session': True}
+        runner_code = "import subprocess,sys,time; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',%r],creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)); Path(%r).write_text(str(p.pid)); time.sleep(20)" % (grandchild_code, str(tmp_path / 'adapter.pid'))
+        root_code = "import subprocess,sys,time; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',%r],creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)); Path(%r).write_text(str(p.pid)); time.sleep(20)" % (runner_code, str(tmp_path / 'runner.pid'))
+        flags = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {'start_new_session': True}
         # These are stdlib process-tree fixtures, not dependency/runtime probes.
         # Avoid the Windows venv forwarding layer; retain the same process-group
         # flags, six-second startup gate, native owner denial and full-tree kill.

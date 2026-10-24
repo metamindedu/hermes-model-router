@@ -18,7 +18,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from . import task_presentation
 from .timeouts import DEFAULT_ROUTED_TOTAL_SECONDS
@@ -374,6 +374,158 @@ def _validate_routed_fast_snapshot(value: Any, *, profile: str, runtime: Any) ->
     return validated
 
 
+def _worker_runtime(working_dir: Path) -> tuple[Path, list[str], str]:
+    """Preflight one already-loaded native runtime; never search for a new one."""
+    def reject() -> NoReturn:
+        raise RoutingError("trusted worker interpreter binding is unavailable")
+
+    def plain_path(value, *, directory=False):
+        if not isinstance(value, (str, Path)) or not value:
+            reject()
+        path = Path(value)
+        if not path.is_absolute():
+            reject()
+        for part in (path, *path.parents):
+            junction = getattr(part, "is_junction", None)
+            if (part.is_symlink() or (callable(junction) and junction())
+                    or part.resolve(strict=False) != part.absolute()):
+                reject()
+        if not (path.is_dir() if directory else path.is_file()):
+            reject()
+        return path
+
+    try:
+        bootstrap = sys.modules.get("hermes_bootstrap")
+        bootstrap_file = plain_path(getattr(bootstrap, "__file__", None))
+        if plain_path(getattr(getattr(bootstrap, "__spec__", None), "origin", None)) != bootstrap_file:
+            reject()
+        core = plain_path(bootstrap_file.parent, directory=True)
+        for member in ("run_agent.py", "agent/agent_init.py", "hermes_cli/runtime_provider.py"):
+            plain_path(core / member)
+
+        def checked_worker_core(candidate):
+            candidate = plain_path(candidate, directory=True)
+            for other in (working_dir, PLUGIN_ROOT.resolve(strict=True)):
+                if candidate == other or candidate in other.parents or other in candidate.parents:
+                    reject()
+            for member in ("hermes_bootstrap.py", "run_agent.py", "agent/agent_init.py",
+                           "hermes_cli/runtime_provider.py"):
+                plain_path(candidate / member)
+            return candidate
+
+        prefix = plain_path(sys.prefix, directory=True)
+        base = plain_path(sys.base_prefix, directory=True)
+        bound_host = prefix != base
+        if bound_host:
+            owner = (prefix.parent / "workspace" if prefix.name.casefold() == "venv"
+                     and prefix.parent.parent.name.casefold() == "environments" else prefix.parent)
+            if prefix.name.casefold() not in {".venv", "venv"} or plain_path(owner, directory=True) != core:
+                reject()
+            executable = Path(sys.executable)
+            bin_dir = prefix / ("Scripts" if os.name == "nt" else "bin")
+            entries = ({"python.exe"} if os.name == "nt" else {
+                "python", f"python{sys.version_info.major}",
+                f"python{sys.version_info.major}.{sys.version_info.minor}",
+                f"python{sys.version_info.major}.{sys.version_info.minor}{getattr(sys, 'abiflags', '')}",
+            })
+            entry_name = executable.name.casefold() if os.name == "nt" else executable.name
+            if (not executable.is_absolute() or executable.parent != bin_dir
+                    or entry_name not in entries or not executable.is_file()):
+                reject()
+            # Preserve an existing POSIX venv executable symlink, not its base
+            # target. This path needs no PM-adoption authority to remain valid.
+        pm_modules = ("pm.environments", "pm.environments_adopt")
+        cold_pm = (not bound_host and pm_modules[0] in sys.modules
+                   and pm_modules[1] not in sys.modules)
+        if not all(name in sys.modules for name in pm_modules) and not cold_pm:
+            if bound_host or not any(name in sys.modules for name in pm_modules):
+                return checked_worker_core(core), [str(core)], sys.executable
+            reject()
+
+        # Authorize native PM functions only from the source already running in
+        # this host. Do not import a replacement module from cwd or PYTHONPATH.
+        functions = {}
+        for name, relative, members in (
+            ("pm.environments", "pm/environments.py", ("site_packages", "venv_command", "venv_python", "install_state_dir")),
+            ("pm.environments_adopt", "pm/environments_adopt.py", ("running_environment",)),
+        ):
+            if cold_pm and name == "pm.environments_adopt":
+                continue  # Do not import an optional helper or change host state.
+            module = sys.modules.get(name)
+            expected = plain_path(core / relative)
+            if (plain_path(getattr(module, "__file__", None)) != expected
+                    or plain_path(getattr(getattr(module, "__spec__", None), "origin", None)) != expected):
+                reject()
+            for member in members:
+                function = getattr(module, member, None)
+                if (not callable(function) or getattr(function, "__module__", None) != name
+                        or getattr(function, "__globals__", None) is not module.__dict__):
+                    reject()
+                functions[member] = function
+
+        def loaded_memberships(generations):
+            memberships = set()
+            for candidate in generations.glob("*/venv"):
+                candidate_packages = functions["site_packages"](candidate)
+                for item in sys.path:
+                    if item and Path(item).resolve(strict=False) == candidate_packages.resolve(strict=False):
+                        # Check raw spellings; an alias must not hide a link.
+                        plain_path(Path(item), directory=True)
+                        plain_path(candidate_packages, directory=True)
+                        memberships.add(plain_path(candidate, directory=True))
+            return memberships
+
+        if cold_pm:
+            # The normal bootstrap loads environments, not necessarily adopt.
+            # Reuse the existing imported-generation proof under the verified
+            # native install root. No selected-new/PATH search or module load.
+            generations = plain_path(functions["install_state_dir"](core) / "environments", directory=True)
+            memberships = loaded_memberships(generations)
+            if len(memberships) != 1:
+                reject()
+            environment = next(iter(memberships))
+        else:
+            environment = functions["running_environment"](core)
+        runtime_paths = [str(core)]
+        if environment is not None:
+            runtime_paths.append(str(functions["site_packages"](environment).resolve(strict=True)))
+        if bound_host:
+            return checked_worker_core(core), runtime_paths, sys.executable
+        if environment is None:
+            # No native PM generation: preserve the existing launch behavior.
+            # The unchanged child trust gate still refuses an unbound runtime.
+            return checked_worker_core(core), runtime_paths, sys.executable
+
+        environment = plain_path(environment, directory=True)
+        if (environment.name.casefold() != "venv"
+                or environment.parent.parent.name.casefold() != "environments"):
+            reject()
+        plain_path(environment / "pyvenv.cfg")
+        packages = plain_path(functions["site_packages"](environment), directory=True)
+        generations = plain_path(functions["install_state_dir"](core) / "environments", directory=True)
+        if environment.parent.parent != generations:
+            reject()
+        memberships = loaded_memberships(generations)
+        if memberships != {environment}:
+            reject()
+        native = functions["venv_command"](core, environment)
+        if not isinstance(native, (list, tuple)) or len(native) != 1:
+            reject()  # Never flatten sealed store-Python/-S/entry/site-packages argv.
+        executable = plain_path(native[0])
+        if executable != functions["venv_python"](environment):
+            reject()
+        # Native PM owns this generation under the parent's install. Its build
+        # snapshot is the interpreter-owned child source, not the parent checkout.
+        worker_core = checked_worker_core(environment.parent / "workspace")
+        plain_path(worker_core / "pyproject.toml")
+        plain_path(worker_core / "uv.lock")
+        return worker_core, [str(worker_core), str(packages)], native[0]
+    except RoutingError:
+        raise
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+        reject()
+
+
 class Router:
     """Start and inspect detached jobs for the active Hermes profile only."""
 
@@ -465,6 +617,7 @@ class Router:
             ) == (primary_route["provider"], primary_route["model"]):
                 raise RoutingError(f"fallback.{route_role} must differ from its primary route")
 
+        core_root, runtime_paths, worker_python = _worker_runtime(working_dir)
         home = _profile_home(self.service, profile)
         jobs_root = _jobs_root(home)
         job_id = str(uuid.uuid4())
@@ -572,31 +725,23 @@ class Router:
             }
 
         from tools.environments.local import served_profile_child_env
-        import hermes_bootstrap
-        from pm.environments import site_packages
-        from pm.environments_adopt import running_environment
         child_env = served_profile_child_env(target_home=home, inherit_credentials=True)
         # The native helper intentionally strips Hermes-owned Python paths for
-        # arbitrary terminal children. This child uses THIS exact interpreter
-        # and runs Hermes: restore only the already-loaded host code/generation,
-        # never the inherited/project PYTHONPATH or another selected generation.
-        core_root = Path(hermes_bootstrap.__file__).resolve(strict=True).parent
-        runtime_paths = [str(core_root)]
-        environment = running_environment(core_root)
-        if environment is not None:
-            runtime_paths.append(str(site_packages(environment).resolve(strict=True)))
+        # arbitrary terminal children. Restore only this host's preflighted
+        # interpreter-owned code/generation for the Hermes worker, never an
+        # inherited/project PYTHONPATH or a newly selected generation.
         child_env["PYTHONPATH"] = os.pathsep.join(runtime_paths)
         child_env["HERMES_HOME"] = str(home)
         child_env["HERMES_PROFILE"] = profile
         command = [
-            sys.executable,
+            worker_python,
             str(WORKER_PATH),
             "--job-dir",
             str(job_dir),
             "--runner",
             str(RUNNER_PATH),
             "--python",
-            sys.executable,
+            worker_python,
             "--hermes-exe",
             str(hermes_path),
             "--profile",
@@ -629,7 +774,7 @@ class Router:
             creation["stderr"] = subprocess.STDOUT
             if os.name == "nt":
                 creation["creationflags"] = (
-                    getattr(subprocess, "DETACHED_PROCESS", 0)
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 )
             else:

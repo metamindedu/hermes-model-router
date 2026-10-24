@@ -40,7 +40,8 @@ print(json.dumps({'backend': yaml.__name__, 'enabled': s.routing_config('default
     for name in ('PYTHONHOME', 'VIRTUAL_ENV', 'HERMES_PROFILE'):
         env.pop(name, None)
     result = subprocess.run([sys.executable, '-B', '-c', program, str(home)], env=env,
-                            cwd=root, text=True, encoding='utf-8', capture_output=True, timeout=20)
+                            cwd=root, text=True, encoding='utf-8', capture_output=True, timeout=20,
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {'backend': 'hermes_yaml', 'enabled': True}
     assert not (home / 'plugin-data').exists()

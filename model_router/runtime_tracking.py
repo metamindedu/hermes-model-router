@@ -1,8 +1,8 @@
 """Connect routed Popen jobs to native Background and Desktop completion wakes.
 
 No delegate records/events are forged. The real worker owns its file-backed
-result/state before exit; native adoption owns completion delivery. Only bound
-Desktop jobs opt into wakes; other surfaces retain their existing contract.
+result/state before exit; native adoption owns completion delivery. Bound
+Desktop and validated default local turns opt in; other surfaces retain their contract.
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ class RouteRuntime:
     registry: Any
     emit: Callable
     ui_session_id: str = ""
+    local_completion_wake: bool = False
 
     def track(
         self,
@@ -75,7 +76,7 @@ class RouteRuntime:
             output_so_far=seed,
             # Desktop's native owner/Stop/opt-out/dedup gates own the wake.
             # A completion only asks the parent to read the file-backed result.
-            notify_on_complete=bool(self.ui_session_id),
+            notify_on_complete=bool(self.ui_session_id) or self.local_completion_wake,
         )
         process_id = str(getattr(session, "id", ""))
         # Ownership has already transferred. A display failure must never cause
@@ -169,7 +170,10 @@ def capture_runtime(*, task_id: str = "", expected_profile: str = "", get_env=No
         from gateway.session_context import session_context_engaged
         values = {var.name: value for var, value in copy_context().items()
                   if var.name.startswith("HERMES_SESSION_") or var.name == "HERMES_UI_SESSION_ID"}
-        get_env = lambda name, default="": values.get(name, default) if isinstance(values.get(name, default), str) else default
+        def read_env(name: str, default: Any = "") -> Any:
+            value = values.get(name, default)
+            return value if isinstance(value, str) else default
+        get_env = read_env
         if not get_env("HERMES_SESSION_ID"):
             desktop_hint = os.environ.get("HERMES_UI_SESSION_ID") or os.environ.get("HERMES_SESSION_PLATFORM") == "desktop"
             if session_context_engaged() or desktop_hint:
@@ -179,7 +183,20 @@ def capture_runtime(*, task_id: str = "", expected_profile: str = "", get_env=No
     key = get_env("HERMES_SESSION_KEY", "")
     platform = get_env("HERMES_SESSION_PLATFORM", "") or get_env("HERMES_SESSION_SOURCE", "")
     ui_session = get_env("HERMES_UI_SESSION_ID", "")
-    profile = get_env("HERMES_SESSION_PROFILE", "")
+    # A bound local launch-authority turn spells its unnamed profile as "".
+    # Keep that distinct from a missing/non-string field, and admit it only for
+    # the default package's exact observed local context. Never rewrite the host
+    # bindings or use process-global profile/session identity as a fallback.
+    profile = get_env("HERMES_SESSION_PROFILE", None)
+    local_default = (
+        expected_profile == "default" and profile == ""
+        and get_env("HERMES_SESSION_PLATFORM", None) == "local"
+        and get_env("HERMES_SESSION_SOURCE", None) == ""
+        and get_env("HERMES_UI_SESSION_ID", None) == ""
+        and isinstance(parent, str) and SESSION_TOKEN.fullmatch(parent) is not None
+        and isinstance(key, str) and 0 < len(key) <= 512
+        and not any(ord(c) < 32 for c in key)
+    )
     if ui_session or platform == "desktop":
         if not parent or not key or not profile or not ui_session:
             raise ValueError("incomplete desktop routing context")
@@ -187,7 +204,7 @@ def capture_runtime(*, task_id: str = "", expected_profile: str = "", get_env=No
         if key:
             raise ValueError("incomplete routing parent context")
         return None
-    if expected_profile and profile != expected_profile:
+    if expected_profile and profile != expected_profile and not local_default:
         raise ValueError("routing profile does not match current-session context")
     if not isinstance(parent, str) or SESSION_TOKEN.fullmatch(parent) is None:
         raise ValueError("invalid host parent session identity")
@@ -204,4 +221,5 @@ def capture_runtime(*, task_id: str = "", expected_profile: str = "", get_env=No
         raise RuntimeError("Hermes background process adoption is unavailable")
     if emit is None:
         from tools.desktop_ui import emit
-    return RouteRuntime(parent, key, owner, registry, emit, ui_session_id=ui_session)
+    return RouteRuntime(parent, key, owner, registry, emit, ui_session_id=ui_session,
+                        local_completion_wake=local_default)

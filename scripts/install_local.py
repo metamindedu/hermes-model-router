@@ -63,7 +63,7 @@ def main(argv=None):
             env.pop(variable, None)
         cmd = [str(launcher), "--profile", name]
         cmd += ["config", "set", key, json.dumps(value, ensure_ascii=False), "--force"]
-        r = subprocess.run(cmd, env=env, capture_output=True, timeout=45)
+        r = subprocess.run(cmd, env=env, capture_output=True, timeout=45, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         if r.returncode:
             raise RuntimeError("Config command failed: " + name + "/" + key)
         observed = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}

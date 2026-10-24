@@ -231,7 +231,7 @@ def test_real_registry_output_and_final_flush_without_wait_or_kill_ownership(tmp
         write(directory / "snapshot.json", {"job_id": job_id, "profile": "claire", "parent_session_id": "native-parent", "ui_session_id": "ui-A"})
         with scoped_current_session_id("native-parent"):
             with (home / "private.log").open("wb") as handle:
-                process = subprocess.Popen([sys.executable, "-c", "import time; print('PRIVATE_LOG_CANARY', flush=True); time.sleep(1.5)"], stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, close_fds=True)
+                process = subprocess.Popen([sys.executable, "-c", "import time; print('PRIVATE_LOG_CANARY', flush=True); time.sleep(1.5)"], stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, close_fds=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             runtime = RouteRuntime("native-parent", "native-key", "owner-A", registry, lambda *args: seen.append(args) or True, "ui-A")
             process_id = runtime.track(process, job_id=job_id, profile="claire", purpose="mechanical", cwd=str(home))
             write(directory / "launch.json", {"process_id": process_id, "worker_pid": process.pid})

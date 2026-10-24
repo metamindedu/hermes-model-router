@@ -177,7 +177,7 @@ def test_cached_telegram_native_adoption_uses_scoped_dispatch_parent(tmp_path):
             with route_session_context(session_id='test-parent', expected_profile='wallace'):
                 runtime = capture_runtime(task_id='test-owner', expected_profile='wallace', registry=registry, emit=lambda *a: True)
                 with (tmp_path / 'worker.log').open('wb') as out:
-                    process = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True)
+                    process = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, close_fds=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                 process_id = runtime.track(process, job_id='test-job', purpose='mechanical', cwd=str(tmp_path))
                 row = registry.get(process_id)
                 assert row.parent_session_id == 'test-parent'

@@ -290,7 +290,8 @@ def test_platform_wait_slices_do_not_restart_overall_deadline(monkeypatch):
 def test_real_platform_wait_accepts_arbitrarily_long_finite_budget():
     import time
     process = subprocess.Popen([runner.sys.executable, "-c", "import time; time.sleep(.05)"],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     try:
         assert runner._wait_scoped_process(process, time.monotonic() + 1e100) == 0
     finally:
