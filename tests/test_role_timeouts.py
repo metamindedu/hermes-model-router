@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from model_router.service import RevisionConflict, Service
+from model_router.yaml_compat import yaml
 from test_service import setup_home
 
 
@@ -21,6 +22,13 @@ def _service(tmp_path, monkeypatch):
 def _package(home: Path) -> Path:
     package = home / "plugins" / "model-router" / "model_router"
     package.mkdir(parents=True, exist_ok=True)
+    (package.parent / "plugin.yaml").write_text("name: model-router\nversion: 0.4.8\n", encoding="utf-8")
+    (package.parent / "__init__.py").write_text("# native plugin entrypoint fixture\n", encoding="utf-8")
+    (package / "__init__.py").write_text("# installed package fixture\n", encoding="utf-8")
+    config_path = home / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"] = {"enabled": ["model-router"], "disabled": []}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     (package / "timeouts.py").write_text("# installed base enforcement fixture\n", encoding="utf-8")
     (package / "native_watchdog.py").write_text("# installed base enforcement fixture\n", encoding="utf-8")
     return package
@@ -223,6 +231,42 @@ def test_split_capability_lost_after_real_write_must_not_report_applied(tmp_path
     assert module.timeouts.read_timeouts(home)["routed_heavy_total_seconds"] == 7200
     assert service._timeout_role_enforcement_available("p1") is False
     with pytest.raises(RuntimeError): service.apply(preview["plan_id"])
+
+
+@pytest.mark.parametrize("loss", ["python", "entrypoint"])
+def test_legacy_capability_lost_after_real_write_is_partial_and_one_shot(tmp_path, monkeypatch, loss):
+    from model_router import service as module
+    service = _service(tmp_path, monkeypatch)
+    home = service._profile_home("p1")
+    package = _package(home)
+    body = _body(service, updates=[{
+        "profile": "p1", "expected_revision": 0,
+        "delegate_total_seconds": 120, "routed_total_seconds": 7200,
+    }])
+    body["save_scope"] = "timeouts"
+    preview = service.preview(body)
+    original = module.timeouts.write_timeouts
+
+    def write_then_lose_support(home, values, **kwargs):
+        result = original(home, values, **kwargs)
+        if loss == "python":
+            path = home / "config.yaml"
+            config = yaml.safe_load(path.read_text(encoding="utf-8"))
+            config["plugins"]["enabled"] = []
+            path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        else:
+            (package.parent / "__init__.py").unlink()
+        return result
+
+    monkeypatch.setattr(module.timeouts, "write_timeouts", write_then_lose_support)
+    receipt = service.apply(preview["plan_id"])
+    assert receipt["status"] == "partial"
+    assert receipt["applied"] == [{"profile": "p1", "key": "model-router.timeouts"}]
+    assert receipt["remaining"] == []
+    assert module.timeouts.read_timeouts(home)["routed_total_seconds"] == 7200
+    assert service._timeout_enforcement_available("p1") is False
+    with pytest.raises(RuntimeError):
+        service.apply(preview["plan_id"])
 
 
 def test_timeout_status_split_capability_is_boolean_for_every_profile(tmp_path, monkeypatch):

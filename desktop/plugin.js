@@ -1057,6 +1057,367 @@ function StatusView({ profile }) {
   })
 }
 
+// Profile preparation is explicit native admission, never a status side effect.
+const PREPARATION_STORAGE_KEY = 'profile-preparation-safety-v1'
+const PREPARATION_PROFILE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
+const PREPARATION_SHA_RE = /^[a-fA-F0-9]{40}$/
+const PREPARATION_ID_RE = /^[a-f0-9]{64}$/
+const PREPARATION_VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/
+const PREPARATION_REPOS = new Set(['https://github.com/metamindedu/hermes-model-router', 'https://github.com/metamindedu/hermes-model-router.git'])
+let preparationStorage = null
+let runningPreparation = null
+let preparationGeneration = 0
+
+export function validProfileReadiness(value) {
+  return Boolean(value && value.schema === 1 &&
+    ['missing', 'disabled', 'ready', 'unsupported'].includes(value.state) &&
+    ['missing', 'complete', 'partial', 'unsafe'].includes(value.files) &&
+    ['enabled', 'disabled', 'not_enabled', 'unknown'].includes(value.python) &&
+    typeof value.base_supported === 'boolean' && typeof value.split_supported === 'boolean' &&
+    typeof value.explicit_opt_out === 'boolean' && typeof value.managed_selection === 'boolean' &&
+    Array.isArray(value.reason_codes) && value.reason_codes.every(code => typeof code === 'string' && /^[a-z_]+$/.test(code)) &&
+    (value.version === null || (typeof value.version === 'string' && value.version.length <= 64 && PREPARATION_VERSION_RE.test(value.version))) &&
+    (value.identity === null || (typeof value.identity === 'string' && PREPARATION_ID_RE.test(value.identity))))
+}
+
+export function preparationTargetEligible(row) {
+  const r = row?.readiness
+  return Boolean(typeof row?.name === 'string' && PREPARATION_PROFILE_RE.test(row.name) && validProfileReadiness(r) &&
+    r.state === 'missing' && r.files === 'missing' && !r.managed_selection && r.identity &&
+    !r.reason_codes.some(code => /unsafe|invalid|unavailable|changed|dynamic|managed|noncanonical|partial/.test(code)))
+}
+
+export function profileReadinessText(row) {
+  const r = row?.readiness
+  if (!validProfileReadiness(r)) return '준비 상태 확인 미지원 — 기본 플러그인 관리에서 확인'
+  const labels = { missing: 'Python 플러그인 미설치', disabled: '설치됨 · Python 비활성', ready: '코드 설치 · Python 활성화 설정 완료', unsupported: '지원 상태 확인 필요 · 수동 검토' }
+  let label = labels[r.state]
+  if (r.version) label += ` (${r.version})`
+  if (r.managed_selection) label += ' · 관리자 정책'
+  if (r.explicit_opt_out) label += ' · 라우팅 OFF 유지'
+  return label
+}
+
+export function profilePreparationCommands(rows, selected) {
+  const names = [...new Set(Array.isArray(selected) ? selected : [])]
+  return names.map(name => {
+    const row = rows.find(item => item.name === name)
+    if (!row || typeof name !== 'string' || !PREPARATION_PROFILE_RE.test(name) || !validProfileReadiness(row.readiness)) return null
+    if (row.readiness.state === 'missing') return `hermes --profile ${name} plugins install model-router`
+    if (row.readiness.state === 'disabled') return `hermes --profile ${name} plugins enable model-router`
+    return null
+  }).filter(Boolean)
+}
+
+function readPreparationSafety(storage = preparationStorage) {
+  if (!storage || typeof storage.get !== 'function' || typeof storage.set !== 'function') return null
+  try {
+    const value = storage.get(PREPARATION_STORAGE_KEY, null)
+    if (value === null) return { schema: 1, pending: null, blocked: [] }
+    if (!value || value.schema !== 1 || !Array.isArray(value.blocked) || value.blocked.length > 256) return null
+    if (value.blocked.some(item => !item || !PREPARATION_ID_RE.test(item.base) || !PREPARATION_PROFILE_RE.test(item.name))) return null
+    if (value.pending !== null && (!value.pending || !PREPARATION_ID_RE.test(value.pending.base) || !Array.isArray(value.pending.started) || value.pending.started.some(name => !PREPARATION_PROFILE_RE.test(name)))) return null
+    return value
+  } catch { return null }
+}
+
+export function profilePreparationLocked() {
+  const safety = readPreparationSafety()
+  return Boolean(runningPreparation || safety?.pending || (preparationStorage && !safety))
+}
+
+export function profilePreparationReloadBlocked(scopeKey) {
+  const safety = readPreparationSafety()
+  return Boolean(runningPreparation || (preparationStorage && !safety) ||
+    (safety?.pending && (safety.pending.settled !== true || safety.pending.scopeKey !== scopeKey)))
+}
+
+export function finishProfilePreparationReload(context, scopeKey, storage = preparationStorage) {
+  const safety = readPreparationSafety(storage)
+  if (!safety) return !storage
+  if (!safety.pending) return true
+  if (runningPreparation || safety.pending.settled !== true ||
+    safety.pending.scopeKey !== scopeKey || safety.pending.base !== context?.base_identity) return false
+  safety.pending = null
+  writePreparationSafety(safety, storage)
+  return true
+}
+
+function writePreparationSafety(value, storage) {
+  storage.set(PREPARATION_STORAGE_KEY, value)
+  const readback = readPreparationSafety(storage)
+  if (!readback || JSON.stringify(readback) !== JSON.stringify(value)) throw new Error('preparation_storage_unavailable')
+}
+
+function validPreparationContext(context) {
+  return Boolean(context && context.schema === 1 && typeof context.base_identity === 'string' && PREPARATION_ID_RE.test(context.base_identity) &&
+    typeof context.source_profile === 'string' && PREPARATION_PROFILE_RE.test(context.source_profile) && context.release &&
+    context.release.catalog_name === 'model-router' && typeof context.release.ref === 'string' && PREPARATION_SHA_RE.test(context.release.ref) &&
+    typeof context.release.version === 'string' && context.release.version.length <= 64 && PREPARATION_VERSION_RE.test(context.release.version))
+}
+
+function samePreparationRelease(a, b) {
+  return validPreparationContext(a) && validPreparationContext(b) && a.base_identity === b.base_identity &&
+    a.source_profile === b.source_profile && a.release.ref === b.release.ref && a.release.version === b.release.version
+}
+
+export function selectPreparationRoute(routes, connectionId, activeProfile) {
+  if (!Array.isArray(routes)) return null
+  const candidates = routes.filter(route => route && route.mode === 'local' &&
+    typeof route.connectionId === 'string' && route.connectionId.trim() &&
+    typeof route.targetProfile === 'string' && PREPARATION_PROFILE_RE.test(route.targetProfile) && route.profile === route.targetProfile &&
+    (connectionId ? route.connectionId === connectionId && route.profile === activeProfile : route.primary === true))
+  return candidates.length === 1 ? { ...candidates[0] } : null
+}
+
+// The SDK may overwrite params.profile with the descriptor's profile. Never
+// retarget a source descriptor or manufacture one: use the exact fresh native
+// target descriptor from the same authoritative local source. Aliases or
+// absent/ambiguous routes remain manual-only.
+export function selectPreparationTargetRoute(routes, sourceRoute, name) {
+  if (!PREPARATION_PROFILE_RE.test(name || '') || typeof name !== 'string' || !sourceRoute || sourceRoute.mode !== 'local') return null
+  const source = selectPreparationRoute(routes, sourceRoute.connectionId, sourceRoute.profile)
+  if (!source || source.targetProfile !== sourceRoute.targetProfile) return null
+  const candidates = routes.filter(route => route && route.mode === 'local' && route.connectionId === source.connectionId &&
+    route.profile === name && route.targetProfile === name)
+  return candidates.length === 1 ? { ...candidates[0] } : null
+}
+
+export async function readProfilePreparationStatus(transport, route) {
+  const reply = await transport.requestProfile(route, 'cli.exec', {
+    argv: ['--profile', route.targetProfile, 'model-router', 'status', '--body', '{}'],
+    profile: route.targetProfile, timeout: 180
+  }, 210000)
+  if (!reply || reply.blocked || reply.code !== 0) throw new Error('preparation_status_unavailable')
+  const frames = String(reply.output || '').split(/\r?\n/).filter(line => line.startsWith('MODEL_ROUTER_JSON:'))
+  if (frames.length !== 1) throw new Error('preparation_status_unavailable')
+  let data
+  try { data = JSON.parse(frames[0].slice('MODEL_ROUTER_JSON:'.length)) } catch { throw new Error('preparation_status_unavailable') }
+  if (!data || !Array.isArray(data.profiles) || !validPreparationContext(data.readiness_context)) throw new Error('preparation_status_unavailable')
+  return data
+}
+
+// A failed/expired native write is not retried. Its target remains manual-only
+// even after the user explicitly releases the original scope's safety latch.
+export async function runProfilePreparation({ transport, route, snapshot, selected, scopeKey, isCurrent, confirmed, storage, onProgress = () => {} }) {
+  if (runningPreparation) throw new Error('preparation_busy')
+  if (!confirmed || !validPreparationContext(snapshot?.readiness_context) || !Array.isArray(snapshot.profiles)) throw new Error('preparation_not_confirmed')
+  const targets = [...new Set(Array.isArray(selected) ? selected : [])]
+  if (!targets.length || targets.length > 32 || targets.length !== selected.length) throw new Error('preparation_invalid_targets')
+  const context = snapshot.readiness_context
+  const safety = readPreparationSafety(storage)
+  if (!safety || safety.pending || !route || route.mode !== 'local' || route.profile !== route.targetProfile ||
+    route.targetProfile !== context.source_profile || typeof transport.profileRoutes !== 'function') throw new Error('preparation_manual_required')
+  for (const name of targets) {
+    const row = snapshot.profiles.find(item => item.name === name)
+    if (!preparationTargetEligible(row) || safety.blocked.some(item => item.base === context.base_identity && item.name === name)) throw new Error('preparation_invalid_targets')
+  }
+  const outcomes = targets.map(name => ({ name, state: 'not_started' }))
+  const operation = { scopeKey, cancelled: false }
+  const generation = preparationGeneration
+  runningPreparation = operation
+  const stillCurrent = () => !operation.cancelled && generation === preparationGeneration && isCurrent()
+  let uncertain = false, changed = false, dispatched = false
+  try {
+    if (!stillCurrent()) throw new Error('preparation_scope_changed')
+    const lookup = await transport.requestProfile(route, 'plugins.catalog.lookup', { name: 'model-router', profile: route.targetProfile }, 30000)
+    if (!lookup || lookup.status !== 'found' || lookup.entry?.name !== 'model-router' ||
+      !PREPARATION_REPOS.has(lookup.entry.repo) || lookup.entry.sha !== context.release.ref || (lookup.entry.subdir || '') !== '') throw new Error('preparation_catalog_changed')
+    for (const outcome of outcomes) {
+      if (!stillCurrent()) break
+      const observed = await readProfilePreparationStatus(transport, route)
+      if (!stillCurrent()) break
+      if (!samePreparationRelease(context, observed.readiness_context)) throw new Error('preparation_scope_changed')
+      const before = snapshot.profiles.find(item => item.name === outcome.name)
+      const fresh = observed.profiles.find(item => item.name === outcome.name)
+      if (!preparationTargetEligible(fresh) || fresh.readiness.identity !== before.readiness.identity) {
+        outcome.state = 'changed_before_start'; onProgress([...outcomes]); break
+      }
+      const routes = await transport.profileRoutes()
+      if (!stillCurrent()) break
+      const targetRoute = selectPreparationTargetRoute(routes, route, outcome.name)
+      if (!targetRoute) throw new Error('preparation_target_route_unavailable')
+      // No await between the last ownership/cancel check, fence and dispatch.
+      // Keep the latch across remount/reload before dispatch, never after it.
+      safety.pending = { base: context.base_identity, scopeKey, started: [...(safety.pending?.started || []), outcome.name] }
+      writePreparationSafety(safety, storage)
+      outcome.state = 'running'; dispatched = true
+      let receipt = null, errorCode = null
+      try {
+        const request = transport.requestProfile(targetRoute, 'plugins.manage', {
+          action: 'install', catalog_name: 'model-router', ref: context.release.ref,
+          profile: outcome.name, force: false, enable: true
+        }, 120000)
+        onProgress([...outcomes])
+        receipt = await request
+      } catch (error) { errorCode = typeof error?.code === 'number' ? error.code : null }
+      let after = null
+      try { after = await readProfilePreparationStatus(transport, route) } catch { /* unknown; do not retry */ }
+      const row = after?.profiles?.find(item => item.name === outcome.name)
+      const owned = samePreparationRelease(context, after?.readiness_context)
+      if (receipt?.ok === true && owned && validProfileReadiness(row?.readiness) && row.readiness.state === 'ready') {
+        outcome.state = 'observed_ready'; changed = true
+        outcome.newSessionRequired = true
+      } else if (owned && preparationTargetEligible(row) && row.readiness.identity === before.readiness.identity && [-32601, 4000, 5026].includes(errorCode)) {
+        outcome.state = 'manual_required'
+      } else if (receipt?.ok === true && owned && validProfileReadiness(row?.readiness) && row.readiness.state === 'disabled') {
+        outcome.state = 'installed_disabled'; changed = true
+      } else {
+        outcome.state = 'unknown'; uncertain = true
+        if (!safety.blocked.some(item => item.base === context.base_identity && item.name === outcome.name)) safety.blocked.push({ base: context.base_identity, name: outcome.name })
+      }
+      onProgress([...outcomes])
+      if (uncertain || outcome.state !== 'observed_ready' || !stillCurrent()) break
+    }
+    if (!uncertain) {
+      if (changed && safety.pending) safety.pending.settled = true
+      else safety.pending = null
+      writePreparationSafety(safety, storage)
+    }
+    else writePreparationSafety(safety, storage)
+    return { outcomes, changed, unknown: uncertain, cancelled: !stillCurrent() }
+  } catch {
+    if (dispatched && safety.pending) {
+      uncertain = true
+      for (const name of safety.pending.started) if (!safety.blocked.some(item => item.base === context.base_identity && item.name === name)) safety.blocked.push({ base: context.base_identity, name })
+      try { writePreparationSafety(safety, storage) } catch { /* retain current in-memory latch */ }
+    }
+    return { outcomes, changed, unknown: uncertain, manualRequired: true }
+  } finally {
+    if (!uncertain) runningPreparation = null
+  }
+}
+
+export function cancelProfilePreparation() {
+  preparationGeneration += 1
+  if (runningPreparation) runningPreparation.cancelled = true
+}
+
+export function acknowledgeProfilePreparation(storage, base, scopeKey, confirmed) {
+  const safety = readPreparationSafety(storage)
+  if (!confirmed || !safety?.pending || safety.pending.base !== base || safety.pending.scopeKey !== scopeKey) return false
+  // This acknowledges manual reconciliation, not native completion. Any target
+  // with an uncertain write stays excluded from automatic preparation.
+  for (const name of safety.pending.started) if (!safety.blocked.some(item => item.base === base && item.name === name)) safety.blocked.push({ base, name })
+  safety.pending.settled = true
+  writePreparationSafety(safety, storage)
+  runningPreparation = null
+  return true
+}
+
+function BackendPreparationGuide({ profile }) {
+  const name = PREPARATION_PROFILE_RE.test(profile || '') ? profile : null
+  const commands = name ? `# 이미 설치되어 있는 경우\nhermes --profile ${name} plugins enable model-router\n\n# 미설치인 경우\nhermes --profile ${name} plugins install model-router` : null
+  return jsxs('section', { id: 'backend-preparation-guide', style: styles.section, children: [
+    jsx('h2', { style: styles.heading, children: 'Python 실행 플러그인 준비' }),
+    jsx('p', { style: styles.hint, children: `현재 Desktop 프로필: ${name || '확인 필요'}. 화면 플러그인과 Python 실행 플러그인의 활성화는 별개입니다. 기본 플러그인 관리에서 해당 프로필의 model-router 설치·활성화를 먼저 확인하세요.` }),
+    commands ? jsx('pre', { style: styles.value, children: commands }) : null,
+    jsx('p', { style: styles.hint, children: '위 명령은 자동 실행되지 않습니다. 기존 패키지의 출처와 네이티브 검사·의존성·권한 안내를 확인하세요. 새 설치는 별도 선택이 없으면 라우팅 기본 ON이며, 저장된 OFF와 모델·폴백·시간값은 유지합니다. 준비 후 상태를 다시 불러오고 기존 대화의 도구는 새 세션에서 확인하세요.' }),
+    jsx(Button, { size: 'sm', variant: 'secondary', onClick: () => host.navigate('/capabilities?tab=plugins&plugin=model-router'), children: '기본 플러그인 관리 열기' })
+  ] })
+}
+
+function ProfilePreparationCard({ pluginContext, data, scopeKey, settingsBusy, begin, finish, onPrepared }) {
+  const [observation, setObservation] = useState(data)
+  const [targets, setTargets] = useState([])
+  const [consent, setConsent] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+  const [manualConfirmed, setManualConfirmed] = useState(false)
+  const currentScope = useRef(scopeKey)
+  const mounted = useRef(true)
+  currentScope.current = scopeKey
+  useEffect(() => {
+    setObservation(data); setTargets(current => current.filter(name => (data?.profiles || []).some(row => row.name === name)))
+  }, [data])
+  useEffect(() => {
+    mounted.current = true
+    setTargets([]); setConsent(false); setResult(null); setManualConfirmed(false); cancelProfilePreparation()
+    return () => { mounted.current = false; cancelProfilePreparation() }
+  }, [scopeKey])
+  const rows = Array.isArray(observation?.profiles) ? observation.profiles : []
+  const context = observation?.readiness_context
+  const supported = validPreparationContext(context)
+  const sourceScopeNow = () => scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get())
+  const safety = readPreparationSafety(pluginContext?.storage)
+  const selectedRows = rows.filter(row => targets.includes(row.name))
+  const commands = profilePreparationCommands(rows, targets)
+  const refresh = async () => {
+    if (busy || settingsBusy || !begin(true)) return
+    const captured = scopeKey
+    setBusy(true)
+    try {
+      const response = await nativeBackendCall('/status')
+      if (!mounted.current || currentScope.current !== captured || sourceScopeNow() !== captured) return
+      setObservation(response)
+      setTargets(current => current.filter(name => (response.profiles || []).some(row => row.name === name)))
+    } catch { if (mounted.current && currentScope.current === captured) setResult({ manualRequired: true }) }
+    finally { setBusy(false); finish() }
+  }
+  const prepare = async () => {
+    if (busy || settingsBusy || !consent || !targets.length || !begin()) return
+    const captured = scopeKey
+    const generation = preparationGeneration
+    const isAttemptCurrent = () => generation === preparationGeneration && mounted.current && currentScope.current === captured && sourceScopeNow() === captured
+    setBusy(true); setResult(null)
+    try {
+      if (typeof host.profileRoutes !== 'function' || typeof host.requestProfile !== 'function') throw new Error('preparation_routing_unavailable')
+      const routes = await host.profileRoutes()
+      if (!isAttemptCurrent()) throw new Error('preparation_scope_changed')
+      const route = selectPreparationRoute(routes, host.state.connectionId.get(), host.state.profile.get())
+      if (!route) throw new Error('preparation_scope_changed')
+      const owned = await readProfilePreparationStatus(host, route)
+      if (!isAttemptCurrent()) throw new Error('preparation_scope_changed')
+      if (!samePreparationRelease(context, owned.readiness_context)) throw new Error('preparation_scope_changed')
+      const reply = await runProfilePreparation({ transport: host, route, snapshot: observation, selected: targets,
+        scopeKey: captured, confirmed: consent, storage: pluginContext.storage,
+        isCurrent: isAttemptCurrent,
+        onProgress: outcomes => { if (mounted.current && currentScope.current === captured) setResult({ outcomes }) } })
+      if (mounted.current && (reply.changed || reply.unknown)) onPrepared(captured, reply.unknown)
+      if (mounted.current && currentScope.current === captured) { setResult(reply); setConsent(false) }
+    } catch { if (mounted.current && currentScope.current === captured) setResult({ manualRequired: true }) }
+    finally { setBusy(false); finish() }
+  }
+  const options = rows.map(row => {
+    const r = row.readiness
+    const blocked = safety?.blocked.some(item => item.base === context?.base_identity && item.name === row.name)
+    const canSelect = validProfileReadiness(r) && ['missing', 'disabled'].includes(r.state) && !r.managed_selection && !blocked
+    return jsxs('label', { style: { display: 'flex', gap: '0.5rem', alignItems: 'flex-start', padding: '0.5rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.4rem' }, children: [
+      jsx(Checkbox, { id: `prepare-profile-${row.name}`, checked: targets.includes(row.name), disabled: busy || settingsBusy || !canSelect,
+        onCheckedChange: checked => { setTargets(current => checked === true ? [...new Set([...current, row.name])] : current.filter(name => name !== row.name)); setConsent(false) } }),
+      jsxs('span', { style: { minWidth: 0, overflowWrap: 'anywhere' }, children: [jsx('strong', { children: row.name }), jsx('small', { style: { display: 'block', color: 'var(--ui-text-tertiary)' }, children: blocked ? '이전 결과 불명 — 수동 준비만 가능' : profileReadinessText(row) })] })
+    ] }, row.name)
+  })
+  const automatic = supported && safety && !safety.pending && selectedRows.length > 0 && selectedRows.every(preparationTargetEligible) && targets.length <= 32
+  const labels = { not_started: '미시작', running: '네이티브 설치 중', observed_ready: '설치·활성화 설정 확인', changed_before_start: '상태 변경 감지 · 중단', manual_required: '네이티브 수동 검토 필요', installed_disabled: '설치됨 · 활성화 확인 필요', unknown: '결과 불명 · 자동 재시도 금지' }
+  return jsxs('details', { id: 'profile-preparation', style: styles.section, children: [
+    jsx('summary', { style: { cursor: 'pointer' }, children: jsxs('span', { style: { display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', maxWidth: '100%' }, children: [jsx('strong', { style: styles.heading, children: '프로필별 플러그인 준비' }), jsx(Badge, { variant: 'muted', children: `설치·활성화 설정 확인 ${rows.filter(row => validProfileReadiness(row.readiness) && row.readiness.state === 'ready').length}/${rows.length}` })] }) }),
+    jsx('p', { style: styles.hint, children: '설정 화면은 앱에서 하나를 공유하지만 Python 실행 플러그인은 프로필별 설치·활성화가 필요합니다. 새 프로필도 상태를 확인한 뒤 직접 선택하세요. 새로고침만으로 설치하거나 설정을 바꾸지 않습니다.' }),
+    jsx('p', { style: styles.hint, children: '준비됨은 코드와 Python 활성화 설정을 확인했다는 뜻이며, 현재 대화의 도구·모델 실행까지 검증한 뜻은 아닙니다. 기존 대화는 새 세션이 필요할 수 있습니다.' }),
+    jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: '0.5rem' }, children: options }),
+    !supported ? jsx('p', { role: 'note', style: styles.warning, children: '백엔드 또는 설치 출처의 준비 정보를 확인할 수 없습니다. 기존 설정은 유지하며 아래 네이티브 명령/기본 플러그인 관리에서 수동으로 준비하세요.' }) : null,
+    targets.length ? jsx('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', userSelect: 'text' }, children: commands.join('\n') || '선택한 기존 패키지는 기본 플러그인 관리에서 검토하세요.' }) : null,
+    jsx('p', { style: styles.hint, children: '자동 준비는 미설치 프로필에 현재 설치 기록과 일치하는 공식 카탈로그 커밋을 새로 설치할 때만 지원하며 한 번에 최대 32개입니다. 기존·비활성·다른 버전 패키지는 덮어쓰지 않고 수동 검토합니다. 원격/구형 호스트는 자동 준비를 지원하지 않을 수 있습니다.' }),
+    jsx('p', { style: styles.hint, children: '선택한 새 설치에는 네이티브 의존성 준비(PyYAML>=6,<7)와 Python 활성화가 포함됩니다. 모델·폴백·시간값은 복사하지 않으며, 저장된 라우팅 OFF는 유지됩니다. 별도 선택이 없는 새 설치의 라우팅은 기본 ON입니다. 작업 중 프로필을 삭제·이름 변경하거나 패키지를 수정하지 마세요.' }),
+    jsxs('label', { style: { display: 'flex', gap: '0.5rem', alignItems: 'center' }, children: [jsx(Checkbox, { id: 'prepare-consent', checked: consent, disabled: busy || settingsBusy || !automatic, onCheckedChange: value => setConsent(value === true) }), jsx('span', { children: '선택한 미설치 프로필과 위 설치·의존성·활성화 범위를 확인했습니다.' })] }),
+    jsxs('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.6rem' }, children: [
+      jsx(Button, { id: 'prepare-refresh', size: 'sm', variant: 'secondary', disabled: busy || settingsBusy, onClick: () => void refresh(), children: '준비 상태만 새로고침' }),
+      jsx(Button, { id: 'prepare-run', size: 'sm', disabled: busy || settingsBusy || !automatic || !consent || profilePreparationLocked(), onClick: () => void prepare(), children: busy ? '네이티브 준비 중…' : '선택한 미설치 프로필 준비' }),
+      busy ? jsx(Button, { id: 'prepare-cancel', size: 'sm', variant: 'secondary', onClick: cancelProfilePreparation, children: '다음 프로필부터 중단' }) : null,
+      jsx(Button, { id: 'prepare-native-help', size: 'sm', variant: 'secondary', disabled: busy, onClick: () => host.navigate('/capabilities?tab=plugins&plugin=model-router'), children: '기본 플러그인 관리 열기' })
+    ] }),
+    jsx('p', { style: styles.hint, children: '기본 관리/터미널에서 요구하는 보안 검사·추가 권한·의존성 동의를 먼저 확인하세요. 강제 설치나 자동 재시도는 하지 않습니다. 여러 수동 명령은 각 프로필을 확인하며 실행하세요.' }),
+    result?.outcomes ? jsx('ul', { 'aria-live': 'polite', children: result.outcomes.map(item => jsx('li', { children: `${item.name}: ${labels[item.state] || '확인 필요'}` }, item.name)) }) : null,
+    result?.changed ? jsx('p', { role: 'status', style: styles.warning, children: '준비 상태가 바뀌었습니다. 미저장 설정 초안은 유지했습니다. 저장 전에 전체 상태를 명시적으로 다시 불러오고 새로 준비한 적용 대상을 확인하세요. 전체 새로고침은 미저장 편집을 버립니다.' }) : null,
+    result?.manualRequired ? jsx('p', { role: 'alert', style: styles.warning, children: '안전한 자동 준비 조건을 확인할 수 없어 중단했습니다. 기본 플러그인 관리 또는 위 네이티브 명령에서 검토하세요. 기존 패키지를 강제로 교체하지 마세요.' }) : null,
+    safety?.pending ? jsxs('div', { role: 'alert', style: styles.warning, children: [
+      jsx('p', { children: safety.pending.settled === true ? '준비 후 설정 기준을 갱신해야 합니다. 원래 연결에서 상단의 전체 상태 새로고침을 실행하세요. 미저장 편집을 버리므로 필요한 초안을 먼저 확인하세요.' : '이전 준비 작업의 종료 또는 결과가 확인되지 않았습니다. 원래 연결에서 네이티브 작업을 먼저 확인하세요. 중단은 이미 실행 중인 설치를 취소하지 않습니다.' }),
+      jsxs('label', { style: { display: 'flex', gap: '0.5rem' }, children: [jsx(Checkbox, { id: 'prepare-manual-ack', checked: manualConfirmed, disabled: busy || safety.pending.settled === true, onCheckedChange: value => setManualConfirmed(value === true) }), jsx('span', { children: '기본 플러그인 관리에서 원래 작업과 대상을 수동 확인했습니다.' })] }),
+      jsx(Button, { id: 'prepare-release-latch', size: 'sm', variant: 'secondary', style: { whiteSpace: 'normal', height: 'auto', minHeight: '2rem', maxWidth: '100%', textAlign: 'left' }, disabled: busy || safety.pending.settled === true || !manualConfirmed || safety.pending.scopeKey !== scopeKey || safety.pending.base !== context?.base_identity,
+        onClick: () => { if (acknowledgeProfilePreparation(pluginContext.storage, context.base_identity, scopeKey, manualConfirmed)) { setResult({ manualRequired: true }); setManualConfirmed(false); finish() } }, children: '수동 확인 기록 · 결과 불명 대상은 자동 준비에서 제외' })
+    ] }) : null
+  ] })
+}
 export async function nativeBackendCall(path, options = {}) {
   const operation = { '/status': 'status', '/preview': 'preview', '/fallback-preview': 'fallback-preview', '/apply': 'apply' }[path]
   if (!operation) throw new Error('지원하지 않는 플러그인 요청입니다.')
@@ -1108,6 +1469,8 @@ function RouterPage({ ctx: pluginContext }) {
   const [preview, setPreview] = useState(null)
   const [previewPending, setPreviewPending] = useState(false)
   const [applyPending, setApplyPending] = useState(false)
+  const [setupPending, setSetupPending] = useState(false)
+  const setupPendingRef = useRef(false)
   const [reviewed, setReviewed] = useState(false)
   const [pageError, setPageError] = useState('')
   const [applyOutcome, setApplyOutcome] = useState(null)
@@ -1121,6 +1484,22 @@ function RouterPage({ ctx: pluginContext }) {
   const selectedProfileRef = useRef(null)
   const timeoutTargetsManualRef = useRef(false)
   selectedProfileRef.current = selectedProfile
+  const beginProfilePreparation = (readOnly = false) => {
+    if (setupPendingRef.current || applyPendingRef.current || refreshPendingRef.current ||
+      (!readOnly && (needsReloadRef.current || profilePreparationLocked()))) return false
+    setupPendingRef.current = true
+    setSetupPending(true)
+    return true
+  }
+  const finishProfilePreparation = () => { setupPendingRef.current = false; setSetupPending(false) }
+  const profilePreparationChanged = (capturedScope, unknown) => {
+    needsReloadRef.current = true
+    needsReloadRef.scopeKey = capturedScope
+    setNeedsReload(true)
+    setApplyOutcome({ kind: unknown ? 'unknown' : 'prepared', message: '플러그인 준비로 실행 상태가 바뀌었거나 결과 확인이 필요합니다. 미저장 초안은 유지했습니다. 원래 연결에서 전체 상태를 명시적으로 새로고침한 뒤 적용 대상을 확인하세요. 전체 새로고침은 미저장 편집을 버립니다.' })
+    setPreview(null)
+    setFallbackPreview(null)
+  }
 
   const statusKey = ['model-router', 'status', scopeKey]
   const statusQuery = useQuery({
@@ -1254,7 +1633,7 @@ function RouterPage({ ctx: pluginContext }) {
     setPageError('')
   }
   const updateDraft = updater => {
-    if (applyPendingRef.current || needsReloadRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
     setDraft(current => current ? updater(current) : current)
   }
@@ -1289,7 +1668,7 @@ function RouterPage({ ctx: pluginContext }) {
   const timeoutSettingsSupported = validTimeoutsDto(currentRow?.timeouts)
   const timeoutRoleSupported = splitRoutingSupported(currentRow?.timeouts)
   const timeoutSettingsEditable = timeoutSettingsSupported && timeoutRoleSupported && currentRow?.timeouts?.editable === true && Boolean(draft?.timeouts)
-  const disabled = applyPending || needsReload || revisionChanged || statusQuery.isFetching || !selectedProfile || !draft
+  const disabled = setupPending || profilePreparationLocked() || applyPending || needsReload || revisionChanged || statusQuery.isFetching || !selectedProfile || !draft
   const timeoutSaveValuesValid = Boolean(timeoutPayloadValues(draft?.timeouts, timeoutBaseline))
   const timeoutSaveDisabled = disabled || !timeoutSettingsEditable || !selectedTimeoutTargets.length ||
     timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged || !timeoutSaveValuesValid
@@ -1299,7 +1678,7 @@ function RouterPage({ ctx: pluginContext }) {
   const routingSummary = `무거운 작업: ${activeRoutes.heavy?.follow === 'custom' ? '별도 모델' : '기본 모델'} · 가벼운 작업: ${activeRoutes.light?.follow === 'custom' ? '별도 모델' : '위임 모델'}`
 
   const selectProfile = name => {
-    if (applyPendingRef.current || needsReloadRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     const row = profiles.find(item => item.name === name)
     if (!row) return
     const loadedBaseline = profileBaselines?.[name] || copyProfileDraft(row)
@@ -1328,25 +1707,25 @@ function RouterPage({ ctx: pluginContext }) {
   const applyPreset = presetId => updateDraft(current => applyModelPresetDraft(current, presetId))
 
   const toggleModelTarget = (name, checked) => {
-    if (applyPendingRef.current || needsReloadRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
     setModelTargets(current => toggleName(current, name, checked))
   }
 
   const selectAllTargets = () => {
-    if (applyPendingRef.current || needsReloadRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
     setModelTargets(selectAllModelTargets(profileNames))
   }
 
   const selectNoTargets = () => {
-    if (applyPendingRef.current || needsReloadRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
     setModelTargets(selectNoModelTargets())
   }
 
   const chooseTimeoutTargets = (mode, name = null, checked = false) => {
-    if (applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
     const eligible = eligibleTimeoutTargets(profiles)
     let next = selectedTimeoutTargets
     if (mode === 'all') next = eligible
@@ -1360,7 +1739,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const chooseRoutingTargets = (mode, name = null, checked = false) => {
-    if (applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
     invalidatePlan()
     const next = mode === 'all' ? [...profileNames] : mode === 'none' ? []
       : mode === 'source' ? [selectedProfile] : toggleName(selectedRoutingTargets, name, checked)
@@ -1369,7 +1748,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const toggleRoutingProfile = (name, checked) => {
-    if (applyPendingRef.current || needsReloadRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
     setRoutingProfiles(current => toggleName(current, name, checked))
     if (name === selectedProfile) {
@@ -1397,14 +1776,14 @@ function RouterPage({ ctx: pluginContext }) {
   }))
   const changeFollow = (group, value) => updateDraft(current => ({ ...current, routing: { ...current.routing, [group]: { follow: value, custom: value === 'custom' ? { ...(current.routing[group].custom || current.models[group === 'heavy' ? 'main' : 'delegation']) } : null } } }))
   const toggleRoutingEnabled = checked => {
-    if (applyPendingRef.current || needsReloadRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
     setDraft(current => current ? { ...current, routing: { ...current.routing, enabled: checked } } : current)
     if (selectedProfile) setRoutingProfiles(current => toggleName(current, selectedProfile, checked))
   }
 
   const updateFallbackDraft = (scope, updater) => {
-    if (applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
     invalidatePlan()
     setFallbackDrafts(current => ({
       ...current,
@@ -1413,7 +1792,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const updateFallbackTarget = (scope, name, checked) => {
-    if (applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
     const selected = scope === 'native' ? nativeFallbackTargets : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
     invalidatePlan()
     setFallbackTargets(current => ({ ...current, [scope]: toggleName(selected, name, checked) }))
@@ -1421,7 +1800,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const chooseFallbackTargets = (scope, mode) => {
-    if (applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
     let selected = scope === 'native' ? nativeFallbackTargets : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
     if (mode === 'source') selected = selectFallbackSourceTarget(selectedProfile, profileNames)
     if (mode === 'all') {
@@ -1435,7 +1814,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const canPreviewFallback = scope => {
-    if (!fallbackSupported || disabled || applyPendingRef.current || needsReloadRef.current || fallbackPreviewPending || !selectedProfile || !statusQuery.data) return false
+    if (!fallbackSupported || disabled || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || fallbackPreviewPending || !selectedProfile || !statusQuery.data) return false
     const targets = scope === 'native' ? nativeFallbackTargets : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
     const rows = scope === 'native' ? nativeFallbackRows : scope === 'routing' ? routingFallbackRows : delegationFallbackRows
     if (targets.length === 0 || rows.length !== targets.length) return false
@@ -1523,7 +1902,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const runSave = async ({ operation, scope = null, snapshot, prepare }) => {
-    if (!snapshot || applyPendingRef.current || needsReloadRef.current) return
+    if (!snapshot || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     const token = ++generationRef.current
     applyPendingRef.current = true
     applyScopeRef.current = snapshot.scopeKey
@@ -1580,7 +1959,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const saveFallback = scope => {
-    if (renderGeneration !== generationRef.current || applyPendingRef.current || needsReloadRef.current || !canPreviewFallback(scope)) return
+    if (renderGeneration !== generationRef.current || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || !canPreviewFallback(scope)) return
     const snapshot = captureSaveSnapshot()
     const targetNames = scope === 'native' ? [...nativeFallbackTargets] : scope === 'routing' ? [...routingFallbackTargets] : [...delegationFallbackTargets]
     const value = deepClone(scope === 'native' ? nativeFallbackDraft : scope === 'routing' ? routingFallbackDraft : delegationFallbackDraft)
@@ -1592,7 +1971,7 @@ function RouterPage({ ctx: pluginContext }) {
 
   const saveSection = saveScope => {
     if (renderGeneration !== generationRef.current || revisionChanged || !currentRow || !draft || !statusQuery.data ||
-      applyPendingRef.current || needsReloadRef.current || !profileBaselines) return
+      setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || !profileBaselines) return
     if (saveScope === 'timeouts' && timeoutSaveDisabled) return
     if (!['models', 'routing', 'timeouts'].includes(saveScope)) return
     const snapshot = captureSaveSnapshot()
@@ -1609,7 +1988,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const saveAll = () => {
-    if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || !currentRow || !draft || !statusQuery.data || applyPendingRef.current || needsReloadRef.current) return
+    if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || !currentRow || !draft || !statusQuery.data || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     const snapshot = captureSaveSnapshot()
     return runSave({
       operation: '/preview', snapshot,
@@ -1655,7 +2034,7 @@ function RouterPage({ ctx: pluginContext }) {
 
 
   const reloadStatus = async () => {
-    if (applyPendingRef.current || refreshPendingRef.current) return
+    if (setupPendingRef.current || profilePreparationReloadBlocked(scopeKey) || applyPendingRef.current || refreshPendingRef.current) return
     if (needsReloadRef.current && needsReloadRef.scopeKey && scopeKey !== needsReloadRef.scopeKey) {
       setPageError('적용을 시작한 원래 Desktop 프로필·연결로 돌아간 뒤 실제 상태를 새로고침하세요. 이 화면에서는 결과를 추측하거나 다시 적용하지 않습니다.')
       return
@@ -1670,6 +2049,10 @@ function RouterPage({ ctx: pluginContext }) {
     if (generationRef.current !== token || scopeFingerprint(host.state.connectionId.get(), host.state.profile.get(), host.state.gateway.get()) !== capturedScope) return
     if (response.error || !response.data) {
       setPageError(response.error?.message || '상태를 다시 불러오지 못했습니다.')
+      return
+    }
+    if (!finishProfilePreparationReload(response.data.readiness_context, capturedScope)) {
+      setPageError('준비를 시작한 원래 연결과 실제 상태를 확인하지 못했습니다. 설정 기준은 갱신하지 않습니다.')
       return
     }
     const rows = Array.isArray(response.data.profiles) ? response.data.profiles : []
@@ -1729,7 +2112,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   if (statusQuery.isError) {
-    return jsxs('main', { style: styles.page, children: [jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '설정 서비스를 사용할 수 없습니다.' }), jsx('p', { style: styles.hint, children: '백엔드가 꺼져 있거나 아직 준비되지 않았습니다. 잠시 후 다시 불러오세요. 이 화면에서는 로컬 파일이나 프로필 설정을 직접 변경하지 않습니다.' }), jsx('p', { style: styles.hint, children: statusQuery.error?.message || '상태 요청에 실패했습니다.' }), jsx(Button, { size: 'sm', variant: 'secondary', onClick: () => void statusQuery.refetch(), children: '다시 불러오기' })] })] })
+    return jsxs('main', { style: styles.page, children: [jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '설정 서비스를 사용할 수 없습니다.' }), jsx('p', { style: styles.hint, children: '백엔드가 꺼져 있거나 아직 준비되지 않았습니다. 잠시 후 다시 불러오세요. 이 화면에서는 로컬 파일이나 프로필 설정을 직접 변경하지 않습니다.' }), jsx('p', { style: styles.hint, children: statusQuery.error?.message || '상태 요청에 실패했습니다.' }), jsx(Button, { size: 'sm', variant: 'secondary', onClick: () => void statusQuery.refetch(), children: '다시 불러오기' })] }), jsx(BackendPreparationGuide, { profile: activeProfile })] })
   }
 
   const currentPreset = draft ? selectedModelPreset(draft.models) : 'custom'
@@ -2135,8 +2518,9 @@ function RouterPage({ ctx: pluginContext }) {
   return jsxs('main', {
     style: styles.page,
     children: [
-      jsxs('header', { style: styles.header, children: [jsxs('div', { children: [jsx('p', { style: { color: 'var(--ui-accent)', fontSize: '0.72rem', fontWeight: 650, letterSpacing: '0.08em', margin: '0 0 0.45rem' }, children: 'HERMES DESKTOP · 모델 제어' }), jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsx('p', { style: styles.subtitle, children: '프로필별 모델 값을 관리하고 작업 유형에 맞는 라우팅을 구성합니다. 저장을 누르면 서버 검증 후 한 번에 적용됩니다.' })] }), jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching || applyPending, onClick: () => void reloadStatus(), children: '상태 새로고침' })] }),
+      jsxs('header', { style: styles.header, children: [jsxs('div', { children: [jsx('p', { style: { color: 'var(--ui-accent)', fontSize: '0.72rem', fontWeight: 650, letterSpacing: '0.08em', margin: '0 0 0.45rem' }, children: 'HERMES DESKTOP · 모델 제어' }), jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsx('p', { style: styles.subtitle, children: '프로필별 모델 값을 관리하고 작업 유형에 맞는 라우팅을 구성합니다. 저장을 누르면 서버 검증 후 한 번에 적용됩니다.' })] }), jsx(Button, { size: 'sm', variant: 'secondary', disabled: setupPending || profilePreparationReloadBlocked(scopeKey) || statusQuery.isFetching || applyPending, onClick: () => void reloadStatus(), children: '상태 새로고침' })] }),
       jsx('div', { role: 'note', style: styles.notice, children: '새 규칙은 이후에 시작하는 세션과 허용된 작업에 적용됩니다. 이미 진행 중인 세션의 모델은 자동으로 바뀌지 않습니다.' }),
+      jsx(ProfilePreparationCard, { pluginContext, data: statusQuery.data, scopeKey, settingsBusy: applyPending || setupPending || statusQuery.isFetching, begin: beginProfilePreparation, finish: finishProfilePreparation, onPrepared: profilePreparationChanged }),
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
       profiles.length ? section('대상 프로필', '편집할 설정 프로필을 고릅니다. 저장 검증 중 범위가 바뀌면 적용 전 요청은 안전하게 취소됩니다.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `현재 Desktop 프로필: ${activeProfile || '확인 중'} · 연결: ${connectionId || 'local'} · 게이트웨이: ${gateway || 'idle'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
       profiles.length ? section('모델 대상', '네 역할의 값을 한 번 편집하고, 아래 별도 선택 목록에 체크한 프로필에만 모델 값을 적용합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [modelFields, modelTargetGroup] })) : null,
@@ -2163,7 +2547,7 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length ? fallbackManagement : null,
       revisionChanged ? jsx('div', { role: 'alert', style: styles.warning, children: '다른 화면에서 설정이 변경되어 저장을 잠갔습니다. 편집값은 아직 보존되어 있습니다. 필요한 값을 확인한 뒤 상태 새로고침으로 최신 설정을 불러와 다시 편집하세요.' }) : null,
       pageError ? jsx('div', { role: 'alert', style: styles.warning, children: pageError }) : null,
-      applyOutcome ? jsxs('div', { role: 'status', 'aria-live': 'polite', style: applyOutcome.kind === 'success' ? styles.message : styles.warning, children: [jsx('strong', { children: applyOutcome.kind === 'success' ? '적용 요청이 완료되었습니다.' : applyOutcome.kind === 'partial' ? '일부 설정만 적용되었을 수 있습니다.' : '적용 결과를 확인할 수 없습니다.' }), jsx('p', { style: styles.hint, children: applyOutcome.message || (applyOutcome.kind === 'success' ? '실제 상태를 새로고침해 확인하세요. 같은 계획을 다시 적용하지 않습니다.' : '다시 적용하지 마세요. 상태를 새로고침해 실제 반영 여부를 확인하세요.') }), applyOutcome.result ? jsx('p', { style: styles.value, children: readableValue(applyOutcome.result) }) : null] }) : null,
+      applyOutcome ? jsxs('div', { role: 'status', 'aria-live': 'polite', style: applyOutcome.kind === 'success' ? styles.message : styles.warning, children: [jsx('strong', { children: applyOutcome.kind === 'prepared' ? '플러그인 준비 상태가 달라졌습니다.' : applyOutcome.kind === 'success' ? '적용 요청이 완료되었습니다.' : applyOutcome.kind === 'partial' ? '일부 설정만 적용되었을 수 있습니다.' : '적용 결과를 확인할 수 없습니다.' }), jsx('p', { style: styles.hint, children: applyOutcome.message || (applyOutcome.kind === 'success' ? '실제 상태를 새로고침해 확인하세요. 같은 계획을 다시 적용하지 않습니다.' : '다시 적용하지 마세요. 상태를 새로고침해 실제 반영 여부를 확인하세요.') }), applyOutcome.result ? jsx('p', { style: styles.value, children: readableValue(applyOutcome.result) }) : null] }) : null,
       needsReload ? jsx('div', { style: styles.actions, children: jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching, onClick: () => void reloadStatus(), children: statusQuery.isFetching ? '상태 확인 중…' : '실제 상태 확인 후 편집 재개' }) }) : null,
       profiles.length && !needsReload ? section('전체 설정 저장', '모델·라우팅과 수정한 폴백을 한 번에 저장합니다. 저장하면 서버가 현재 revision을 검증한 뒤 같은 계획을 적용합니다. 각 폴백은 해당 카드에서 고른 대상에만 적용됩니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
         jsx('div', { id: 'draft-reference-summary', role: 'note', style: styles.section, children: [
@@ -2185,9 +2569,11 @@ function RouterPage({ ctx: pluginContext }) {
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.4.7',
+  version: '0.4.8',
   defaultEnabled: false,
   register(ctx) {
+    preparationStorage = ctx.storage || null
+    if (typeof ctx.onDispose === 'function') ctx.onDispose(cancelProfilePreparation)
     const page = {
       id: 'settings',
       title: '모델 및 라우팅',

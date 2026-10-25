@@ -14,9 +14,9 @@ test('late reload after gateway switch does not replace draft or unlock state',a
  const scope=fingerprint('local','old','ready')
  const names=['scopeKey','generationRef','setPageError','statusQuery','scopeFingerprint','host','selectedProfile','setPreview','setReviewed','setModelTargets','setRoutingProfiles','setDraft','setSelectedProfile','needsReloadRef','setNeedsReload','setApplyOutcome','applyPendingRef','invalidatePlan']
  const set=name=>()=>changes.push(name)
- const fn=new Function(...names,'refreshPendingRef',body+'; return reloadStatus;')
+ const fn=new Function(...names,'refreshPendingRef','setupPendingRef','profilePreparationReloadBlocked','finishProfilePreparationReload',body+'; return reloadStatus;')
  const refreshPendingRef={current:false}
- const reload=fn(scope,{current:1},()=>{}, {refetch:()=>pending},fingerprint,host,'old',set('preview'),set('reviewed'),set('targets'),set('routes'),set('draft'),set('profile'),{current:true},set('unlock'),set('outcome'),{current:false},()=>{},refreshPendingRef)
+ const reload=fn(scope,{current:1},()=>{}, {refetch:()=>pending},fingerprint,host,'old',set('preview'),set('reviewed'),set('targets'),set('routes'),set('draft'),set('profile'),{current:true},set('unlock'),set('outcome'),{current:false},()=>{},refreshPendingRef,{current:false},()=>false,()=>true)
  const running=reload();profile='new'
  complete({data:{profiles:[{name:'old',models:{main:'OLD'}}],current_profile:'old'}})
  await running

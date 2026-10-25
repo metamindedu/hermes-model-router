@@ -1,13 +1,11 @@
 """Profile-scoped canonical settings and safe Hermes CLI projection."""
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -19,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import effective_config, fallback_policy, timeouts
+from . import effective_config, fallback_policy, installation, timeouts
 
 SCHEMA = 2
 STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
@@ -1072,6 +1070,7 @@ class Service:
                 "actual_models": actual,
                 "drift": drift,
                 "fallbacks": self._fallback_dto(name, view_entry),
+                "readiness": installation.profile_readiness(self, name, stored),
                 "timeouts": {
                     **timeouts.timeout_status(
                         self._profile_home(name),
@@ -1086,6 +1085,7 @@ class Service:
             "profiles": result_profiles,
             "recent_apply": self._recent_apply(),
             "fallback_capabilities": dict(fallback_policy.CAPABILITIES),
+            "readiness_context": installation.readiness_context(self),
         }
 
     def routing_config(self, profile: str) -> dict[str, Any]:
@@ -1138,57 +1138,31 @@ class Service:
             "fallback_consent": {"native": None, "routing": None, "delegation": None},
         }
 
-    def _timeout_enforcement_available(self, profile: str) -> bool:
-        home = self._profile_home(profile)
-        package = home / "plugins/model-router/model_router"
-        return all((package / name).is_file() and not (package / name).is_symlink()
-                   and _inside(package / name, home)
-                   for name in ("timeouts.py", "native_watchdog.py"))
-
-    def _timeout_role_enforcement_available(self, profile: str) -> bool:
-        """Trust only a safe installed routing module with a literal AST marker."""
+    def _timeout_code_support(self, profile: str) -> dict[str, bool]:
+        """Observe bounded base/split support without executing plugin code."""
         try:
             self._require_profile(profile)
-        except (TypeError, ValueError):
-            return False
-        if not self._timeout_enforcement_available(profile):
-            return False
+            base, split = installation.timeout_code_support(
+                self._profile_home(profile), self.root, self.store_path
+            )
+        except (OSError, TypeError, ValueError, RuntimeError):
+            return {"base": False, "split": False}
+        return {"base": bool(base), "split": bool(split)}
 
-        home = self._profile_home(profile)
-        relative_parts = ("plugins", "model-router", "model_router", "routing.py")
-        marker_path = home.joinpath(*relative_parts)
-        if not _inside(marker_path, home):
-            return False
-        current = home
+    def _timeout_python_enabled(self, profile: str) -> bool:
         try:
-            home_info = current.lstat()
-            if stat.S_ISLNK(home_info.st_mode) or getattr(current, "is_junction", lambda: False)():
-                return False
-            for index, part in enumerate(relative_parts):
-                current = current / part
-                info = current.lstat()
-                if stat.S_ISLNK(info.st_mode) or getattr(current, "is_junction", lambda: False)():
-                    return False
-                is_file = index == len(relative_parts) - 1
-                if is_file and not stat.S_ISREG(info.st_mode):
-                    return False
-                if not is_file and not stat.S_ISDIR(info.st_mode):
-                    return False
-            source = marker_path.read_text(encoding="utf-8")
-            module = ast.parse(source, filename=str(marker_path))
-        except (OSError, UnicodeError, SyntaxError, ValueError):
+            self._require_profile(profile)
+            return installation.timeout_python_enabled(self._profile_home(profile))
+        except (OSError, TypeError, ValueError, RuntimeError):
             return False
 
-        assignments: list[ast.expr | None] = []
-        for node in module.body:
-            if isinstance(node, ast.Assign):
-                if any(isinstance(target, ast.Name) and target.id == "ROUTED_ROLE_TIMEOUTS_SUPPORTED"
-                       for target in node.targets):
-                    assignments.append(node.value)
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                if node.target.id == "ROUTED_ROLE_TIMEOUTS_SUPPORTED":
-                    assignments.append(node.value)
-        return len(assignments) == 1 and isinstance(assignments[0], ast.Constant) and assignments[0].value is True
+    def _timeout_enforcement_available(self, profile: str) -> bool:
+        """Compatibility predicate: supported base code plus proven Python allow."""
+        return self._timeout_code_support(profile)["base"] and self._timeout_python_enabled(profile)
+
+    def _timeout_role_enforcement_available(self, profile: str) -> bool:
+        """Split timeout eligibility additionally needs its literal AST marker."""
+        return self._timeout_code_support(profile)["split"] and self._timeout_python_enabled(profile)
 
     def _prepare_timeout_updates(self, updates: Any, discovered: list[str]) -> list[dict[str, Any]]:
         if not isinstance(updates, list):
@@ -1893,6 +1867,8 @@ class Service:
                         continue
                     if set(item["after"]) == timeouts._SPLIT_TIMEOUT_FIELDS and not self._timeout_role_enforcement_available(item["profile"]):
                         raise RevisionConflict("role timeout enforcement changed before final readback")
+                    if set(item["after"]) == timeouts._LEGACY_TIMEOUT_FIELDS and not self._timeout_enforcement_available(item["profile"]):
+                        raise RevisionConflict("timeout enforcement changed before final readback")
                     observed = timeouts.read_timeouts(self._profile_home(item["profile"]))
                     if observed["revision"] != item["expected_revision"] + 1 or any(observed[key] != value for key, value in item["after"].items()):
                         raise RevisionConflict("timeout settings differ from approved selection")

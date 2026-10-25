@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.util
 import json
+import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -16,13 +19,16 @@ from openai import OpenAI
 
 
 
-CORE = Path("C:/Users/ovpow/AppData/Local/hermes/hermes-agent")
+CORE_SPEC = importlib.util.find_spec("hermes_cli")
+CORE = Path(CORE_SPEC.origin).resolve().parents[1] if CORE_SPEC and CORE_SPEC.origin else None
 REPO = Path(__file__).resolve().parents[1]
-SCRATCH = Path("C:/Users/ovpow/AppData/Local/hermes/profiles/claire/cache/scratch")
+SCRATCH = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / "model-router-native-fixtures"
 
 
 @pytest.fixture
 def native_plugin(monkeypatch):
+    if CORE is None:
+        pytest.skip("native Hermes integration requires an installed compatible core")
     monkeypatch.syspath_prepend(str(CORE))
     monkeypatch.setenv("HERMES_DISABLE_LAZY_INSTALLS", "1")
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -203,7 +209,15 @@ def test_real_delegate_task_child_builder_emits_fast_hooks_with_total_zero(nativ
     import run_agent
 
     runtime = native_plugin
-    monkeypatch.setenv("HERMES_HOME", str(runtime.home))
+    # The fixture already binds the genuine home override before plugin load.
+    # Rebinding HERMES_HOME here changes the inferred base/profile (custom ->
+    # default on current hosts) AFTER the controller captured its identity;
+    # correctly fail-closed Fast callbacks must then refuse that stale scope.
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import get_active_profile_name
+    assert get_hermes_home().resolve() == runtime.home
+    assert get_active_profile_name() == runtime.controller.profile
+    assert runtime.controller._scope_is_current()
     assert read_timeouts(runtime.home)["delegate_total_seconds"] == 0
 
     class Parent:

@@ -33,7 +33,9 @@ def test_first_save_reconciles_uninitialized_skill_list_with_raw_cas(tmp_path, r
     body = {
         "expected_revision": status["revision"], "profile": "default",
         "models": models, "model_targets": ["default"] if scope is None else [],
-        "routing": row["routing"], "routing_profiles": [], "routing_targets": [],
+        # The complete native package now correctly derives default routing ON;
+        # this test explicitly chooses OFF and must submit matching membership.
+        "routing": {**row["routing"], "enabled": False}, "routing_profiles": [], "routing_targets": [],
     }
     if scope:
         body["save_scope"] = scope

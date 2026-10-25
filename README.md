@@ -42,6 +42,18 @@ Fast and fallback requests can increase API charges or subscription-credit usage
 
 ## Compatibility and current limitations
 
+### v0.4.8 profile preparation and activation-aware readiness
+
+The app-level Desktop UI remains a **single installation**. The native Python package and activation are still **per profile**; there is no global registration or automatic installation into future profiles.
+
+- Expand **Profile plugin preparation** in the settings page. Each discovered profile is shown as missing, installed-but-disabled, code/configuration ready, or unsupported/manual review. This is a local observation, **not proof that an existing conversation has registered tools or completed a model call**. Saved routing OFF remains OFF even when Python is active.
+- **Refresh preparation status only** discovers newly created profiles without copying settings, widening model/routing/timeout/fallback target selections, or replacing unsaved settings drafts. Installing requires an explicit target selection and separate consent. After preparation changes, settings saves stay locked until an explicit full reload; full reload discards unsaved edits.
+- Automatic preparation is limited to **at most 32 missing profiles per batch**, a uniquely resolved local native connection, safe known declarations (PyYAML only; no extra capabilities, environment requirements or Node package), and an exact match between the source install record and the current official catalog repository/commit. It uses the native Plugins Hub admission with fixed `model-router`, a full commit ref, `force: false` and `enable: true`. No shell commands, arbitrary repositories or custom install endpoint are accepted.
+- Existing, disabled, partial, modified/differing-version or unverified installations are **not automatically overwritten or re-enabled**. Use the native Plugins manager or the displayed validated per-profile CLI command and review scanner, dependency and capability prompts. Older SDKs, missing provenance, unavailable policies and remote contexts fall back to manual guidance. If the Python backend itself is inactive, the page shows a separate native activation/install guide.
+- Preparation does not copy model roles, fallback choices, limits or saved routing opt-outs. A fresh installation without a saved choice keeps the existing disclosed default **routing ON**. New sessions may be required for previously deferred tools; native activation is not a forced rebuild of every existing conversation.
+- Queued work stops on cancel or source-scope change; an already-dispatched native install is **not cancelled or rolled back**. The host binds operations by profile name, not an atomic profile-incarnation token: do not rename/delete profiles or edit package trees during preparation.
+- Every attempted target is read back. A timeout/disconnect or unverifiable receipt is **unknown**, never automatically retried. A plugin-local persisted safety latch survives page remount/reload; manual reconciliation must occur in the original scope. Releasing that latch does not assert native completion, and uncertain targets remain excluded from further automatic preparation.
+
 ### v0.4.7 cold-host binding, local completion and quiet Windows launches
 
 Normal base-Python hosts can load the native PM environment module before its optional adoption helper. The router now validates exactly one already imported generation under the verified native install root without importing that helper, switching generations or relaxing child interpreter checks. The default local launch context's explicitly empty profile name is matched narrowly to the default plugin scope; missing or foreign context remains rejected.
@@ -245,8 +257,11 @@ Desktop에 결속된 새 라우팅 작업은 네이티브 **프로세스 완료 
 ```bash
 uv run --no-project --with pytest --with pyyaml --with fastapi --with httpx python -B -m pytest tests -q -p no:cacheprovider
 node --test tests/test_desktop.mjs
+node --test tests/*.mjs
 hermes plugins doctor . --ci
 ```
+
+네이티브 SDK 프로필 전송 검증은 호환되는 Hermes 소스와 해당 Desktop의 esbuild가 있을 때 `HERMES_DESKTOP_SOURCE_ROOT=<Hermes 소스 경로> node --test tests/test_native_sdk_preparation.mjs`로 실행합니다. SDK의 실제 descriptor→gateway 프로필 결합 코드를 실행하고 최종 전송 인자를 검사하며, 네트워크/OS 경계만 대체합니다. 경로를 지정하지 않은 단독 저장소 테스트에서는 이 세 사례가 명시적으로 skip됩니다. Python의 네이티브 Fast 테스트는 플러그인 생성 후 기준 홈/프로필을 바꾸지 않고 실제 프레임워크의 동일한 scope를 유지합니다.
 
 설정 파일은 Hermes base의 `plugin-data/model-router/settings.json`입니다. 프로필 `config.yaml`은 지원되는 `hermes config set` 명령으로만 투영합니다. 미리보기 토큰은 변경 시점의 revision과 대상 설정 digest에 묶이고, 적용 전에 다시 확인합니다. 부분 실패는 부분 실패로 기록하며 다른 작업의 설정을 자동 롤백하지 않습니다.
 

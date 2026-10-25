@@ -32,9 +32,10 @@ function text(node) {
   if (Array.isArray(node)) return node.map(text).join(' ')
   return node?.props ? text(node.props.children) : ''
 }
-function harness() {
+function harness(options = {}) {
+  const pluginContext = { storage: options.storage || null }
   let data = fixture(), cursor = 0, dirty = false, tree
-  const hooks = [], effects = [], calls = []
+  const hooks = [], effects = [], calls = [], cleanups = new Map()
   const state = Object.fromEntries(Object.entries({ profile: 'claire', connectionId: 'local', gateway: 'open' })
     .map(([key, value]) => [key, { value, get() { return this.value } }]))
   let responder = operation => operation === 'preview'
@@ -59,7 +60,12 @@ function harness() {
   const useEffect = (fn, deps) => {
     const index = cursor++, before = hooks[index]
     if (!before || !deps || deps.some((value, at) => !Object.is(value, before[at]))) {
-      hooks[index] = deps; effects.push(fn)
+      hooks[index] = deps; effects.push(() => {
+        cleanups.get(index)?.()
+        const cleanup = fn()
+        if (typeof cleanup === 'function') cleanups.set(index, cleanup)
+        else cleanups.delete(index)
+      })
     }
   }
   let refetcher = async () => ({ data })
@@ -78,10 +84,12 @@ function harness() {
   const executable = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
     .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
     .replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-  const RouterPage = new Function(...Object.keys(imports), `${executable}\nreturn RouterPage`)(...Object.values(imports))
+  const moduleApi = new Function(...Object.keys(imports), `${executable}\nreturn { RouterPage, pluginDefinition }`)(...Object.values(imports))
+  const RouterPage = moduleApi.RouterPage
+  moduleApi.pluginDefinition.register({ ...pluginContext, registerSettingsPage() {}, registerMany() {} })
   const render = () => {
     for (let attempt = 0; attempt < 20; attempt++) {
-      dirty = false; cursor = 0; tree = RouterPage({ ctx: {} })
+      dirty = false; cursor = 0; tree = RouterPage({ ctx: pluginContext })
       for (const effect of effects.splice(0)) effect()
       if (!dirty) return tree
     }
@@ -99,10 +107,151 @@ function harness() {
     find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === 'profile-select')).props.onValueChange(name); render()
   }
   render()
-  return { calls, state, render, byId, button, click, clickLabel, selected, selectProfile, flush,
+  return { calls, state, host, render, byId, button, click, clickLabel, selected, selectProfile, flush,
+    unmount() { for (const cleanup of cleanups.values()) cleanup(); cleanups.clear() },
     setResponder(fn) { responder = fn }, setRefetcher(fn) { refetcher = fn }, setData(next) { data = next }, data: () => data,
     check(id, value) { byId(id).props.onCheckedChange(value); render() },
     input(id, value) { byId(id).props.onChange({ target: { value } }); render() } }
+}
+
+const setupReadiness = (state = 'missing') => ({ schema: 1, state, files: state === 'missing' ? 'missing' : 'complete', python: state === 'ready' ? 'enabled' : 'not_enabled', base_supported: state === 'ready', split_supported: state === 'ready', explicit_opt_out: false, managed_selection: false, version: state === 'ready' ? '0.4.8' : null, identity: (state === 'ready' ? '2' : '1').repeat(64), reason_codes: state === 'missing' ? ['package_missing'] : [] })
+const setupFixture = () => ({ ...fixture(), readiness_context: { schema: 1, base_identity: 'a'.repeat(64), source_profile: 'claire', release: { catalog_name: 'model-router', version: '0.4.8', ref: 'b'.repeat(40) } }, profiles: fixture().profiles.map(row => ({ ...row, readiness: setupReadiness('ready') })).concat([{ ...structuredClone(fixture().profiles[2]), name: 'future', readiness: setupReadiness() }]) })
+function setupStorage() {
+  const values = new Map()
+  return { get(key, fallback = null) { return values.has(key) ? structuredClone(values.get(key)) : fallback }, set(key, value) { values.set(key, structuredClone(value)) } }
+}
+
+test('readiness-only refresh preserves dirty model/route drafts and manual or empty copy selections', async () => {
+  const h = harness()
+  h.input('model-main-model', 'keep-my-unsaved-model')
+  h.input('heavy-custom-model', 'keep-my-unsaved-heavy')
+  h.click('model-target-none'); h.check('model-target-other', true)
+  h.click('routing-target-none')
+  h.setResponder(operation => { assert.equal(operation, 'status'); return setupFixture() })
+  h.click('prepare-refresh'); await h.flush()
+  assert.equal(h.byId('model-main-model').props.value, 'keep-my-unsaved-model')
+  assert.equal(h.byId('heavy-custom-model').props.value, 'keep-my-unsaved-heavy')
+  assert.deepEqual(h.selected('model-target-'), ['other'])
+  assert.deepEqual(h.selected('routing-target-'), [])
+  assert.deepEqual(h.selected('prepare-profile-'), [])
+  assert.ok(h.byId('prepare-profile-future'))
+  assert.deepEqual(h.calls.map(call => call.operation), ['status'])
+  assert.equal(h.data().profiles.some(row => row.name === 'future'), false, 'readiness refresh must not rebase model settings')
+})
+
+test('readiness refresh synchronously locks a retained settings-save callback until its read finishes', async () => {
+  const h = harness(); h.input('model-main-model', 'retain-draft')
+  const staleSave = h.byId('global-save').props.onClick
+  let resolveStatus
+  h.setResponder(() => new Promise(resolve => { resolveStatus = resolve }))
+  h.click('prepare-refresh'); staleSave(); h.render()
+  assert.equal(h.byId('global-save').props.disabled, true)
+  assert.deepEqual(h.calls.map(call => call.operation), ['status'])
+  resolveStatus(setupFixture()); await h.flush()
+  assert.equal(h.byId('model-main-model').props.value, 'retain-draft')
+  assert.equal(h.byId('global-save').props.disabled, false)
+})
+
+test('real preparation controls make one explicit native install and preserve dirty settings until explicit reload', async () => {
+  const h = harness({ storage: setupStorage() }), snapshot = setupFixture(), nativeView = structuredClone(snapshot)
+  h.setData(snapshot); h.render()
+  h.input('model-main-model', 'unsaved-model-before-setup')
+  h.click('model-target-none'); h.check('model-target-other', true); h.click('routing-target-none')
+  const route = { mode: 'local', primary: true, connectionId: 'local', profile: 'claire', targetProfile: 'claire' }
+  const writes = [], nativeCalls = []
+  h.host.profileRoutes = async () => { nativeCalls.push('profileRoutes'); return [route, { ...route, primary: undefined, profile: 'future', targetProfile: 'future' }] }
+  h.host.requestProfile = async (actualRoute, method, params) => {
+    nativeCalls.push(method)
+    if (method === 'plugins.manage') {
+      assert.equal(actualRoute.profile, params.profile)
+      assert.equal(actualRoute.targetProfile, params.profile)
+    } else assert.deepEqual(actualRoute, route)
+    if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: 'b'.repeat(40), subdir: '' } }
+    if (method === 'cli.exec') return { code: 0, output: `MODEL_ROUTER_JSON:${JSON.stringify(nativeView)}\n` }
+    assert.equal(method, 'plugins.manage'); writes.push(params)
+    nativeView.profiles.find(row => row.name === 'future').readiness = setupReadiness('ready')
+    return { ok: true, enabled: true }
+  }
+  assert.deepEqual(h.selected('prepare-profile-'), [])
+  h.check('prepare-profile-future', true)
+  assert.equal(h.byId('prepare-run').props.disabled, true)
+  h.check('prepare-consent', true); h.click('prepare-run'); await h.flush(); await h.flush()
+  assert.equal(writes.length, 1, `native calls: ${nativeCalls.join(', ')}; preparation view: ${text(h.byId('profile-preparation'))}`); assert.equal(writes[0].profile, 'future'); assert.equal(writes[0].force, false)
+  assert.equal(h.byId('model-main-model').props.value, 'unsaved-model-before-setup')
+  assert.deepEqual(h.selected('model-target-'), ['other']); assert.deepEqual(h.selected('routing-target-'), [])
+  assert.equal(h.calls.some(call => ['preview', 'apply'].includes(call.operation)), false)
+  assert.equal(h.byId('models-save').props.disabled, true)
+})
+
+test('unmount during route lookup cancels before any native preparation RPC', async () => {
+  const h = harness({ storage: setupStorage() }); h.setData(setupFixture()); h.render()
+  let releaseRoutes; const calls = []
+  h.host.profileRoutes = () => new Promise(resolve => { releaseRoutes = resolve })
+  h.host.requestProfile = async (_route, method) => { calls.push(method); throw new Error('must not dispatch') }
+  h.check('prepare-profile-future', true); h.check('prepare-consent', true); h.click('prepare-run')
+  h.unmount(); releaseRoutes([{mode:'local',primary:true,connectionId:'local',profile:'claire',targetProfile:'claire'}])
+  for (let at=0;at<40;at++) await Promise.resolve()
+  assert.deepEqual(calls, [])
+})
+
+test('unmount stops the queue and a remounted page stays locked until owner-scoped full reload', async () => {
+  const storage = setupStorage(), h = harness({storage}), snapshot=setupFixture()
+  snapshot.profiles.push({...structuredClone(snapshot.profiles.at(-1)),name:'second-future'})
+  const nativeView=structuredClone(snapshot), route={mode:'local',primary:true,connectionId:'local',profile:'claire',targetProfile:'claire'}, writes=[]
+  let finishInstall
+  h.setData(snapshot);h.render();h.host.profileRoutes=async()=>[route,...['future','second-future'].map(name=>({...route,primary:undefined,profile:name,targetProfile:name}))]
+  h.host.requestProfile=async(_route,method,params)=>{
+    if(method==='plugins.catalog.lookup') return {status:'found',entry:{name:'model-router',repo:'https://github.com/metamindedu/hermes-model-router',sha:'b'.repeat(40),subdir:''}}
+    if(method==='cli.exec') return {code:0,output:'MODEL_ROUTER_JSON:'+JSON.stringify(nativeView)}
+    assert.equal(method,'plugins.manage');writes.push(params)
+    return new Promise(resolve=>{finishInstall=()=>{nativeView.profiles.find(row=>row.name===params.profile).readiness=setupReadiness('ready');resolve({ok:true})}})
+  }
+  h.check('prepare-profile-future',true);h.check('prepare-profile-second-future',true);h.check('prepare-consent',true);h.click('prepare-run');await h.flush()
+  assert.equal(writes.length,1)
+  h.unmount();finishInstall();for(let at=0;at<50;at++) await Promise.resolve()
+  assert.equal(writes.length,1,'unmount must never queue the second target')
+  assert.equal(storage.get('profile-preparation-safety-v1').pending.settled,true)
+  const remounted=harness({storage});remounted.setData(nativeView);remounted.render()
+  assert.equal(remounted.byId('models-save').props.disabled,true,'a new page must not clear the mutation fence')
+  remounted.setRefetcher(async()=>({data:nativeView}))
+  remounted.clickLabel('상태 새로고침');await remounted.flush()
+  assert.equal(storage.get('profile-preparation-safety-v1').pending,null)
+  assert.equal(remounted.byId('models-save').props.disabled,false)
+})
+
+for (const phase of ['routes', 'initial-status', 'final-status']) {
+  for (const stop of ['cancel', 'unmount', 'leave-and-return']) test(`${stop} during ${phase} prevents later preparation writes`, async () => {
+    const h = harness({ storage: setupStorage() }), snapshot = setupFixture()
+    h.setData(snapshot); h.render()
+    const source = { mode: 'local', primary: true, connectionId: 'local', profile: 'claire', targetProfile: 'claire' }
+    const routes = [source, { ...source, primary: undefined, profile: 'future', targetProfile: 'future' }]
+    let release, reads = 0, routeReads = 0; const writes = []
+    h.host.profileRoutes = () => {
+      routeReads++
+      if (phase === 'routes' && routeReads === 1) return new Promise(resolve => { release = () => resolve(routes) })
+      return Promise.resolve(routes)
+    }
+    h.host.requestProfile = async (_route, method, params) => {
+      if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: 'b'.repeat(40), subdir: '' } }
+      if (method === 'cli.exec') {
+        reads++
+        if ((phase === 'initial-status' && reads === 1) || (phase === 'final-status' && reads === 2)) return new Promise(resolve => { release = () => resolve({ code: 0, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(snapshot) }) })
+        return { code: 0, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(snapshot) }
+      }
+      writes.push(params); return { ok: true }
+    }
+    h.check('prepare-profile-future', true); h.check('prepare-consent', true); h.click('prepare-run'); await h.flush()
+    assert.equal(typeof release, 'function')
+    if (stop === 'cancel') h.click('prepare-cancel')
+    else if (stop === 'unmount') h.unmount()
+    else {
+      h.host.state.profile.value = 'other'; h.render()
+      h.host.state.profile.value = 'claire'; h.render()
+    }
+    release(); for (let i = 0; i < 50; i++) await Promise.resolve()
+    assert.deepEqual(writes, [])
+    assert.equal(h.calls.some(call => ['preview', 'apply'].includes(call.operation)), false)
+  })
 }
 
 test('editing Heavy with all profiles checked saves the exact bulk routing targets', async () => {
