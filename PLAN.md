@@ -1,5 +1,24 @@
 # Model Router implementation contract
 
+## 2026-10-26: Remove standalone skill regeneration; release and all-profile rollout
+
+The user explicitly authorizes fixing the duplicate-skill regeneration, deployment
+and official catalog submission. Use the current public v0.4.8 baseline and release
+v0.4.9. Remove settings-service skill-copy ownership and its repair-only preview/CAS
+work; keep plugin-bundled namespaced policy and package-owned compat discovery.
+Do not delete user-authored standalone files automatically. Refuse pre-upgrade
+skill-copy plans before writes while retaining one-shot consumption. Preserve all
+other settings/CAS/managed provenance/readback, activation and approval gates.
+
+Main implements the bounded change with RED/GREEN regressions. Require full
+Python/Node and native admission/registration gates plus fresh immutable Heavy
+independent review. Deploy the exact release to all eleven already-installed
+profiles, preserving configs/auth/settings/timeouts and unrelated local additions.
+No core changes, provider smoke jobs, forced session reload or shared restart.
+Publish source/release and a new exact-SHA catalog PR; maintainer merge remains
+external and must not be claimed from submission or successful CI.
+
+
 ## 2026-10-25: Native profile installation/readiness UX (current authorization)
 
 The user authorizes plugin-only installation/management UX improvements, isolated first-install tests, independent Heavy review, local operational rollout, GitHub push and a new pinned official-catalog update. After verified host feasibility and upstream product-decision evidence, the user explicitly deferred host/core changes. Do not claim single-copy global execution or automatic activation of future profiles. Keep the app-level Desktop UI single; Python installations/activation remain native per-profile. Show missing/disabled/ready/unsupported states and why runtime-limit targets are unavailable. Offer explicit selected-profile setup using supported native install/enable operations; no hidden writes, background auto-installer, shell interpolation, arbitrary repo/command/path input, scanner/consent bypass or replacement of differing/custom installed code. Detect newly added profiles through an explicit status refresh and offer setup; never install merely on view/refresh.

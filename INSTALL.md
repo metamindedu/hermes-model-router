@@ -69,6 +69,15 @@ hermes --profile default plugins install metamindedu/hermes-model-router --ref <
 
 꺾쇠 부분은 실제 SHA로 바꿉니다. 고정 설치의 버전 변경은 새 SHA를 명시해야 하며, 일반 `plugins update`가 임의로 고정을 이동시키지 않습니다.
 
+## 스킬 중복 방지 (v0.4.9)
+
+정책은 `model-router:adaptive-coding-orchestration` 내장본을 사용합니다.
+초기 설정·라우팅 저장·전체 설정 저장은 프로필의 `skills/`에 독립 호환본을
+만들지 않습니다. 기존 로컬 파일에 사용자 지침이 있으면 자동 삭제하지 않습니다.
+플러그인 내부 `compat`는 기존 이름 검색을 위한 선택적 참조이며 복사 원본이 아닙니다.
+업데이트 전에 생성한 저장 계획이 구 스킬 파일 상태를 포함하면 쓰기 전에 거부하므로
+설정을 다시 불러온 후 저장하세요. 실행 중 Python 콜백은 새 세션에서 갱신될 수 있습니다.
+
 ## 3. Desktop 활성화와 최초 설정
 
 1. Hermes Desktop의 **Capabilities → Plugins**에서 새 패키지를 탐색합니다. 필요하면 **Rescan**을 사용합니다.

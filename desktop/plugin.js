@@ -2569,7 +2569,7 @@ function RouterPage({ ctx: pluginContext }) {
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.4.8',
+  version: '0.4.9',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

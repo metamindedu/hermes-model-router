@@ -101,10 +101,7 @@ def setup_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, profiles=("de
     monkeypatch.setattr(Service, "_cli_path", lambda self: "fake-hermes")
     monkeypatch.setattr(Service, "_read_key", lambda self, profile, key: copy.deepcopy(cli.values[profile].get(key)))
     monkeypatch.setattr(service_module.subprocess, "run", cli.run)
-    source = tmp_path / "compat" / "SKILL.md"
-    source.parent.mkdir()
-    source.write_text("# fake compatibility skill\n", encoding="utf-8")
-    monkeypatch.setattr(service_module, "COMPAT_SKILL_SOURCE", source)
+
     return root, cli
 
 
@@ -136,7 +133,7 @@ def test_initialize_preserves_models_and_only_toggles_selected_skill(tmp_path, m
     assert cli.values["p2"]["skills.disabled"] == ["unrelated-skill", SKILL_NAME]
     assert all(key == "skills.disabled" for _, key, _ in cli.calls)
     assert cli.values["default"]["model.default"] == original["default"]["model.default"]
-    assert (root / "profiles" / "p1" / "skills" / SKILL_NAME / "SKILL.md").read_text(encoding="utf-8").startswith("# fake")
+    assert not (root / "profiles" / "p1" / "skills" / SKILL_NAME / "SKILL.md").exists()
     assert not (root / "profiles" / "p2" / "skills" / SKILL_NAME / "SKILL.md").exists()
 
 

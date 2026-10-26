@@ -42,6 +42,22 @@ Fast and fallback requests can increase API charges or subscription-credit usage
 
 ## Compatibility and current limitations
 
+### v0.4.9 plugin-owned policy without standalone copies
+
+Routing initialization and settings saves no longer create or read
+`skills/adaptive-coding-orchestration/SKILL.md` in any profile. Use the bundled
+`model-router:adaptive-coding-orchestration` policy. The package-owned `compat`
+entry remains available for explicitly configured legacy-name discovery; it is
+not copied into profiles. Existing user-owned local skill files are neither
+removed nor overwritten. Removing a duplicate is a separate, explicit cleanup.
+
+Missing standalone files no longer create a repair-only save. Configuration and
+effective-settings CAS checks, scoped saves, one-shot plans and readback remain.
+A pending pre-upgrade plan containing skill snapshots is consumed and refused
+before writes; reload settings and generate a fresh plan. Installation does not
+rewrite model, fallback, timeout or routing preferences. Existing Python tool
+callbacks may require a new session; no shared-process restart is required.
+
 ### v0.4.8 profile preparation and activation-aware readiness
 
 The app-level Desktop UI remains a **single installation**. The native Python package and activation are still **per profile**; there is no global registration or automatic installation into future profiles.

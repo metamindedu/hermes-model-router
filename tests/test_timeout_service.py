@@ -297,6 +297,9 @@ def test_timeout_scope_preserves_canonical_config_and_drifted_skill_bytes(tmp_pa
     config_before = {name: (service._profile_home(name) / "config.yaml").read_bytes()
                      for name in ("default", "p1", "p2")}
     skill = p1 / "skills" / SKILL_NAME / "SKILL.md"
+    # A real legacy/user-owned file is preserved; initialization no longer creates it.
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"profile-specific legacy notes\n")
     skill_before = skill.read_bytes()
     # Existing drift must not make a timeout-only save reconcile routing.
     cli.values["p1"]["skills.disabled"] = [SKILL_NAME, "unrelated-disabled-skill"]

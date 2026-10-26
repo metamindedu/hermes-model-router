@@ -24,7 +24,7 @@ STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
 STATE_RELATIVE = Path("plugin-data") / "model-router" / "recent_apply.json"
 SKILL_NAME = "adaptive-coding-orchestration"
 ROUTING_SKILL_IDS = frozenset({SKILL_NAME, "model-router:" + SKILL_NAME})
-COMPAT_SKILL_SOURCE = Path(__file__).resolve().parents[1] / "compat" / SKILL_NAME / "SKILL.md"
+
 PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 PROVIDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
@@ -894,39 +894,7 @@ class Service:
                 pass
         raise ServiceError("skills.disabled is not a string list")
 
-    def _skill_digest(self, profile: str) -> str:
-        home = self._profile_home(profile)
-        target = home / "skills" / SKILL_NAME / "SKILL.md"
-        if target.exists() or target.is_symlink():
-            if not _inside(target, home):
-                raise ServiceError("compat skill path escapes profile home")
-            try:
-                return hashlib.sha256(target.read_bytes()).hexdigest()
-            except OSError as exc:
-                raise ServiceError("compat skill cannot be inspected") from exc
-        return "MISSING"
 
-    def _ensure_compat_skill(self, profile: str) -> None:
-        home = self._profile_home(profile).resolve(strict=False)
-        target = self._profile_home(profile) / "skills" / SKILL_NAME / "SKILL.md"
-        if target.exists():
-            if not _inside(target, home):
-                raise ServiceError("compat skill path escapes profile home")
-            return
-        if target.is_symlink():
-            raise ServiceError("compat skill path is unsafe")
-        source = COMPAT_SKILL_SOURCE
-        if not source.is_file():
-            raise ServiceError("bundled compatibility skill is unavailable")
-        if not _inside(target.parent, home):
-            raise ServiceError("compat skill path escapes profile home")
-        _secure_dir(target.parent)
-        payload = source.read_bytes()
-        fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
 
     def _profile_digest_keys(self, profile: str, models: dict[str, dict[str, str]], routing_change: bool) -> dict[str, Any]:
         keys = {key for group in MODEL_KEYS.values() for key in group}
@@ -1014,8 +982,7 @@ class Service:
                         if self._read_disabled(name) != updated:
                             raise ServiceError("skills.disabled readback mismatch")
                         applied.append(name)
-                    if want_enabled:
-                        self._ensure_compat_skill(name)
+
                 except Exception as exc:
                     receipt = {"status": "partial", "revision": revision, "applied_profiles": applied, "finished_at": _now()}
                     self._store_apply(receipt)
@@ -1305,7 +1272,7 @@ class Service:
         changes: list[dict[str, Any]] = []
         snapshots: dict[str, dict[str, Any]] = {}
         writes: list[dict[str, Any]] = []
-        skill_snapshots: dict[str, str] = {}
+
         routing_validation_names: set[str] = set()
         if submitted_models is not None:
             for name in targets:
@@ -1372,11 +1339,7 @@ class Service:
                 if updated != disabled:
                     writes.append({"profile": name, "key": "skills.disabled", "before": raw_disabled, "after": updated})
                     changes.append({"profile": name, "field": "skills.disabled", "before": "enabled" if old_enabled else "disabled", "after": "enabled" if new_enabled else "disabled"})
-            if new_enabled:
-                digest = self._skill_digest(name)
-                skill_snapshots[name] = digest
-                if digest == "MISSING":
-                    changes.append({"profile": name, "field": f"skills/{SKILL_NAME}/SKILL.md", "before": "missing", "after": "compatibility shim"})
+
 
         if scope in {None, "models", "routing"}:
             if scope is None:
@@ -1399,7 +1362,9 @@ class Service:
         plan = {
             "id": plan_id, "revision": revision, "after": after, "changes": changes,
             "snapshots": snapshots, "config_digests": config_digests, "writes": writes,
-            "skill_snapshots": skill_snapshots, "model_targets": targets, "state_changed": state_changed, "expires_epoch": expires_epoch,
+            "model_targets": targets, "state_changed": state_changed, "expires_epoch": expires_epoch,
+            # Preserve target validation independently of obsolete skill-file ownership.
+            "validation_profiles": sorted(set(selected) & set(after) & set(discovered)) if scope in {None, "routing"} else [],
             "timeout_writes": timeout_writes,
             "save_scope": scope,
         }
@@ -1704,8 +1669,9 @@ class Service:
             "snapshots": snapshots,
             "config_digests": config_digests,
             "writes": writes,
-            "skill_snapshots": copy.deepcopy(base_plan["skill_snapshots"]) if base_plan else {},
+
             "model_targets": list(base_plan["model_targets"]) if base_plan else [],
+            "validation_profiles": list(base_plan.get("validation_profiles", [])) if base_plan else [],
             "native_expected": native_expected,
             "native_snapshots": native_snapshots,
             "native_provenance": native_provenance,
@@ -1771,6 +1737,10 @@ class Service:
                 raise ServiceError("preview belongs to another profile connection")
             plan_path.unlink()  # one-shot under the same lock, before any write
             self._plans.pop(plan_id, None)
+            # An in-flight pre-upgrade plan may still promise a standalone skill copy.
+            # Consume it once, but never silently apply a different write contract.
+            if plan.get("skill_snapshots"):
+                raise RevisionConflict("legacy skill-copy plan; reload settings and preview again")
             if time.time() > plan["expires_epoch"]:
                 raise ServiceError("preview plan expired")
             current = self._load_store()
@@ -1779,7 +1749,7 @@ class Service:
                 raise RevisionConflict("settings revision changed; preview again")
             for item in plan.get("timeout_writes", []):
                 self._check_timeout_write(item)
-            for profile in set(plan["snapshots"]) | set(plan["skill_snapshots"]):
+            for profile in set(plan["snapshots"]) | set(plan.get("validation_profiles", [])):
                 self._require_profile(profile)
             # Validate all captured config values before creating backups or writing.
             for profile, values in plan["snapshots"].items():
@@ -1800,9 +1770,7 @@ class Service:
                     raise RevisionConflict("delegation config changed since preview") from exc
                 if current_snapshot.cas_digest != expected_snapshot:
                     raise RevisionConflict("delegation config changed since preview")
-            for profile, expected in plan["skill_snapshots"].items():
-                if self._skill_digest(profile) != expected:
-                    raise RevisionConflict("profile skill state changed since preview")
+
             if not plan["changes"]:
                 for item in plan.get("timeout_writes", []):
                     self._check_timeout_write(item)
@@ -1884,9 +1852,7 @@ class Service:
                     _mode, _chain, warnings = self._delegation_actual(current_snapshot)
                     if warnings or current_snapshot.effective(DELEGATION_FALLBACK_KEY) != expected_value:
                         raise RevisionConflict("effective delegation fallback differs from approved selection")
-                for profile in plan["skill_snapshots"]:
-                    if next_store["profiles"].get(profile, {}).get("routing", {}).get("enabled"):
-                        self._ensure_compat_skill(profile)
+
             except Exception:
                 receipt = {"status": "partial", "plan_id": plan_id, "revision": new_revision, "applied": applied,
                            "remaining": [{"profile": item["profile"], "key": item["key"]} for item in pending], "finished_at": _now()}

@@ -36,13 +36,20 @@ assert entry.check_fn()
 config = json.loads(entry.handler({'action': 'config'}))
 assert config['enabled'] is True
 assert config['heavy']['model'] == config['light']['model'] == 'fixture-shared'
-assert manager.find_plugin_skill('model-router:adaptive-coding-orchestration').is_file()
+from pathlib import Path
+from tools.skills_tool import skill_view
+policy = manager.find_plugin_skill('model-router:adaptive-coding-orchestration')
+assert policy.is_file()
+assert policy.resolve() == (Path(sys.argv[1]) / 'plugins/model-router/skills/adaptive-coding-orchestration/SKILL.md').resolve()
+view = json.loads(skill_view('model-router:adaptive-coding-orchestration', preprocess=False))
+assert view['success'] and 'Direct-Main default' in view['content']
+assert not (Path(sys.argv[1]) / 'skills/adaptive-coding-orchestration').exists()
 print('REGISTRATION:' + json.dumps({'registered': True, 'enabled': True}))
 """
     env = dict(os.environ, HERMES_HOME=str(home))
     for key in ('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV', 'HERMES_PROFILE'):
         env.pop(key, None)
-    result = subprocess.run([sys.executable, '-B', '-c', program], env=env, cwd=source,
+    result = subprocess.run([sys.executable, '-B', '-c', program, str(home)], env=env, cwd=source,
         capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     assert result.returncode == 0, result.stderr[-3000:]
