@@ -20,7 +20,7 @@ This threshold does not waive required Heavy or independent review, high-risk se
 
 Only when delegation is justified above or a required Heavy gate applies, load coding_route via tool discovery when absent from the current tool list and query action=config. If the plugin/profile is disabled or the tool is unavailable, do not bypass the gate through an old script or global config change. Explain that a new session or plugin activation is needed for routing. Safe local work may continue, but required Heavy review is unmet.
 
-Models are operator-assigned roles, not a claim about benchmark capability. Main may be Light or Heavy; do not infer class from a model name or reasoning effort. Heavy/Light may follow Main/Delegation or use separate overrides. The plugin resolves the actual profile setting at execution.
+Models are operator-assigned roles, not a claim about benchmark capability. Main may be Light or Heavy; do not infer class from a model name or reasoning effort. Heavy/Light may follow Main/Delegation or use separate overrides. The native purpose provider resolves the actual profile setting at execution.
 
 ## Scope: coding and complex non-coding judgment
 
@@ -38,36 +38,48 @@ Use the existing approved tool purposes without changing the plugin implementati
 - Light may collect evidence and flag preliminary findings. This never satisfies a required Heavy or independent final review.
 - Explicit independent final review requires a fresh Heavy child, not Main's own review, even when Main is Heavy. Task wording (read-only, small diff, GO/NO-GO, timeboxed) cannot reduce the required class.
 
-## Routes
+## Native routes (Hermes >=0.22.5)
 
-Use coding_route(action="start", title="짧고 구체적인 작업명", purpose=..., prompt=..., cwd=..., timeout=...) with a complete bounded handoff. Always supply a human-readable title describing this specific deliverable (e.g. `게시 안전성 독립 검수`, `결제 오류 원인 조사`). It is PUBLIC display metadata in Background and the terminal, limited to 96 characters; never copy credentials, private prompt text, customer data or full paths into it. Older callers without a title receive a fixed readable purpose label. Titles never authorize execution or prove model identity:
+NEW work uses the real `delegate_task`, never `coding_route(action="start")`, a runner script, or a subprocess workaround. `coding_route(action="config")` reads effective Heavy/Light roles; it does NOT prove this session selected a native backend. The selected session tool schema must actually offer the fields below. If it does not, report that native backend selection and a supported session/tool rebuild are required; do not change settings, force a reload, or pretend wording selects Heavy.
 
-| purpose | execution role |
-|---|---|
-| implementation | Light |
-| mechanical | Light (tests/lint/typecheck/build/reproduction) |
-| preliminary-review | Light; preliminary only |
-| plan | Heavy |
-| semantic-final | Heavy final non-independent judgment |
-| independent-review | fresh Heavy independent final judgment |
+Two namespaced providers are available, with one active backend per session:
 
-The call returns a job_id, not completion. Use coding_route(action="status", job_id=...) for bounded status checks. Respect tool-reported running/failed/unverified state; do not manufacture success. Each job records requested and actual model/provider evidence. route_verified proves identity, not correctness; read the review findings and candidate evidence before giving GO. If required Heavy is unavailable, leave the gate explicitly unmet; do not silently substitute Light or invent a paid route.
+| backend | per-task selector | behavior |
+|---|---|---|
+| `model-router` | required `purpose` | purpose selects operator-assigned Heavy/Light |
+| `model-router-profiles` | allowlisted `profile`, or an explicit configured default | child runs with that profile's identity and policy |
 
-When an owned job completion arrives, consume that exact native process result with `process_manage(action="wait", session_id=<returned process_id>)` after it is terminal, then read `coding_route(action="status", job_id=...)`. Do not acknowledge another session's process or infer its ID. Native result consumption prevents a stale completion from waking the parent again; a status-only inspection is not that acknowledgement. Continue the next already-authorized step after evaluating the verdict rather than stopping at an exit-code announcement. Preserve Stop, busy and notification opt-out gates. If no completion wake was requested, use a bounded owned wait without shortening the job's configured total budget instead of promising automatic resumption.
+For the purpose backend, pass `tasks=[{"goal":"specific deliverable", "context":"complete bounded handoff", "purpose":"independent-review"}]`. Allowed Light purposes: `implementation`, `mechanical`, `preliminary-review`. Allowed Heavy purposes: `plan`, `semantic-final`, `independent-review`. This preserves fresh-context independent reviews; a purpose does not enforce a read-only OS sandbox. Read-only review remains a handoff/approval constraint.
 
-After the delegation threshold is met, native delegate_task may handle Light implementation/mechanical tasks after comparing its actual configured provider/model against the plugin's effective Light role. It is not a Heavy adapter. When native delegation differs from the selected Light override, use coding_route only for already-justified delegation, not as a reason to delegate. Do not temporarily mutate delegation.model or global profile configuration around a task.
+For profile routing, `tasks=[{"goal":"specific deliverable", "context":"complete bounded handoff", "profile":"exact-allowlisted-name"}]`. Profile routing is NOT a Heavy adapter. A target name, description or persona is not model identity evidence or a substitute for required Heavy review. If Heavy review is required but this session only offers profile routing, leave the gate unmet unless exact actual route evidence establishes the configured Heavy identity. Do not switch backends silently.
+
+A profile child uses target model, credentials, fallback chain, reasoning, skills, SOUL and terminal policy, but keeps the parent's toolset ceiling and parent-owned transcript storage. It does not join an existing profile conversation and is not an OS security boundary. Missing credentials, invalid defaults and revoked/invalid allowlists must remain explicit errors; never install/enable another profile or expand permissions to repair a task. Omitted profile without a configured default follows the native parent route, not `delegation.model`.
+
+Registering/installing this plugin, reading settings, model presets and Heavy/Light saves do not select `delegation.backend`. Backend activation and profile execution grants require explicit scoped settings saves. Respect existing saved opt-outs. Existing sessions retain pinned tools until a supported rebuild boundary; compression can also rebuild. Do not claim a disk update activated this session.
+
+### Native completion and evidence
+
+Core owns spawning, concurrency, progress, stop, steering, output-schema validation and results. Use native `delegate_task` controls; do not poll job files, manufacture handles, adopt processes or implement fresh-task retry. Top-level background completion follows the live native tool contract; finish independent work and use the native delivered exact result. Do not assume legacy `completion_mode="join"` is a native parameter or promise arbitrary same-turn waiting.
+
+Separate requested route, native runtime-reported `result.route`, response-observed identity where available, and semantic acceptance. Child attributes/route reports do not prove every request or a successful API response. No `route_verified` or completed exit status is itself GO. Main validates exact artifacts, tests and state-changing readbacks.
+
+### Native fallback and total runtime
+
+Native purpose-route fallback is OFF by default (`fallback_providers: []`) to prevent inherited surprise costs. New per-role continuation policies require explicit selection/save and new exact-chain cost consent. Existing legacy fresh-task-rerun consent never authorizes continuing a native child. Never re-run a task in a different model after tools/partial results or on a missing result. Profile routes use the TARGET profile's own chain; an origin-side fallback cannot override it.
+
+The three existing profile limits remain independent: ordinary/profile delegate total, Light total and Heavy total. Native purpose children use their exact role budget, not both ordinary and role timers. Defaults remain ordinary `0`, Light/Heavy `3600` seconds; actual settings may differ. UI units are minutes; native optional per-task `total_timeout_seconds` is seconds. Normally OMIT that override; use it only for a concrete user/external deadline. `0` disables only that task's plugin total; it does not disable request, iteration or native inactivity limits. Never invent a shorter cap for a small/read-only review.
+
+Budgets are frozen per child and start from native registered running time, excluding queues. Progress, fallback and steering do not reset them. Ambiguous same-goal/different-budget batches or unsupported routed enforcement must refuse rather than silently launch without the promised limit. Cooperative stop acceptance is not termination proof; never kill the shared Hermes process.
+
+### Historical process jobs only
+
+`coding_route` remains for `config`, legacy `status` and existing owner-bound `join`. Stale `start` calls return `start_retired` and must not launch, translate, retry or reset a deadline. Preserve prior job artifacts and already-running processes. Historical join is read-only collection after exact native process exit, not native completion acknowledgement, successful model identity or semantic approval. `pending` limits one wait, not the child budget; `interrupted` must not automatically rejoin. Never convert notify-mode jobs, re-adopt them or fabricate native subagent handles. Historical access remains available when new purpose routing is disabled.
 
 ## Bounded handoff and implementation
 
 Before dispatch specify deliverable, exact owned files, inputs/constraints, acceptance tests, explicit non-goals, the applicable profile total-runtime setting, retry budget, external-write permissions, and cleanup responsibility. Use nonoverlapping ownership for parallel work. Complex work's Heavy plan is the implementation baseline; material deviations return to Main.
 
-### Total-runtime settings (separate from native inactivity)
-
-The plugin provides THREE independent profile limits: `delegate_total_seconds` for ordinary native `delegate_task` children (default `0`, disabled), `routed_light_total_seconds` for Light jobs, and `routed_heavy_total_seconds` for Heavy jobs (each defaults to `3600`, one hour). Settings UI inputs are MINUTES; persistence and explicit per-job API overrides remain SECONDS. Legacy `routed_total_seconds` is inherited equally by Light and Heavy without rewriting the file merely on read/install. `0` disables only that scope's plugin total wall-clock limit, not provider/request/tool, iteration, native inactivity or cleanup protection. No setting inherits `delegation.child_timeout_seconds`, whose native meaning is an inactivity window. Policy is snapshotted for new work, not retroactively changed on running children.
-
-For `coding_route`, normally OMIT `timeout`: the tool selects `light_timeout_seconds` or `heavy_timeout_seconds` from `action="config"` according to the existing purpose/role mapping. Do not arbitrarily inject 180/300/600/900-second caps or a shorter timebox in the handoff just because a review is read-only or seems small. Supply an explicit nonnegative timeout in SECONDS only when the user requests a specific deadline or the task has a concrete external deadline; `timeout=0` disables that job's plugin total limit only. There is no separate 15-minute ceiling. A finite primary/fallback job shares the selected role's one total deadline; timeout does not authorize a fresh automatic retry.
-
-An ordinary native child's total budget is per child, not per batch, and starts from native registered running time rather than time spent queued. At expiry the plugin requests the native owned child to stop; request acceptance is NOT proof that it has terminated, and the shared Hermes process must never be killed. Routed jobs retain their existing process-tree cancellation/cleanup evidence. Report timeout, partial work and unknown cleanup honestly, never as completion.
+### Stop and retry discipline
 
 Stop when acceptance criteria pass. Do not add refactors/docs/frameworks/new review cycles as optional polish. After two failed attempts at the same operation, return evidence and the smallest next decision; do not repeat blindly. An ambiguous external write requires exact-target readback before any retry. Time-budget exit is partial, not done.
 

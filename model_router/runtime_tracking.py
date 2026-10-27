@@ -46,9 +46,12 @@ class RouteRuntime:
         provider: str = "미지정",
         profile: str = "default",
         reasoning: str | None = None,
+        completion_mode: str = "notify",
     ) -> str:
         from . import task_presentation
 
+        if completion_mode not in ("notify", "join"):
+            raise ValueError("completion_mode must be notify or join")
         display_title = task_presentation.validate_title(title, purpose)
         display_role = role or task_presentation.default_role(purpose)
         command = task_presentation.native_command(display_title, display_role, model, purpose)
@@ -76,7 +79,7 @@ class RouteRuntime:
             output_so_far=seed,
             # Desktop's native owner/Stop/opt-out/dedup gates own the wake.
             # A completion only asks the parent to read the file-backed result.
-            notify_on_complete=bool(self.ui_session_id) or self.local_completion_wake,
+            notify_on_complete=(completion_mode == "notify") and (bool(self.ui_session_id) or self.local_completion_wake),
         )
         process_id = str(getattr(session, "id", ""))
         # Ownership has already transferred. A display failure must never cause

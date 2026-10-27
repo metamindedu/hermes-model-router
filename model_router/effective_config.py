@@ -150,6 +150,10 @@ class NativeFallbackSnapshot:
     effective_available: bool
     warnings: tuple[str, ...]
     keys: tuple[str, ...] = _NATIVE_KEYS
+    _raw_presence: tuple[str, ...] = ()
+
+    def raw_present(self, key: str) -> bool:
+        return key in self._raw_presence
 
     def raw(self, key: str) -> Any:
         return _thaw(dict(self._raw)[key])
@@ -168,6 +172,7 @@ class NativeFallbackSnapshot:
         return _digest({
             "keys": self.keys,
             "raw": self._raw,
+            "raw_presence": self._raw_presence,
             "effective": self._effective,
             "effective_available": self.effective_available,
             "managed_keys": self.managed_keys,
@@ -194,6 +199,7 @@ def make_snapshot(
         effective_available=effective is not None,
         warnings=tuple(warnings),
         keys=_NATIVE_KEYS,
+        _raw_presence=tuple(key for key in _NATIVE_KEYS if key in raw),
     )
 
 
@@ -205,6 +211,7 @@ def make_key_snapshot(
     managed_keys: tuple[str, ...] | list[str] | set[str] = (),
     managed_signature: str = "fixture-no-managed-config",
     warnings: tuple[str, ...] | list[str] = (),
+    raw_presence: tuple[str, ...] | None = None,
 ) -> NativeFallbackSnapshot:
     """Build an immutable, key-scoped snapshot for explicit fake-helper tests."""
     selected = tuple(keys)
@@ -218,7 +225,17 @@ def make_key_snapshot(
         effective_available=effective is not None,
         warnings=tuple(warnings),
         keys=selected,
+        _raw_presence=tuple(key for key in selected if key in raw) if raw_presence is None else tuple(raw_presence),
     )
+
+
+def _raw_path_present(config: dict, key: str) -> bool:
+    current = config
+    for part in key.split('.')[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    return isinstance(current, dict) and key.split('.')[-1] in current
 
 
 def _managed_applies(managed_key: str, key: str) -> bool:
@@ -327,6 +344,7 @@ def read_key_scoped(
             managed_keys=managed_keys,
             managed_signature=managed_signature,
             warnings=warnings,
+            raw_presence=tuple(key for key in selected_keys if _raw_path_present(raw_config, key)),
         )
     except (EffectiveConfigUnavailable, EffectiveConfigChanged):
         raise
@@ -337,3 +355,9 @@ def read_key_scoped(
 def read_native_fallback(profile_home: Path, *, helpers: Any | None = None) -> NativeFallbackSnapshot:
     """Backward-compatible native fallback snapshot wrapper."""
     return read_key_scoped(profile_home, _NATIVE_KEYS, helpers=helpers)
+
+
+def read_native_delegation_settings(profile_home: Path, *, helpers: Any | None = None) -> NativeFallbackSnapshot:
+    """Snapshot exactly the backend selector and the two Model Router blocks."""
+    from .native_settings import KEYS
+    return read_key_scoped(profile_home, KEYS, helpers=helpers)

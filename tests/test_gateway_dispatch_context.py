@@ -37,7 +37,7 @@ def test_cached_telegram_dispatch_retains_native_process_parent(monkeypatch, sur
         def __init__(self, service, *, runtime=None, fast_snapshot=None):
             self.runtime = runtime
             assert fast_snapshot is None  # fake context exposes no Fast controller authority
-        def start(self, *args, **kwargs):
+        def join(self, *args, **kwargs):
             observed.append((self.runtime.parent_session_id, self.runtime.session_key,
                              session_context.get_session_env('HERMES_SESSION_ID')))
             return {'status': 'running'}
@@ -47,12 +47,12 @@ def test_cached_telegram_dispatch_retains_native_process_parent(monkeypatch, sur
     monkeypatch.setattr(tools.process_registry, 'process_registry', SimpleNamespace(adopt_local=lambda *a, **k: None))
     monkeypatch.setenv('HERMES_SESSION_ID', 'FOREIGN_GLOBAL_PARENT')
     ctx = SimpleNamespace(register_cli_command=lambda *a: None, register_skill=lambda *a: None,
-        register_hook=lambda *a: None, register_tool=lambda **kw: registry.register(**kw))
+        register_delegation_provider=lambda *a: None, register_hook=lambda *a: None, register_tool=lambda **kw: registry.register(**kw))
     plugin.register(ctx)
     def turn():
         tokens = session_context.set_session_vars(**surface, profile='wallace', session_key='telegram:wallace:fixture')
         try:
-            result = json.loads(registry.dispatch('coding_route', {'action': 'start', 'purpose': 'mechanical', 'prompt': 'fixture', 'cwd': str(root)}, task_id='task-fixture', session_id='fixture-current-parent'))
+            result = json.loads(registry.dispatch('coding_route', {'action': 'join', 'job_id': 'fixture-job'}, task_id='task-fixture', session_id='fixture-current-parent'))
             if allowed:
                 assert result == {'status': 'running'}, result
                 assert observed == [('fixture-current-parent', 'telegram:wallace:fixture', 'fixture-current-parent')]

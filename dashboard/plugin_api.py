@@ -61,6 +61,16 @@ def fallback_preview(body: dict):
     return _call(lambda service: service.fallback_preview(body))
 
 
+@router.post("/delegation-preview")
+def delegation_preview(body: dict):
+    return _call(lambda service: service.delegation_preview(body))
+
+
+@router.post("/initial-setup-preview")
+def initial_setup_preview(body: dict):
+    return _call(lambda service: service.initial_setup_preview(body))
+
+
 @router.post("/apply")
 def apply(body: ApplyRequest):
     return _call(lambda service: service.apply(body.plan_id))

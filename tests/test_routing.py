@@ -1,4 +1,5 @@
 from __future__ import annotations
+from legacy_router_engine import legacy_start
 
 import json
 import os
@@ -103,7 +104,7 @@ def _make_router(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str =
 def _start(router: routing.Router, tmp_path: Path, purpose: str = "implementation"):
     cwd = tmp_path / "work"
     cwd.mkdir(exist_ok=True)
-    return router.start(purpose, "Change one function; keep this exact prompt.", cwd, timeout=600)
+    return legacy_start(router, purpose, "Change one function; keep this exact prompt.", cwd, timeout=600)
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -294,7 +295,7 @@ def test_same_model_routes_start_independent_purpose_jobs(tmp_path, monkeypatch,
     output_paths = []
     for purpose, role, mode, verification in expected_purposes:
         prompt = f"Independent {purpose} task; never reuse another purpose's answer."
-        result = router.start(purpose, prompt, tmp_path)
+        result = legacy_start(router, purpose, prompt, tmp_path)
         jobs.append(result)
         assert result["status"] == "running"
         assert result["route_class"] == role
@@ -462,7 +463,7 @@ def test_omitted_timeout_uses_the_purpose_role_budget(
     cwd = tmp_path / "work"
     cwd.mkdir()
 
-    result = router.start(purpose, "select the purpose role budget", cwd)
+    result = legacy_start(router, purpose, "select the purpose role budget", cwd)
 
     job_dir = root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs" / result["job_id"]
     snapshot = _load(job_dir / "snapshot.json")
@@ -496,7 +497,7 @@ def test_zero_role_budget_applies_independently(
     cwd = tmp_path / "work"
     cwd.mkdir()
 
-    result = router.start(purpose, "zero one role without changing the other", cwd)
+    result = legacy_start(router, purpose, "zero one role without changing the other", cwd)
 
     snapshot = _load(
         root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs"
@@ -525,11 +526,11 @@ def test_invalid_present_role_budget_never_falls_back_but_call_override_wins(
     cwd.mkdir()
 
     with pytest.raises(routing.RoutingError, match="timeout must be"):
-        router.start(purpose, "invalid role budget is fail closed", cwd)
+        legacy_start(router, purpose, "invalid role budget is fail closed", cwd)
     assert calls == []
     assert not (root / "profiles" / "claire" / "plugin-data").exists()
 
-    result = router.start(purpose, "explicit zero overrides the profile", cwd, timeout=0)
+    result = legacy_start(router, purpose, "explicit zero overrides the profile", cwd, timeout=0)
     snapshot = _load(
         root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs"
         / result["job_id"] / "snapshot.json"
@@ -560,7 +561,7 @@ def test_legacy_timeout_config_is_used_only_when_role_fields_are_absent(
     cwd = tmp_path / "work"
     cwd.mkdir()
 
-    result = router.start("implementation", "old service DTO compatibility", cwd)
+    result = legacy_start(router, "implementation", "old service DTO compatibility", cwd)
 
     snapshot = _load(
         root / "profiles" / "claire" / "plugin-data" / "model-router" / "jobs"
@@ -575,7 +576,7 @@ def test_timeout_is_not_capped_and_invalid_inputs_are_rejected(tmp_path, monkeyp
     router, _service, _root, calls = _make_router(tmp_path, monkeypatch)
     cwd = tmp_path / "work"
     cwd.mkdir()
-    assert router.start("mechanical", "run tests", cwd, timeout=7200)["status"] == "running"
+    assert legacy_start(router, "mechanical", "run tests", cwd, timeout=7200)["status"] == "running"
     worker_command = calls[0][0]
     assert float(worker_command[worker_command.index("--timeout") + 1]) == 7200
     assert routing._bounded_timeout(7200) == 7200
@@ -584,9 +585,9 @@ def test_timeout_is_not_capped_and_invalid_inputs_are_rejected(tmp_path, monkeyp
         with pytest.raises(routing.RoutingError):
             routing._bounded_timeout(value)
     with pytest.raises(routing.RoutingError, match="timeout must be"):
-        router.start("mechanical", "reject an invalid explicit override", cwd, timeout=-1)
+        legacy_start(router, "mechanical", "reject an invalid explicit override", cwd, timeout=-1)
     with pytest.raises(routing.RoutingError, match="unsupported routing purpose"):
-        router.start("final-review-light", "task", cwd)
+        legacy_start(router, "final-review-light", "task", cwd)
 
 
 @pytest.mark.parametrize("override,configured,expected", [(None, 3600, 3600), (None, 7200, 7200), (None, 0, 0), (0, 3600, 0), (1200, 7200, 1200)])
@@ -603,7 +604,7 @@ def test_routed_total_limit_is_snapshotted_separately_from_native_limit(tmp_path
 
     # This fixture intentionally removes role fields to verify the old scalar DTO.
     service.routing_config = legacy_service_config
-    result = router.start("plan", "bounded read-only fixture", tmp_path, timeout=override)
+    result = legacy_start(router, "plan", "bounded read-only fixture", tmp_path, timeout=override)
     directory = root / "profiles/claire/plugin-data/model-router/jobs" / result["job_id"]
     snapshot = _load(directory / "snapshot.json")
     assert snapshot["timeout_seconds"] == expected
@@ -625,7 +626,7 @@ def test_start_failure_is_recorded_and_not_reported_as_running(tmp_path, monkeyp
     router = routing.Router(service)
     cwd = tmp_path / "work"
     cwd.mkdir()
-    result = router.start("implementation", "task", cwd)
+    result = legacy_start(router, "implementation", "task", cwd)
     assert result["status"] == "failed"
     assert result["error_type"] == "OSError"
     assert router.status(result["job_id"])["status"] == "failed"
@@ -911,7 +912,7 @@ def test_timeout_roundtrips_router_worker_runner_without_precision_loss(tmp_path
     cwd = tmp_path / "work"
     cwd.mkdir()
     kwargs = {} if configured else {"timeout": total_seconds}
-    result = router.start("implementation", "offline precision fixture", cwd, **kwargs)
+    result = legacy_start(router, "implementation", "offline precision fixture", cwd, **kwargs)
     assert result["status"] == "running"
     worker_args = job_worker._parser().parse_args(calls[0][0][2:])
     assert worker_args.timeout == total_seconds

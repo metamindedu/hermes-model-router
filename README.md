@@ -1,6 +1,40 @@
 # Hermes Model Router
 
-Profile-scoped model settings and default-on Heavy/Light task routing for **Hermes Agent**, with a native Desktop settings page. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
+Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. New work uses `delegate_task`; the plugin no longer starts a separate routed worker. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
+
+## Native delegation migration (local candidate)
+
+Requires **Hermes >=0.22.5**. Two namespaced DelegationProvider backends reuse core spawning, concurrency, progress, cancellation and result delivery:
+
+| Saved `delegation.backend` | Per-task selector | Route |
+|---|---|---|
+| `default` | none | Existing Hermes delegation settings |
+| `model-router` | required `purpose` | Existing operator-assigned Heavy/Light roles |
+| `model-router-profiles` | allowlisted `profile` or configured default | Target profile identity and execution policy |
+
+Select and explicitly save the backend in **Settings → Plugins → 모델 및 라우팅 → 작업 분담과 예비 모델**. Registration, installation, refresh, presets and existing Heavy/Light saves do **not** select a backend or grant access to other profiles. This dedicated card has its own explicit save-target selection, initially the loaded profile only, and is not silently included in the other cards' combined save. Explicit subsets/empty selections survive source changes and refresh; new profiles are never automatically included. Each selected profile keeps its own frozen settings digest. Hidden per-target permission/fallback blocks are preserved rather than copied from the source. Existing sessions keep pinned tools until a supported rebuild boundary; compression may also rebuild them. The saved setting alone does not prove current-session activation. No forced reload or shared restart is performed.
+
+For purpose routes:
+
+```json
+{"tasks":[{"goal":"Review the exact candidate","context":"Read-only review; requirements and test evidence…","purpose":"independent-review"}]}
+```
+
+`implementation`, `mechanical`, `preliminary-review` select Light; `plan`, `semantic-final`, `independent-review` select Heavy. The existing canonical role declarations, follow-main/follow-delegation choices, explicit opt-outs and three total-runtime settings remain in place. Role totals are enforced through the native child watchdog, not a process kill. A normally omitted `total_timeout_seconds` task override is in seconds; queue time is excluded, zero disables only that task's plugin total, and progress/fallback do not reset the deadline. Unsupported or ambiguous routed-budget binding refuses rather than silently launching without enforcement. Review purpose and context are not a read-only filesystem sandbox.
+
+For profile routes:
+
+```json
+{"tasks":[{"goal":"Collect the relevant evidence","context":"Bounded handoff…","profile":"exact-allowlisted-profile"}]}
+```
+
+The allowlist starts empty. Adding a profile/default is an explicit grant to use its model, credentials, fallback chain, reasoning, skills, SOUL and terminal policy. New profiles are never automatically included. A child keeps the parent's toolset ceiling and transcript storage; it does not attach to an existing target conversation and is not an OS security boundary. An omitted profile with no configured default follows the native parent route, not `delegation.model`. Profile routing is not automatically a Heavy review. Only one backend is active per session; these namespaces coexist with Advanced Delegation without replacing `model_map` or `profile_routes`.
+
+**Fallback is not automatically migrated.** Legacy routed fallback starts a fresh task under a restricted exhaustion trigger; native fallback continues the same child conversation. New per-role continuation lists default OFF and require a new explicit exact-chain save/cost permission. Old rerun consent is never reused. Profile routes use the target profile's own chain. Native `result.route` is runtime-reported identity, not proof of every API response or a semantic GO.
+
+**Legacy jobs:** `coding_route` remains for effective-role `config`, historical `status`, and existing owner-bound `join`. All public new process-start entry points return `start_retired` and spawn nothing. Existing artifacts, workers and joins are not rewritten, adopted, retried, or converted into native handles. Historical worker dependencies remain only so already-started work and evidence remain usable. The launcher oracle under `tests/` is a fake-boundary historical regression fixture, not a production launcher. The older process-routing descriptions below are historical compatibility notes, not instructions for starting new work.
+
+See [native architecture and safety contract](docs/wiki/native-delegation.md).
 
 [한국어 안내](#한국어-안내) · [Installation](INSTALL.md) · [Security and disclosures](SECURITY.md) · [MIT license](LICENSE)
 
@@ -31,6 +65,12 @@ For reproducibility, use a reviewed full commit SHA with `--ref <40-character-SH
 ![Actual Desktop Fast-inheritance notice, cropped to exclude profile names and conversations](docs/fast-inheritance.png)
 
 Enable the package's Desktop half and open **Settings → Plugins → 모델 및 라우팅** (Models and routing). Load a profile, review actual provider/model availability, select routing-enabled profiles and save only your intended scope. Model/fallback/copy target selections are independent; an initially checked target list does not itself authorize writes. Start a new session for updated Python tools. Existing model presets are editable examples, not live availability recommendations.
+
+## Historical process joins (read-only compatibility)
+
+Keep the parent productive while routed work runs: start with `completion_mode: "join"`, perform independent work, then call `coding_route` with `action: "join"` and the returned `job_id` only when its result is needed. Start remains asynchronous. Join-mode adoption is silent; it does not inject a new turn or promise a wake after the parent has ended.
+
+The optional positive `wait_timeout` is a limit for one join call, separate from the job's configured total runtime. A join call uses a bounded local wait derived from native configured limits and can return `join_status: "pending"`; the core executor can cancel earlier, and no unconditional deadline guarantee is made for arbitrary upstream middleware delays. Explicitly rejoin if the result is still needed. Stop/steer returns `interrupted` without automatically rejoining. `joined` proves read-only collection of the route report after native exit, not native acknowledgement, model identity or semantic acceptance; missing runner artifacts remain unverified. Inspect the normal route evidence and answer. Join never calls native wait/log/poll or marks native completion consumed/observed. Use normal native sequential-barrier tool dispatch, not a custom concurrent executor; independently started routed jobs still run in parallel. Native terminal metadata is rechecked after artifact reads and remains a point-in-time snapshot, not a promise against future host corrections. Exact profile/home/parent/key/owner and native process incarnation must match. Existing notify-mode/legacy jobs cannot be converted; omitted `completion_mode` preserves the previous start behavior. No new settings, injection permission or core changes are required. Updated Python tool schemas may require a fresh session; installation alone does not update an existing session's tools.
 
 ## Security and cost disclosures
 
@@ -106,6 +146,18 @@ Hermes builds that retired the bundled Tirith scanner no longer provide `tools.t
 - Install scanning can report CAUTION for fixed subprocess execution and the manual repair script. Admission/installation must inspect those warnings; the plugin does not disable the scanner.
 
 ## Development
+
+### First-time setup (0.6.0)
+
+After native installation/enablement, open **Settings → Plugins → 모델 및 라우팅 → 처음 사용하는 프로필 준비**. Eligible current profiles start selected. The user must explicitly run setup; viewing, refreshing, registration and future-profile discovery never install or save settings. Existing explicit OFF, saved backend choices (including `default`), managed/unsafe state and dormant paid continuation remain protected.
+
+Setup reuses native exact-profile admission/install/enable operations, then a one-shot `initial-setup-preview`/`apply` operation owning **only `delegation.backend = model-router`** for raw-absent selectors. It does not materialize optional backend blocks, copy models/credentials/fallbacks/timeouts, grant cross-profile access, or rewrite canonical settings. Other cards' drafts remain untouched and require an explicit state reload after a mutation. Newly added profiles are offered, never automatically provisioned.
+
+Automatic installation additionally requires the catalog repository, full SHA **and version** to match the source. Until a new release's catalog update is maintainer-merged/visible, new-profile automatic installation is truthfully unavailable; a public source release alone is not catalog admission. Differing/custom existing packages require native manual review. Normal native security/dependency/capability gates are retained. See `after-install.md`.
+
+The settings UI distinguishes primary Heavy/Light models from optional spare-model switching. Its native card saves to explicitly selected profiles, initially the loaded profile only. Normal saving remains one click; account-access confirmation applies only when permissions are expanded. Runtime settings are not changed merely by installing the UI update.
+
+For the two Windows real-CLI fixture tests, set `HERMES_TEST_CLI` to the absolute path of a genuine installed Hermes launcher when isolating `HOME`/`LOCALAPPDATA`. This is a test-only locator; native trust checks and all temporary-home write assertions remain unchanged. Tests without a real compatible launcher are explicitly skipped.
 
 Use an isolated test environment with the corresponding Hermes source/dependencies available. The full native integration suite is host-dependent; do not interpret a missing Hermes checkout as runtime success.
 
@@ -218,11 +270,11 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 
 설치 자체는 기존 모델·폴백 정책을 바꾸지 않습니다. schema 1은 읽을 수 있으며, 명시적으로 적용할 때 schema 2의 관리/승인 정보를 저장합니다. 자격 증명은 기존 Hermes 계층에서만 사용하고 UI·작업 증거에는 보관하지 않습니다. 원래 Hermes 인증 계층의 정상 OAuth 갱신은 별개입니다.
 
-## 라우팅 작업 표시
+## 과거 프로세스 작업 표시 (읽기 전용 호환)
 
 새 라우팅 작업은 Background에 **작업명 · Heavy/Light · 대상 모델**로 표시됩니다. 예: `서브 에이전트 작업: 게시 안전성 독립 검수 · Heavy · gpt-6-astra-900k`. 긴 작업 ID는 기본 이름 대신 상세 터미널 안내에 남깁니다. 작업을 클릭하면 용도, 요청한 모델·제공자, 프로필, 작업 폴더 이름과 ID를 확인할 수 있습니다. 상세 터미널의 모델명 뒤에는 작업 시작 시 선택된 Effort 설정을 괄호로 표시합니다(예: `gpt-6-luna-900k (max)`). 이 값은 실행에 전달한 설정이며 제공자가 내부적으로 정규화한 값이나 폴백 전환 후의 실측값을 뜻하지 않습니다. 기존 X 버튼은 실제 프로세스를 중지합니다.
 
-`coding_route(action="start", title="설정 UI 수정", ...)` 또는 CLI `route --title "설정 UI 수정"`으로 구체적인 작업명을 지정합니다. 1–96자의 **공개 표시용** 이름이므로 자격 정보·고객 자료·private 프롬프트를 넣지 마세요. 제목 없이 실행한 예전 호출도 한국어 용도 이름으로 표시됩니다. 요청 모델 표시는 관측된 실제 모델 증거가 아니며, 프로세스 종료가 검수 GO를 의미하지 않습니다. private 작업 로그와 프롬프트는 터미널 안내로 전달하지 않습니다.
+이전 버전에서는 `coding_route(action="start", title="설정 UI 수정", ...)` 또는 CLI `route --title "설정 UI 수정"`으로 작업명을 지정했습니다. 현재 이 시작 경로는 종료되었으며 새 작업은 네이티브 `delegate_task`를 사용합니다. 1–96자의 **공개 표시용** 이름이므로 자격 정보·고객 자료·private 프롬프트를 넣지 마세요. 제목 없이 실행한 예전 호출도 한국어 용도 이름으로 표시됩니다. 요청 모델 표시는 관측된 실제 모델 증거가 아니며, 프로세스 종료가 검수 GO를 의미하지 않습니다. private 작업 로그와 프롬프트는 터미널 안내로 전달하지 않습니다.
 
 Windows에서는 플러그인의 작업 실행기·에이전트 실행 단계와 timeout 정리 명령을 창 없이 실행합니다. 에이전트가 도구로 실행하는 외부 프로그램까지 모두 숨기는 기능은 아닙니다.
 

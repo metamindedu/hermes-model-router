@@ -1,3 +1,4 @@
+from legacy_router_engine import legacy_start
 """Effort is display-only launch metadata, not a model identity claim."""
 from types import SimpleNamespace
 
@@ -39,7 +40,7 @@ def test_router_forwards_selected_snapshot_effort_to_native_terminal(tmp_path, m
     router.runtime = RouteRuntime('parent', 'key', 'task', Registry(), lambda *a: True)
     work = tmp_path / 'work'
     work.mkdir()
-    result = router.start(purpose, 'PRIVATE_PROMPT_CANARY', work, title='Effort 표시 검증')
+    result = legacy_start(router, purpose, 'PRIVATE_PROMPT_CANARY', work, title='Effort 표시 검증')
     snapshot = _load(root / 'profiles/claire/plugin-data/model-router/jobs' / result['job_id'] / 'snapshot.json')
     selected = snapshot['model_provider_evidence']['requested'][result['route_class']]
     assert selected['reasoning'] == expected

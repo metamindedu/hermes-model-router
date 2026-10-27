@@ -14,9 +14,12 @@ test('late reload after gateway switch does not replace draft or unlock state',a
  const scope=fingerprint('local','old','ready')
  const names=['scopeKey','generationRef','setPageError','statusQuery','scopeFingerprint','host','selectedProfile','setPreview','setReviewed','setModelTargets','setRoutingProfiles','setDraft','setSelectedProfile','needsReloadRef','setNeedsReload','setApplyOutcome','applyPendingRef','invalidatePlan']
  const set=name=>()=>changes.push(name)
- const fn=new Function(...names,'refreshPendingRef','setupPendingRef','profilePreparationReloadBlocked','finishProfilePreparationReload',body+'; return reloadStatus;')
+ const fenceStart=source.indexOf('export function readNativeSaveFence')
+ const fenceCode=source.slice(fenceStart,source.indexOf('\nfunction writeNativeSaveFence',fenceStart)).replace('export ','')
+ const readFence=new Function('PREPARATION_ID_RE','PREPARATION_PROFILE_RE',fenceCode+'; return readNativeSaveFence;')(/^[a-f0-9]{64}$/, /^[a-z0-9][a-z0-9_-]{0,63}$/)
+ const fn=new Function(...names,'refreshPendingRef','setupPendingRef','profilePreparationReloadBlocked','finishProfilePreparationReload','readNativeSaveFence','pluginContext','statusDataRef','nativeRecoveryConfirmed',body+'; return reloadStatus;')
  const refreshPendingRef={current:false}
- const reload=fn(scope,{current:1},()=>{}, {refetch:()=>pending},fingerprint,host,'old',set('preview'),set('reviewed'),set('targets'),set('routes'),set('draft'),set('profile'),{current:true},set('unlock'),set('outcome'),{current:false},()=>{},refreshPendingRef,{current:false},()=>false,()=>true)
+ const reload=fn(scope,{current:1},()=>{}, {refetch:()=>pending},fingerprint,host,'old',set('preview'),set('reviewed'),set('targets'),set('routes'),set('draft'),set('profile'),{current:true},set('unlock'),set('outcome'),{current:false},()=>{},refreshPendingRef,{current:false},()=>false,()=>true,readFence,{storage:{get:()=>({})}},{current:{}},false)
  const running=reload();profile='new'
  complete({data:{profiles:[{name:'old',models:{main:'OLD'}}],current_profile:'old'}})
  await running

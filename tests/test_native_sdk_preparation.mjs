@@ -13,7 +13,7 @@ function plugin() {
   const imports = {}
   for (const m of pluginSource.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"][^'"]+['"]/g)) for (const name of m[1].split(',').map(x => x.trim()).filter(Boolean)) imports[name] = name
   const code = pluginSource.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '').replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '').replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-  return new Function(...Object.keys(imports), code + '\nreturn {runProfilePreparation,selectPreparationTargetRoute}')( ...Object.values(imports))
+  return new Function(...Object.keys(imports), code + '\nreturn {runProfilePreparation,selectPreparationTargetRoute,runInitialSetup}')( ...Object.values(imports))
 }
 function actualFunction(source, name) {
   const start = source.indexOf(`export async function ${name}<`)
@@ -55,7 +55,7 @@ for (const topology of ['primary', 'shared', 'isolated']) test(`actual native SD
   const snapshot = { readiness_context: { schema: 1, base_identity: id('a'), source_profile: 'source', release: { catalog_name: 'model-router', ref: 'b'.repeat(40), version: '0.4.8' } }, profiles: [{ name: 'source', readiness: readiness(true) }, { name: 'future', readiness: readiness() }] }
   const current = structuredClone(snapshot), writes = []
   const requestProfile = nativeTransport(topology, async (method, params, backendProfile) => {
-    if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: 'b'.repeat(40) } }
+    if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: 'b'.repeat(40), version: '0.4.8' } }
     if (method === 'cli.exec') return { code: 0, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(current) }
     assert.equal(method, 'plugins.manage')
     writes.push({ params, backendProfile })
@@ -70,4 +70,40 @@ for (const topology of ['primary', 'shared', 'isolated']) test(`actual native SD
   assert.equal(writes.length, 1)
   assert.equal(current.profiles[0].readiness.identity, snapshot.profiles[0].readiness.identity)
   assert.equal(api.selectPreparationTargetRoute([{ ...target, targetProfile: 'different-backend' }, source], source, 'future'), null)
+})
+
+for (const topology of ['primary', 'shared', 'isolated']) test(`actual SDK ${topology} initial enable and backend selection retain distinct owners`, { skip: !core && 'set HERMES_DESKTOP_SOURCE_ROOT' }, async () => {
+  const api = plugin(), source = { mode: 'local', connectionId: 'local-source', profile: 'source', targetProfile: 'source' }
+  const target = { ...source, profile: 'future', targetProfile: 'future' }
+  const complete = { schema: 1, action: 'complete', eligible: false, backend_unset: false, digest: id('a'), intent_digest: id('b'), reason_codes: [] }
+  const snapshot = { revision: 0, readiness_context: { schema: 1, base_identity: id('a'), source_profile: 'source', release: null }, profiles: [
+    { name: 'source', readiness: { ...readiness(true), version: '0.6.0' }, initial_setup: complete, native_delegation: { backend: 'model-router' } },
+    { name: 'future', readiness: { ...readiness(true), state: 'disabled', python: 'not_enabled', version: '0.6.0' }, initial_setup: { ...complete, action: 'enable', eligible: true, backend_unset: true, digest: id('c') }, native_delegation: { backend: 'default' } }
+  ] }
+  const current = structuredClone(snapshot), writes = []
+  const requestProfile = nativeTransport(topology, async (method, params, backendProfile) => {
+    if (method === 'plugins.manage') {
+      assert.equal(params.action, 'toggle'); assert.equal(params.profile, 'future'); assert.equal(backendProfile, 'future')
+      writes.push('enable-future'); current.profiles[1].readiness = { ...readiness(true), version: '0.6.0' }
+      current.profiles[1].initial_setup.action = 'select_backend'; current.profiles[1].initial_setup.digest = id('d')
+      return { ok: true }
+    }
+    assert.equal(method, 'cli.exec'); assert.equal(params.profile, 'source'); assert.equal(backendProfile, 'source')
+    const operation = params.argv[params.argv.indexOf('model-router')+1], body = JSON.parse(params.argv.at(-1))
+    let reply
+    if (operation === 'status') reply = structuredClone(current)
+    else if (operation === 'initial-setup-preview') {
+      assert.equal(body.updates[0].profile, 'future')
+      reply = { plan_id: 'a'.repeat(32), changes: [{ profile: 'future', field: 'delegation.backend', after: 'model-router' }] }
+    } else {
+      assert.equal(operation, 'apply'); writes.push('backend-future')
+      current.profiles[1].initial_setup = { ...complete }; current.profiles[1].native_delegation.backend = 'model-router'
+      reply = { status: 'applied', plan_id: body.plan_id, applied: [{ profile: 'future', key: 'delegation.backend' }], remaining: [] }
+    }
+    return { code: 0, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(reply) }
+  })
+  const values = new Map(), storage = { get: (key, fallback=null) => values.has(key) ? structuredClone(values.get(key)) : fallback, set: (key,value) => values.set(key,structuredClone(value)) }
+  const result = await api.runInitialSetup({ transport: { requestProfile, profileRoutes: async () => [source,target] }, snapshot, selected: ['future'],
+    scopeKey: 'owned', connectionId: 'local-source', activeProfile: 'source', storage, isCurrent: () => true })
+  assert.deepEqual(writes, ['enable-future','backend-future']); assert.equal(result.outcomes[0].state, 'complete')
 })

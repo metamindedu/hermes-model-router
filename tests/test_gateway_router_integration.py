@@ -1,3 +1,5 @@
+import hermes_bootstrap
+from legacy_router_engine import legacy_start
 """Native plugin dispatch -> real Router/adoption/observer, no model or network."""
 from contextvars import Context
 import importlib.util
@@ -77,13 +79,17 @@ def test_messaging_dispatch_real_router_observer(tmp_path, monkeypatch, spawn_fa
     monkeypatch.setattr(routing.subprocess, 'Popen', launch)
     registry = ToolRegistry()
     ctx = SimpleNamespace(register_cli_command=lambda *a: None, register_skill=lambda *a: None,
-        register_hook=lambda *a: None, register_tool=lambda **kw: registry.register(**kw))
+        register_delegation_provider=lambda *a: None, register_hook=lambda *a: None, register_tool=lambda **kw: registry.register(**kw))
     def turn():
         token = set_hermes_home_override(home)
         tokens = session_context.set_session_vars(platform='telegram', session_key='fixture-lane', profile='wallace')
         try:
             plugin.register(ctx)
-            result = json.loads(registry.dispatch('coding_route', {'action': 'start', 'purpose': 'mechanical', 'prompt': 'fixture only', 'cwd': str(tmp_path), 'timeout': 30}, task_id='fixture-owner', session_id='fixture-parent'))
+            runtime_module = importlib.import_module(name + '.model_router.runtime_tracking')
+            with runtime_module.route_session_context(session_id='fixture-parent', expected_profile='wallace'):
+                runtime = runtime_module.capture_runtime(task_id='fixture-owner', expected_profile='wallace')
+                result = legacy_start(routing.Router(service_module.Service(), runtime=runtime),
+                                      'mechanical', 'fixture only', str(tmp_path), 30)
             assert len(launches) == 1
             assert session_context.get_session_env('HERMES_SESSION_ID') == ''
             import os

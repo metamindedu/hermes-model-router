@@ -239,9 +239,9 @@ test('actual page renders three accessible minute fields and independently inher
   assert.deepEqual([delegate.props.value, light.props.value, heavy.props.value], [0, 60, 60])
   const copy = text(h.tree)
   for (const phrase of [
-    '전체 실행 시간 제한 (TOTAL)', '분 (minutes)', 'delegation.child_timeout_seconds',
-    '협조적 중단을 요청', '실행 프로세스를 정리', '새 작업은 시작할 때 현재 정책을 스냅샷',
-    '요청·도구별 제한과 반복 횟수 제한', '모델·라우팅·폴백 적용 대상과는 독립적', 'Light', 'Heavy'
+    '작업별 실행 시간 제한', '분 (minutes)', '다른 제한은 그대로 유지',
+    '중단을 요청하지만', '실제로 멈추기까지 시간이 걸릴', '작업을 시작할 때의 설정',
+    '응답 대기나 반복 횟수', '모델·라우팅·폴백 적용 대상과는 독립적', 'Light', 'Heavy'
   ]) assert.ok(copy.includes(phrase), `missing UI explanation: ${phrase}`)
 })
 
@@ -253,7 +253,7 @@ test('unsupported old-backend timeout DTO stays blank, disabled, and absent from
   assert.equal(h.byId('routed-light-total-minutes').props.value, '')
   assert.equal(h.byId('delegate-total-minutes').props.disabled, true)
   assert.equal(h.byId('routed-light-total-minutes').props.disabled, true)
-  assert.match(text(h.tree), /UNSUPPORTED/)
+  assert.match(text(h.tree), /시간 제한을 변경할 수 없습니다/)
   h.input('model-main-model', 'model-only-change')
   globalSave(h)
   await h.flush()
@@ -340,7 +340,7 @@ test('timeout revision replacement blocks overwrite until explicit refresh estab
   h.setData(next)
   h.render()
   assert.equal(h.byId('global-save').props.disabled, true)
-  assert.match(text(h.tree), /revision.*바뀌었습니다/)
+  assert.match(text(h.tree), /시간 제한 설정이 다른 곳에서 바뀌었습니다/)
   assert.equal(h.calls.length, 0)
 
   h.clickLabel('상태 새로고침')
@@ -380,7 +380,7 @@ test('immutable timeout save snapshot does not drift and incoming revision chang
   await h.flush()
   assert.deepEqual(h.calls[0].body, captured)
   assert.equal(h.calls.some(call => call.operation === 'apply'), false)
-  assert.match(text(h.tree), /revision.*바뀌었습니다/)
+  assert.match(text(h.tree), /시간 제한 설정이 다른 곳에서 바뀌었습니다/)
 })
 
 test('connection change during timeout validation cancels the old scope without carrying its draft forward', async () => {

@@ -109,9 +109,9 @@ def run_launcher(command, env, timeout=30):
         return completed
 
 
-def test_actual_cli_writes_only_isolated_home(tmp_path):
-    launcher = Path(os.environ.get("LOCALAPPDATA", "")) / "hermes/bin/hermes.exe"
-    if not launcher.is_file(): pytest.skip("Windows local Hermes CLI not installed")
+def test_actual_native_cli_dispatcher_writes_only_isolated_home(tmp_path):
+    import sys
+    command = [sys.executable, "-m", "hermes_cli.main"]
     root = make_home(tmp_path)
     other = root / "profiles/claire"; other.mkdir(parents=True)
     original_other = (root / "config.yaml").read_bytes()
@@ -123,10 +123,10 @@ def test_actual_cli_writes_only_isolated_home(tmp_path):
     # the real Hermes runtime and fail on its own missing dependencies.
     for inherited in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
         env.pop(inherited, None)
-    check = run_launcher([str(launcher), "--profile", "default", "config", "path"], env=env, timeout=30)
+    env["PYTHONPATH"] = os.pathsep.join(Service._loaded_cli_paths())
+    check = run_launcher([*command, "--profile", "default", "config", "path"], env=env, timeout=30)
     assert check.returncode == 0 and str(root).lower() in check.stdout.lower()
     service = Service(root)
-    service._cli_path = lambda: str(launcher)
     service.initialize(["default"])
     body = payload(service); body["model_targets"] = ["default"]
     body["models"]["main"]["model"] = "isolated-new-heavy"

@@ -135,7 +135,7 @@ def test_default_local_native_tool_dispatch_reaches_router_once(tmp_path, monkey
             assert runtime is not None
             self.runtime = runtime
             assert fast_snapshot is None
-        def start(self, *args, **kwargs):
+        def join(self, *args, **kwargs):
             observed.append((self.runtime.parent_session_id, self.runtime.session_key,
                 self.runtime.task_id, session_context.get_session_env('HERMES_SESSION_PROFILE')))
             return {'status': 'fixture-admitted'}
@@ -145,7 +145,7 @@ def test_default_local_native_tool_dispatch_reaches_router_once(tmp_path, monkey
         SimpleNamespace(adopt_local=lambda *a, **k: None))
     registry = ToolRegistry()
     ctx = SimpleNamespace(register_cli_command=lambda *a: None, register_skill=lambda *a: None,
-        register_hook=lambda *a: None, register_tool=lambda **kw: registry.register(**kw))
+        register_delegation_provider=lambda *a: None, register_hook=lambda *a: None, register_tool=lambda **kw: registry.register(**kw))
     def turn():
         home_token = set_hermes_home_override(tmp_path)
         tokens = session_context.set_session_vars(platform='local', profile='',
@@ -153,7 +153,7 @@ def test_default_local_native_tool_dispatch_reaches_router_once(tmp_path, monkey
         try:
             plugin.register(ctx)
             response = registry.dispatch('coding_route',
-                {'action': 'start', 'purpose': 'independent-review', 'prompt': 'fixture', 'cwd': str(repo)},
+                {'action': 'join', 'job_id': 'fixture-job'},
                 task_id='fixture-task', session_id='fixture-parent')
             assert isinstance(response, str)
             result = json.loads(response)

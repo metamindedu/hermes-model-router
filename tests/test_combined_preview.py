@@ -185,7 +185,8 @@ def test_combined_apply_through_real_hermes_cli_in_isolated_home(tmp_path, monke
     from pathlib import Path
     import yaml
     from test_integration import make_home, payload
-    launcher = Path(os.environ.get("LOCALAPPDATA", "")) / "hermes/bin/hermes.exe"
+    explicit_cli = os.environ.get("HERMES_TEST_CLI")
+    launcher = Path(explicit_cli) if explicit_cli else Path(os.environ.get("LOCALAPPDATA", "")) / "hermes/bin/hermes.exe"
     if not launcher.is_file():
         pytest.skip("Windows local Hermes CLI not installed")
     for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):

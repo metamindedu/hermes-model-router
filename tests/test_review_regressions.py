@@ -35,8 +35,8 @@ def test_main_change_preserves_approved_inherited_role(tmp_path, role):
 
 
 def test_native_plugin_cli_transport_in_isolated_home(tmp_path):
-    launcher = Path(os.environ.get('LOCALAPPDATA','')) / 'hermes/bin/hermes.exe'
-    if not launcher.is_file(): pytest.skip('local Windows Hermes launcher unavailable')
+    import sys
+    command = [sys.executable, '-m', 'hermes_cli.main']
     root = make_home(tmp_path)
     package = Path(__file__).resolve().parents[1]
     target = root / 'plugins/model-router'
@@ -53,7 +53,8 @@ def test_native_plugin_cli_transport_in_isolated_home(tmp_path):
         env.pop(inherited,None)
     # This is a cold native CLI bootstrap budget, not a routed-job limit.
     # Managed Windows startup can exceed 40s before this plugin command runs.
-    result=run_launcher([str(launcher),'--profile','default','model-router','status'],env=env,timeout=120)
+    env['PYTHONPATH'] = os.pathsep.join(Service._loaded_cli_paths())
+    result=run_launcher([*command,'--profile','default','model-router','status'],env=env,timeout=120)
     assert result.returncode==0,result.stderr
     line=next(v for v in result.stdout.splitlines() if v.startswith('MODEL_ROUTER_JSON:'))
     response=json.loads(line.split(':',1)[1])

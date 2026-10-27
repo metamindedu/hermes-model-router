@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import effective_config, fallback_policy, installation, timeouts
+from . import effective_config, fallback_policy, installation, timeouts, native_service
 
 SCHEMA = 2
 STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
@@ -993,6 +993,21 @@ class Service:
                 self._store_apply({"status": "initialized", "revision": revision, "profiles": applied, "finished_at": _now()})
             return self.status()
 
+    def _native_delegation_code_signature(self, profile: str) -> str | None:
+        from .native_service import _code_signature
+        return _code_signature(self, profile)
+
+    def _read_native_delegation_snapshot(self, profile: str):
+        from .native_service import read_snapshot
+        return read_snapshot(self, profile)
+
+    def delegation_preview(self, body: dict) -> dict[str, Any]:
+        from .native_service import preview
+        return preview(self, body)
+
+    def initial_setup_preview(self, body: dict) -> dict[str, Any]:
+        return native_service.initial_setup_preview(self, body)
+
     def status(self) -> dict[str, Any]:
         discovered = self._discover_profiles()
         stored = self._load_store()
@@ -1038,6 +1053,8 @@ class Service:
                 "drift": drift,
                 "fallbacks": self._fallback_dto(name, view_entry),
                 "readiness": installation.profile_readiness(self, name, stored),
+                "native_delegation": native_service.status(self, name),
+                "initial_setup": native_service.initial_setup_status(self, name),
                 "timeouts": {
                     **timeouts.timeout_status(
                         self._profile_home(name),
@@ -1054,6 +1071,17 @@ class Service:
             "fallback_capabilities": dict(fallback_policy.CAPABILITIES),
             "readiness_context": installation.readiness_context(self),
         }
+
+    def native_route_config(self, profile: str) -> dict[str, Any]:
+        """Resolve purpose routes without silently adopting externally changed models."""
+        config = self.routing_config(profile)
+        stored = self._load_store()
+        if (stored["revision"] if stored else 0) != config["revision"]:
+            raise RevisionConflict("routing settings changed during native dispatch")
+        entry = stored["profiles"].get(profile) if stored else None
+        if entry is not None and entry["models"] != self._actual_models(profile):
+            raise RevisionConflict("native purpose route denied because the profile has model drift")
+        return config
 
     def routing_config(self, profile: str) -> dict[str, Any]:
         profile = self._require_profile(profile)
@@ -1747,6 +1775,10 @@ class Service:
             revision = current["revision"] if current else 0
             if revision != plan["revision"]:
                 raise RevisionConflict("settings revision changed; preview again")
+            if plan.get("kind") == "native_delegation":
+                return native_service.apply_consumed(self, plan, plan_id)
+            if plan.get("kind") == "initial_setup":
+                return native_service.initial_setup_apply_consumed(self, plan, plan_id)
             for item in plan.get("timeout_writes", []):
                 self._check_timeout_write(item)
             for profile in set(plan["snapshots"]) | set(plan.get("validation_profiles", [])):

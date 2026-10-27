@@ -234,11 +234,17 @@ def _capture(home: Path, root: Path, store_path: Path) -> _Capture:
     for name, (path, limit, base) in specifications.items():
         files[name] = _file(path, base=base, limit=limit)
     store = _file(store_path, base=root, limit=MAX_STORE_BYTES)
+    # Creating our own lock/plan directory is not a settings change. Keep the
+    # absent store's lexical destination stable, but retain all unsafe/error
+    # observations and the full signature/hash once a settings file exists.
+    store_identity = store.signature
+    if not store.present and store.error is None:
+        store_identity = (os.path.normcase(str(Path(store_path).absolute())), 'absent_store')
     signature = (
         home_observation.signature, config.signature, plugins_dir.signature,
         package_dir.signature, code_dir.signature,
         tuple((name, observation.signature, observation.error) for name, observation in sorted(files.items())),
-        store.signature, store.error,
+        store_identity, store.error,
     )
     return _Capture(
         home_ok=home_observation.present and home_observation.error is None,

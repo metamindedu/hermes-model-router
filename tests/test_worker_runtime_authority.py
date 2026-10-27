@@ -1,3 +1,4 @@
+from legacy_router_engine import legacy_start
 """Deterministic PM authority checks; no model or real worker execution."""
 import importlib.util
 import os
@@ -111,7 +112,7 @@ def test_bad_authority_never_spawns_or_creates_job(adopted, monkeypatch, corrupt
         monkeypatch.setattr(type(f.environment), 'is_junction',
             lambda p: p == f.environment or original(p), raising=False)
     if corrupt == 'cwd_workspace':
-        with pytest.raises(routing.RoutingError): f.router.start('mechanical', 'fixture', f.workspace)
+        with pytest.raises(routing.RoutingError): legacy_start(f.router, 'mechanical', 'fixture', f.workspace)
     else:
         with pytest.raises(routing.RoutingError): _start(f.router, f.tmp)
     assert f.launches == [] and not list(f.home.rglob('snapshot.json'))
@@ -173,7 +174,7 @@ def test_adopted_heavy_default_and_explicit_zero_keep_the_same_budgets(adopted):
     work = f.tmp / 'work'
     work.mkdir()
     for timeout, expected in ((None, 10800), (0, 0)):
-        result = f.router.start('independent-review', 'fixture', work, timeout=timeout)
+        result = legacy_start(f.router, 'independent-review', 'fixture', work, timeout=timeout)
         command = f.launches[-1][0]
         assert float(command[command.index('--timeout') + 1]) == expected
         snapshot = next(f.home.rglob(result['job_id'] + '/snapshot.json'))

@@ -1,3 +1,4 @@
+from legacy_router_engine import legacy_start
 """Readable task identity without forged delegates or private log forwarding."""
 from types import SimpleNamespace
 import pytest
@@ -32,14 +33,14 @@ def test_invalid_title_is_rejected_before_launch(tmp_path, monkeypatch, title):
     router, service, root, calls = _make_router(tmp_path, monkeypatch)
     work = tmp_path/'work'; work.mkdir()
     with pytest.raises(ValueError):
-        router.start('implementation', 'SECRET_PROMPT_CANARY', work, title=title)
+        legacy_start(router, 'implementation', 'SECRET_PROMPT_CANARY', work, title=title)
     assert calls == []
 
 
 def test_title_snapshot_only_not_prompt_inference(tmp_path, monkeypatch):
     router, service, root, calls = _make_router(tmp_path, monkeypatch)
     work = tmp_path/'work'; work.mkdir()
-    out = router.start('implementation', 'SECRET_PROMPT_CANARY', work, title='설정 UI 수정')
+    out = legacy_start(router, 'implementation', 'SECRET_PROMPT_CANARY', work, title='설정 UI 수정')
     snapshot = _load(root/'profiles/claire/plugin-data/model-router/jobs'/out['job_id']/'snapshot.json')
     assert snapshot['title'] == '설정 UI 수정'
     assert out['title'] == '설정 UI 수정'
@@ -67,7 +68,7 @@ def test_maximum_title_and_seed_failure_preserve_actual_adoption(tmp_path, monke
     runtime = RouteRuntime('parent', 'key', 'task', Registry(), fail_emit)
     router.runtime = runtime
     work = tmp_path/'work'; work.mkdir()
-    result = router.start('mechanical', 'SECRET_PROMPT_CANARY', work, title='테스트')
+    result = legacy_start(router, 'mechanical', 'SECRET_PROMPT_CANARY', work, title='테스트')
     assert len(calls) == len(adopted) == 1
     assert result['status'] == 'running'
     assert result['process_id'] == 'proc_adopted'

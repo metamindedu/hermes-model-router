@@ -1,6 +1,6 @@
 {
   "name": "model-router",
   "title": "모델 및 라우팅",
-  "description": "프로필별 모델 설정 및 코딩 라우팅 관리",
+  "description": "대화와 작업 모델, 예비 모델, 프로필별 일괄 설정",
   "api": "plugin_api.py"
 }

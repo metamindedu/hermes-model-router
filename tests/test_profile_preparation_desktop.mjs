@@ -32,7 +32,7 @@ function harness(options = {}) {
       assert.equal(actualRoute.profile, params.profile)
       assert.equal(actualRoute.targetProfile, params.profile)
     } else assert.deepEqual(actualRoute, route)
-    if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: options.movedPin ? 'c'.repeat(40) : snapshot.readiness_context.release.ref, subdir: '' } }
+    if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: options.movedPin ? 'c'.repeat(40) : snapshot.readiness_context.release.ref, version: snapshot.readiness_context.release.version, subdir: '' } }
     if (method === 'cli.exec') {
       assert.deepEqual(params.argv, ['--profile', 'default', 'model-router', 'status', '--body', '{}'])
       if (options.foreignBase) current.readiness_context.base_identity = id('d')

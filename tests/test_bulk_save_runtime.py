@@ -14,7 +14,8 @@ from test_combined_preview import scopes, confirmation
 
 
 def test_real_eleven_profile_bulk_save_finishes_within_backend_budget(tmp_path, monkeypatch):
-    launcher = Path(os.environ.get("LOCALAPPDATA", "")) / "hermes/bin/hermes.exe"
+    explicit_cli = os.environ.get("HERMES_TEST_CLI")
+    launcher = Path(explicit_cli) if explicit_cli else Path(os.environ.get("LOCALAPPDATA", "")) / "hermes/bin/hermes.exe"
     if not launcher.is_file():
         pytest.skip("local Windows Hermes CLI absent")
     for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):

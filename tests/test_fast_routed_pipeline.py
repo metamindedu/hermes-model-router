@@ -1,4 +1,5 @@
 from __future__ import annotations
+from legacy_router_engine import legacy_start
 
 import argparse
 import importlib
@@ -117,7 +118,7 @@ def test_routed_snapshot_schema_to_registered_native_request_middleware(
     router = routing.Router(service, runtime=runtime, fast_snapshot=fast_snapshot)
     cwd = tmp_path / "workspace"
     cwd.mkdir()
-    started = router.start(
+    started = legacy_start(router,
         "implementation", "Implement the bounded fixture change.", cwd,
         timeout=60, title="Fast routed pipeline fixture",
     )

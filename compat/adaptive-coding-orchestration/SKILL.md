@@ -14,6 +14,8 @@ This compatibility entry covers coding and complex non-coding judgment (ambiguou
 2. Only for justified delegation or required Heavy review, query `coding_route(action="config")` (discover the tool if deferred).
 3. Follow the bundled policy. Model IDs, Heavy/Light links, fallback consent and routing-enabled profiles come from the plugin, not this file or a BAT.
 
+NEW work uses the native `delegate_task` with an explicitly selected `model-router` purpose backend or `model-router-profiles` allowlist backend. The live tool schema must expose the relevant task selector; config alone does not prove activation. `coding_route` is read-only role lookup and historical status/join access; stale start is retired. Historical join never acknowledges native completion. Profile routing is not automatically Heavy, and legacy rerun consent must never become native continuation consent.
+
 If the profile's routing is disabled or the plugin is unavailable, do not invoke legacy scripts or change global settings to bypass it. Continue only safe local work; report any required Heavy review unmet. Plugin Python tools may require a new session after activation.
 
 High-risk semantic final review and explicit independent final review require Heavy; Light preliminary review is never a substitute. An independent review is a fresh child, not Heavy Main's own opinion. Native delegate_task does not upgrade its model because its prompt says "review".

@@ -19,8 +19,12 @@ const routing = {
   fallback: { enabled: false, heavy: null, light: null }
 }
 const fixture = () => ({ revision: 7, current_profile: 'claire', recent_apply: null,
+  readiness_context: { schema: 1, base_identity: 'd'.repeat(64), source_profile: 'claire', release: null },
   profiles: ['default', 'claire', 'other'].map(name => ({ name, models: structuredClone(models),
-    actual_models: structuredClone(models), routing: { ...structuredClone(routing), enabled: name === 'claire' }, drift: [] })) })
+    actual_models: structuredClone(models), routing: { ...structuredClone(routing), enabled: name === 'claire' }, drift: [],
+    native_delegation: { schema: 1, supported: true, editable: true, backend: 'default', digest: 'a'.repeat(64),
+      policy: { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } },
+      profile_routes: { profiles: [], default: null }, warnings: [] } })) })
 function* walk(node) {
   if (Array.isArray(node)) { for (const item of node) yield* walk(item); return }
   if (!node || typeof node !== 'object') return
@@ -33,11 +37,12 @@ function text(node) {
   return node?.props ? text(node.props.children) : ''
 }
 function harness(options = {}) {
-  const pluginContext = { storage: options.storage || null }
-  let data = fixture(), cursor = 0, dirty = false, tree
+  const pluginContext = { storage: options.storage || setupStorage() }
+  let data = options.data ? structuredClone(options.data) : fixture(), cursor = 0, dirty = false, tree
   const hooks = [], effects = [], calls = [], cleanups = new Map()
   const state = Object.fromEntries(Object.entries({ profile: 'claire', connectionId: 'local', gateway: 'open' })
     .map(([key, value]) => [key, { value, get() { return this.value } }]))
+  let statusResponder = () => structuredClone(data)
   let responder = operation => operation === 'preview'
     ? { plan_id: 'test-plan', changes: [{ profile: 'claire', field: 'models.main', before: 'before', after: 'after' }], warnings: [] }
     : { status: 'applied', revision: 8 }
@@ -45,7 +50,7 @@ function harness(options = {}) {
     const index = args.argv.indexOf('model-router'), operation = args.argv[index + 1]
     const body = JSON.parse(args.argv.at(-1))
     calls.push({ method, operation, body, profile: args.profile })
-    const result = await responder(operation, body)
+    const result = await (operation === 'status' ? statusResponder(body) : responder(operation, body))
     return { code: 0, output: `MODEL_ROUTER_JSON:${JSON.stringify(result)}\n` }
   } }
   const useState = initial => {
@@ -109,9 +114,10 @@ function harness(options = {}) {
   render()
   return { calls, state, host, render, byId, button, click, clickLabel, selected, selectProfile, flush,
     unmount() { for (const cleanup of cleanups.values()) cleanup(); cleanups.clear() },
-    setResponder(fn) { responder = fn }, setRefetcher(fn) { refetcher = fn }, setData(next) { data = next }, data: () => data,
+    setResponder(fn) { responder = fn }, setStatusResponder(fn) { statusResponder = fn }, setRefetcher(fn) { refetcher = fn }, setData(next) { data = next }, data: () => data,
     check(id, value) { byId(id).props.onCheckedChange(value); render() },
-    input(id, value) { byId(id).props.onChange({ target: { value } }); render() } }
+    input(id, value) { byId(id).props.onChange({ target: { value } }); render() },
+    select(id, value) { find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === id)).props.onValueChange(value); render() } }
 }
 
 const setupReadiness = (state = 'missing') => ({ schema: 1, state, files: state === 'missing' ? 'missing' : 'complete', python: state === 'ready' ? 'enabled' : 'not_enabled', base_supported: state === 'ready', split_supported: state === 'ready', explicit_opt_out: false, managed_selection: false, version: state === 'ready' ? '0.4.8' : null, identity: (state === 'ready' ? '2' : '1').repeat(64), reason_codes: state === 'missing' ? ['package_missing'] : [] })
@@ -127,7 +133,7 @@ test('readiness-only refresh preserves dirty model/route drafts and manual or em
   h.input('heavy-custom-model', 'keep-my-unsaved-heavy')
   h.click('model-target-none'); h.check('model-target-other', true)
   h.click('routing-target-none')
-  h.setResponder(operation => { assert.equal(operation, 'status'); return setupFixture() })
+  h.setStatusResponder(() => setupFixture())
   h.click('prepare-refresh'); await h.flush()
   assert.equal(h.byId('model-main-model').props.value, 'keep-my-unsaved-model')
   assert.equal(h.byId('heavy-custom-model').props.value, 'keep-my-unsaved-heavy')
@@ -143,7 +149,7 @@ test('readiness refresh synchronously locks a retained settings-save callback un
   const h = harness(); h.input('model-main-model', 'retain-draft')
   const staleSave = h.byId('global-save').props.onClick
   let resolveStatus
-  h.setResponder(() => new Promise(resolve => { resolveStatus = resolve }))
+  h.setStatusResponder(() => new Promise(resolve => { resolveStatus = resolve }))
   h.click('prepare-refresh'); staleSave(); h.render()
   assert.equal(h.byId('global-save').props.disabled, true)
   assert.deepEqual(h.calls.map(call => call.operation), ['status'])
@@ -166,7 +172,7 @@ test('real preparation controls make one explicit native install and preserve di
       assert.equal(actualRoute.profile, params.profile)
       assert.equal(actualRoute.targetProfile, params.profile)
     } else assert.deepEqual(actualRoute, route)
-    if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: 'b'.repeat(40), subdir: '' } }
+    if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: 'b'.repeat(40), version: '0.4.8', subdir: '' } }
     if (method === 'cli.exec') return { code: 0, output: `MODEL_ROUTER_JSON:${JSON.stringify(nativeView)}\n` }
     assert.equal(method, 'plugins.manage'); writes.push(params)
     nativeView.profiles.find(row => row.name === 'future').readiness = setupReadiness('ready')
@@ -201,7 +207,7 @@ test('unmount stops the queue and a remounted page stays locked until owner-scop
   let finishInstall
   h.setData(snapshot);h.render();h.host.profileRoutes=async()=>[route,...['future','second-future'].map(name=>({...route,primary:undefined,profile:name,targetProfile:name}))]
   h.host.requestProfile=async(_route,method,params)=>{
-    if(method==='plugins.catalog.lookup') return {status:'found',entry:{name:'model-router',repo:'https://github.com/metamindedu/hermes-model-router',sha:'b'.repeat(40),subdir:''}}
+    if(method==='plugins.catalog.lookup') return {status:'found',entry:{name:'model-router',repo:'https://github.com/metamindedu/hermes-model-router',sha:'b'.repeat(40),version:'0.4.8',subdir:''}}
     if(method==='cli.exec') return {code:0,output:'MODEL_ROUTER_JSON:'+JSON.stringify(nativeView)}
     assert.equal(method,'plugins.manage');writes.push(params)
     return new Promise(resolve=>{finishInstall=()=>{nativeView.profiles.find(row=>row.name===params.profile).readiness=setupReadiness('ready');resolve({ok:true})}})
@@ -232,7 +238,7 @@ for (const phase of ['routes', 'initial-status', 'final-status']) {
       return Promise.resolve(routes)
     }
     h.host.requestProfile = async (_route, method, params) => {
-      if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: 'b'.repeat(40), subdir: '' } }
+      if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: 'b'.repeat(40), version: '0.4.8', subdir: '' } }
       if (method === 'cli.exec') {
         reads++
         if ((phase === 'initial-status' && reads === 1) || (phase === 'final-status' && reads === 2)) return new Promise(resolve => { release = () => resolve({ code: 0, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(snapshot) }) })
@@ -529,3 +535,459 @@ test('fresh connection/profile scope starts all-selected without leaking previou
   assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
   assert.deepEqual(h.selected('routing-profile-'), ['claire'])
 })
+
+test('native backend selection is draft-only; explicit save uses its own frozen scope', async () => {
+  const h = harness()
+  h.select('native-delegation-backend', 'model-router')
+  assert.deepEqual(h.calls, [])
+  h.input('model-main-model', 'unrelated-unsaved-model')
+  h.setResponder(operation => operation === 'delegation-preview'
+    ? { plan_id: 'native-plan', changes: [{ profile: 'claire', field: 'delegation.backend' }], warnings: [] }
+    : { status: 'applied', revision: 7 })
+  h.click('native-delegation-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
+  const body = h.calls[0].body
+  assert.deepEqual(Object.keys(body).sort(), ['expected_revision', 'updates'])
+  assert.equal(body.updates.length, 1)
+  assert.equal(body.updates[0].profile, 'claire')
+  assert.equal(body.updates[0].backend, 'model-router')
+  assert.deepEqual(body.updates[0].policy.heavy, { mode: 'off', chain: [] })
+  assert.equal(JSON.stringify(body).includes('unrelated-unsaved-model'), false)
+})
+
+test('profile execution grants start empty and do not follow model-copy targets', async () => {
+  const h = harness()
+  h.select('native-delegation-backend', 'model-router-profiles')
+  assert.deepEqual(h.selected('native-profile-'), [])
+  h.check('native-profile-other', true)
+  h.input('native-profile-description-other', 'Read-only evidence collection')
+  h.select('native-profile-default', 'other')
+  h.check('native-profile-access-consent', true)
+  h.setResponder(operation => operation === 'delegation-preview'
+    ? { plan_id: 'native-plan', changes: [{ profile: 'claire', field: 'delegation.backends.model-router-profiles' }], warnings: [] }
+    : { status: 'applied', revision: 7 })
+  h.click('native-delegation-save'); await h.flush()
+  const update = h.calls[0].body.updates[0]
+  assert.deepEqual(update.profile_routes, { profiles: [{ name: 'other', description: 'Read-only evidence collection' }], default: 'other' })
+  assert.equal(update.allow_profile_access, true)
+  assert.equal(update.profile, 'claire')
+})
+
+test('native settings do not leak into model-only or whole-page saves', async () => {
+  for (const id of ['models-save', 'global-save']) {
+    const h = harness()
+    h.select('native-delegation-backend', 'model-router-profiles')
+    h.check('native-profile-other', true)
+    h.click(id); await h.flush()
+    assert.equal(h.calls[0].operation, 'preview')
+    assert.equal(JSON.stringify(h.calls[0].body).includes('model-router-profiles'), false)
+    assert.equal(Object.hasOwn(h.calls[0].body, 'updates'), false)
+  }
+})
+
+test('native save never retries an ambiguous write and shares the global save lock', async () => {
+  const h = harness()
+  h.select('native-delegation-backend', 'model-router')
+  let resolvePlan
+  h.setResponder(operation => {
+    if (operation === 'apply') throw new Error('write outcome unknown')
+    return new Promise(resolve => { resolvePlan = resolve })
+  })
+  const staleSave = h.byId('native-delegation-save').props.onClick
+  h.click('native-delegation-save'); staleSave(); h.render()
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.byId('global-save').props.disabled, true)
+  resolvePlan({ plan_id: 'native-plan', changes: [], warnings: [] }); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+})
+
+test('changing origin profile while native preview is pending never applies a stale plan', async () => {
+  const h = harness()
+  h.select('native-delegation-backend', 'model-router')
+  let resolvePlan
+  h.setResponder(() => new Promise(resolve => { resolvePlan = resolve }))
+  h.click('native-delegation-save')
+  h.state.connectionId.value = 'different-origin'; h.render()
+  resolvePlan({ plan_id: 'stale-native-plan', changes: [], warnings: [] }); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview'])
+})
+
+test('native draft never adopts a newer query digest with an unchanged canonical revision', () => {
+  const h = harness()
+  h.select('native-delegation-backend', 'model-router')
+  const retained = h.byId('native-delegation-save').props.onClick
+  const newer = structuredClone(h.data())
+  newer.profiles.find(row => row.name === 'claire').native_delegation.digest = 'b'.repeat(64)
+  h.setData(newer); h.render()
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  retained(); h.render()
+  assert.deepEqual(h.calls, [], 'a retained handler must not dispatch against a changed native baseline')
+})
+
+const nativeBatchFixture = () => {
+  const data = fixture()
+  data.profiles.forEach((row, index) => {
+    row.routing.enabled = true
+    row.native_delegation.digest = ['a', 'b', 'c'][index].repeat(64)
+  })
+  return data
+}
+const nativeReply = operation => operation === 'delegation-preview'
+  ? { plan_id: 'native-batch-plan', changes: [], warnings: [] }
+  : { status: 'applied', revision: 7 }
+
+test('consumer native card separates configured primary models from optional spare switching', () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.select('native-delegation-backend', 'model-router')
+  assert.equal(text(h.byId('native-heavy-primary-model')), 'independent-heavy')
+  assert.equal(text(h.byId('native-light-primary-model')), models.delegation.model)
+  assert.match(text(h.byId('native-heavy-fallback-explanation')), /기본 모델은 그대로 사용/)
+  const copy = text(h.byId('native-delegation-settings'))
+  assert.match(copy, /다른 모델로 전환하지 않음/)
+  assert.doesNotMatch(copy, /delegate_task|purpose|백엔드|도구 재구성|revision|CAS|SOUL|자식 대화/)
+  h.input('model-delegation-model', 'unrelated-unsaved-light')
+  assert.equal(text(h.byId('native-light-primary-model')), models.delegation.model)
+})
+
+test('native targets start with the loaded profile and are independent of other target lists', () => {
+  const h = harness({ data: nativeBatchFixture() })
+  assert.deepEqual(h.selected('native-target-'), ['claire'])
+  h.click('model-target-none'); h.click('routing-target-none')
+  assert.deepEqual(h.selected('native-target-'), ['claire'])
+  h.click('native-target-all')
+  assert.deepEqual(h.selected('native-target-'), ['claire', 'default', 'other'])
+  assert.deepEqual(h.selected('model-target-'), [])
+  assert.deepEqual(h.selected('routing-target-'), [])
+  assert.deepEqual(h.calls, [])
+})
+
+test('native bulk save carries every target own frozen digest and no unrelated model/time payload', async () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.select('native-delegation-backend', 'model-router')
+  h.click('native-target-all')
+  h.select('native-heavy-fallback-mode', 'custom')
+  h.input('native-heavy-provider-0', 'spare-service')
+  h.input('native-heavy-model-0', 'spare/model')
+  h.input('model-main-model', 'keep-unsaved-main')
+  assert.match(text(h.byId('native-save-summary')), /default.*claire.*other/)
+  assert.match(text(h.byId('native-delegation-settings')), /추가 비용|비용이 늘/)
+  h.setResponder(nativeReply)
+  h.click('native-delegation-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
+  const updates = h.calls[0].body.updates
+  assert.deepEqual(updates.map(row => row.profile), ['default', 'claire', 'other'])
+  assert.deepEqual(updates.map(row => row.expected_digest), ['a', 'b', 'c'].map(c => c.repeat(64)))
+  for (const update of updates) {
+    assert.deepEqual(update.policy.heavy, { mode: 'custom', chain: [{ provider: 'spare-service', model: 'spare/model' }] })
+    assert.equal(update.allow_additional_cost, true)
+    assert.equal(update.allow_profile_access, false)
+  }
+  assert.equal(JSON.stringify(h.calls[0].body).includes('keep-unsaved-main'), false)
+  assert.equal(Object.hasOwn(h.calls[0].body, 'timeout_updates'), false)
+  assert.equal(h.byId('model-main-model').props.value, 'keep-unsaved-main')
+})
+
+test('native empty/subset selection survives source changes and explicit status refresh without widening', async () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.click('native-target-none')
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  h.selectProfile('default')
+  assert.deepEqual(h.selected('native-target-'), [])
+  h.check('native-target-other', true)
+  h.selectProfile('claire')
+  assert.deepEqual(h.selected('native-target-'), ['other'])
+  h.clickLabel('상태 새로고침'); await h.flush()
+  assert.deepEqual(h.selected('native-target-'), ['other'])
+  const newData = structuredClone(h.data())
+  newData.profiles.push({ ...structuredClone(newData.profiles[0]), name: 'new-profile' })
+  h.setData(newData); h.render()
+  assert.deepEqual(h.selected('native-target-'), ['other'])
+})
+
+test('native source without manual targets follows the explicitly loaded profile only', () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.selectProfile('default')
+  assert.deepEqual(h.selected('native-target-'), ['default'])
+  h.selectProfile('other')
+  assert.deepEqual(h.selected('native-target-'), ['other'])
+})
+
+test('native role save preserves each target hidden profile access rather than copying source allowlist', async () => {
+  const data = nativeBatchFixture()
+  data.profiles[2].native_delegation.profile_routes = { profiles: [{ name: 'default', description: 'retain account access' }], default: 'default' }
+  const h = harness({ data })
+  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  h.setResponder(nativeReply); h.click('native-delegation-save'); await h.flush()
+  const other = h.calls[0].body.updates.find(row => row.profile === 'other')
+  assert.deepEqual(other.profile_routes, data.profiles[2].native_delegation.profile_routes)
+  assert.equal(other.allow_profile_access, false)
+})
+
+test('native profile-mode bulk save preserves each target hidden spare policy', async () => {
+  const data = nativeBatchFixture()
+  data.profiles[2].native_delegation.policy.light = { mode: 'custom', chain: [{ provider: 'existing-service', model: 'existing-spare' }] }
+  const h = harness({ data })
+  h.select('native-delegation-backend', 'model-router-profiles')
+  h.click('native-target-all')
+  h.check('native-profile-other', true)
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  h.check('native-profile-access-consent', true)
+  h.setResponder(nativeReply); h.click('native-delegation-save'); await h.flush()
+  assert.equal(h.calls[0].body.updates.length, 3)
+  const other = h.calls[0].body.updates.find(row => row.profile === 'other')
+  assert.deepEqual(other.policy, data.profiles[2].native_delegation.policy)
+  assert.equal(other.allow_profile_access, true)
+})
+
+test('expanding native save targets resets account-access confirmation', () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.select('native-delegation-backend', 'model-router-profiles')
+  h.check('native-profile-other', true); h.check('native-profile-access-consent', true)
+  h.click('native-target-all')
+  assert.equal(h.byId('native-profile-access-consent').props.checked, false)
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+})
+
+test('native non-source stale digest blocks save and retained callbacks without silently rebasing', () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  const save = h.byId('native-delegation-save').props.onClick
+  const next = structuredClone(h.data())
+  next.profiles[0].native_delegation.digest = 'd'.repeat(64)
+  h.setData(next); h.render()
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  save(); h.render()
+  assert.deepEqual(h.calls, [])
+  h.check('native-target-default', false)
+  assert.equal(h.byId('native-delegation-save').props.disabled, false)
+})
+
+test('native target changes during preview prevent apply even when global revision is unchanged', async () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  let release
+  h.setResponder(() => new Promise(resolve => { release = resolve }))
+  h.click('native-delegation-save')
+  const next = structuredClone(h.data()); next.profiles[2].native_delegation.digest = 'd'.repeat(64)
+  h.setData(next); h.render()
+  release({ plan_id: 'stale-target-plan', changes: [], warnings: [] }); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview'])
+})
+
+test('native disappeared or newly uneditable selected target blocks the complete batch', () => {
+  for (const change of ['remove', 'readonly']) {
+    const h = harness({ data: nativeBatchFixture() })
+    h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+    const next = structuredClone(h.data())
+    if (change === 'remove') next.profiles = next.profiles.filter(row => row.name !== 'other')
+    else next.profiles[2].native_delegation.editable = false
+    h.setData(next); h.render()
+    assert.equal(h.byId('native-delegation-save').props.disabled, true)
+    assert.deepEqual(h.calls, [])
+  }
+})
+
+test('native all-selected never enables a profile saved with role routing disabled', async () => {
+  const data = nativeBatchFixture(); data.profiles[2].routing.enabled = false
+  const h = harness({ data })
+  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  assert.deepEqual(h.selected('native-target-'), ['claire', 'default'])
+  h.setResponder(nativeReply); h.click('native-delegation-save'); await h.flush()
+  assert.deepEqual(h.calls[0].body.updates.map(row => row.profile), ['default', 'claire'])
+  assert.equal(JSON.stringify(h.calls[0].body).includes('routing_profiles'), false)
+})
+
+test('native preview resolving after page unmount cannot start an apply', async () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  let release
+  h.setResponder(() => new Promise(resolve => { release = resolve }))
+  h.click('native-delegation-save'); h.unmount()
+  release({ plan_id: 'unmounted-plan', changes: [], warnings: [] }); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview'])
+})
+
+test('native ambiguous apply remains locked after page remount until explicit reconciliation', async () => {
+  const storage = setupStorage(), data = nativeBatchFixture()
+  const h = harness({ storage, data })
+  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  h.setResponder(operation => { if (operation === 'apply') throw new Error('unknown write'); return nativeReply(operation) })
+  h.click('native-delegation-save'); await h.flush(); h.unmount()
+  const next = harness({ storage, data })
+  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.deepEqual(next.calls, [])
+  next.clickLabel('실제 상태 확인 후 편집 재개'); await next.flush()
+  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  next.check('native-save-recovery-confirm', true)
+  next.click('native-save-recover'); await next.flush()
+  assert.equal(next.byId('native-delegation-save').props.disabled, false)
+})
+
+test('native pending write from a disposed page is manual-only, not a permanent unrecoverable lock', async () => {
+  const storage = setupStorage(), data = nativeBatchFixture()
+  const owner = harness({ storage, data })
+  owner.select('native-delegation-backend', 'model-router')
+  owner.setResponder(operation => operation === 'apply' ? new Promise(() => {}) : nativeReply(operation))
+  owner.click('native-delegation-save'); await owner.flush(); owner.unmount()
+  const next = harness({ storage, data })
+  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.equal(next.byId('native-save-recovery-confirm').props.checked, false)
+  assert.deepEqual(next.calls, [])
+  next.check('native-save-recovery-confirm', true)
+  next.click('native-save-recover'); await next.flush()
+  assert.equal(next.byId('native-delegation-save').props.disabled, false)
+  assert.deepEqual(next.calls, [], 'reconciliation reads status only; it never retries the old write')
+})
+
+test('native unresolved write cannot be cleared from a different connection to the same root', async () => {
+  const storage = setupStorage(), data = nativeBatchFixture()
+  const owner = harness({ storage, data })
+  owner.select('native-delegation-backend', 'model-router')
+  owner.setResponder(operation => { if (operation === 'apply') throw new Error('unknown write'); return nativeReply(operation) })
+  owner.click('native-delegation-save'); await owner.flush(); owner.unmount()
+  const next = harness({ storage, data })
+  next.state.connectionId.value = 'different-view-of-same-root'; next.render()
+  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.throws(() => next.byId('native-save-recovery-confirm'))
+  next.clickLabel('실제 상태 확인 후 편집 재개'); await next.flush()
+  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.deepEqual(next.calls, [])
+})
+
+test('native unresolved record does not lock an unrelated verified root', async () => {
+  const storage = setupStorage(), data = nativeBatchFixture()
+  const owner = harness({ storage, data })
+  owner.select('native-delegation-backend', 'model-router')
+  owner.setResponder(operation => { if (operation === 'apply') throw new Error('unknown write'); return nativeReply(operation) })
+  owner.click('native-delegation-save'); await owner.flush(); owner.unmount()
+  const foreign = nativeBatchFixture(); foreign.readiness_context.base_identity = 'e'.repeat(64)
+  const next = harness({ storage, data: foreign })
+  next.state.connectionId.value = 'other-root-connection'; next.render()
+  assert.equal(next.byId('native-delegation-save').props.disabled, false)
+  assert.deepEqual(next.calls, [])
+})
+
+function initialSetupFixture() {
+  const data = nativeBatchFixture()
+  data.readiness_context.release = { catalog_name: 'model-router', version: '0.6.0', ref: 'b'.repeat(40) }
+  data.profiles.forEach((row, index) => {
+    row.readiness = { ...setupReadiness('ready'), version: '0.6.0' }
+    row.initial_setup = { schema: 1, action: 'select_backend', eligible: true, backend_unset: true,
+      digest: String(index + 1).repeat(64), intent_digest: 'a'.repeat(64), reason_codes: ['backend_unset'] }
+  })
+  return data
+}
+
+test('initial card defaults eligible profiles only and never writes while viewed or selected', () => {
+  const data = initialSetupFixture()
+  data.profiles[2].initial_setup.action = 'preserved'; data.profiles[2].initial_setup.eligible = false
+  const h = harness({ data })
+  assert.deepEqual(h.selected('initial-profile-'), ['claire', 'default'])
+  assert.equal(h.byId('initial-profile-other').props.disabled, true)
+  h.click('initial-setup-none'); assert.deepEqual(h.selected('initial-profile-'), [])
+  assert.equal(h.byId('initial-setup-run').props.disabled, true)
+  h.click('initial-setup-all'); assert.deepEqual(h.selected('initial-profile-'), ['claire', 'default'])
+  assert.deepEqual(h.calls, [])
+})
+
+test('retained initial setup callback cannot revive an emptied selection', async () => {
+  const h = harness({ data: initialSetupFixture() }), retained = h.byId('initial-setup-run').props.onClick
+  let routes = 0
+  h.host.profileRoutes = async () => { routes += 1; return [] }
+  h.click('initial-setup-none'); retained(); await h.flush()
+  assert.equal(routes, 0); assert.deepEqual(h.calls, [])
+})
+
+test('initial card preserves manual empty/subset and offers new profiles without selecting them', async () => {
+  const h = harness({ data: initialSetupFixture() })
+  h.click('initial-setup-none'); h.selectProfile('default')
+  assert.deepEqual(h.selected('initial-profile-'), [])
+  h.check('initial-profile-other', true)
+  const fresh = structuredClone(h.data()); fresh.profiles.push({ ...structuredClone(fresh.profiles[0]), name: 'future-setup' })
+  h.setStatusResponder(() => fresh)
+  h.input('model-main-model', 'keep-unrelated-initial-draft')
+  h.click('initial-setup-refresh'); await h.flush()
+  assert.deepEqual(h.selected('initial-profile-'), ['other'])
+  assert.equal(h.byId('initial-profile-future-setup').props.checked, false)
+  assert.equal(h.byId('model-main-model').props.value, 'keep-unrelated-initial-draft')
+})
+
+test('actual initial page handler preserves dirty drafts and uses only explicit setup writes', async () => {
+  const h = harness({ data: initialSetupFixture() }), backend = structuredClone(h.data()), requests = [], plans = new Map()
+  h.click('initial-setup-none'); h.check('initial-profile-other', true)
+  h.input('model-main-model', 'keep-unsaved-setup-model')
+  const retainedSave = h.byId('global-save').props.onClick
+  h.host.profileRoutes = async () => ['default','claire','other'].map(profile => ({ mode: 'local', connectionId: 'local', profile, targetProfile: profile }))
+  h.host.requestProfile = async (route, method, args) => {
+    assert.equal(route.profile, 'claire'); assert.equal(args.profile, 'claire'); assert.equal(method, 'cli.exec')
+    const operation = args.argv[args.argv.indexOf('model-router') + 1], body = JSON.parse(args.argv.at(-1))
+    requests.push({ operation, body })
+    let result
+    if (operation === 'status') result = structuredClone(backend)
+    else if (operation === 'initial-setup-preview') {
+      const profile = body.updates[0].profile, plan_id = 'b'.repeat(32)
+      plans.set(plan_id, profile); result = { plan_id, changes: [{ profile, field: 'delegation.backend', before: null, after: 'model-router' }] }
+    } else if (operation === 'apply') {
+      const profile = plans.get(body.plan_id), row = backend.profiles.find(row => row.name === profile)
+      row.initial_setup.action = 'complete'; row.initial_setup.eligible = false; row.native_delegation.backend = 'model-router'
+      result = { status: 'applied', plan_id: body.plan_id, applied: [{ profile, key: 'delegation.backend' }], remaining: [] }
+    } else throw new Error(operation)
+    return { code: 0, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(result) }
+  }
+  h.click('initial-setup-run')
+  for (let i=0; i<5; i++) await h.flush()
+  assert.deepEqual(requests.filter(row => row.operation !== 'status').map(row => row.operation), ['initial-setup-preview', 'apply'])
+  assert.deepEqual(requests.find(row => row.operation === 'initial-setup-preview').body.updates.map(row => row.profile), ['other'])
+  assert.equal(h.byId('model-main-model').props.value, 'keep-unsaved-setup-model')
+  assert.throws(() => h.byId('global-save'), 'normal save is replaced by explicit rebase after setup')
+  retainedSave(); h.render()
+  assert.deepEqual(h.calls, [])
+})
+
+test('native malformed saved mutation record is not interpreted as permission to retry', () => {
+  const storage = setupStorage()
+  storage.set('native-settings-save-fences-v1', { '["local","claire","open"]': { state: 'unknown' } })
+  const h = harness({ storage, data: nativeBatchFixture() })
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  assert.deepEqual(h.calls, [])
+})
+
+for (const changed of ['excluded-source', 'selected-target', 'root']) {
+  test(`native preview rechecks uncached server ${changed} state before apply`, async () => {
+    const h = harness({ data: nativeBatchFixture() })
+    h.select('native-delegation-backend', 'model-router')
+    h.click('native-target-none'); h.check('native-target-other', true)
+    const fresh = structuredClone(h.data())
+    if (changed === 'root') fresh.readiness_context.base_identity = 'e'.repeat(64)
+    else fresh.profiles.find(row => row.name === (changed === 'excluded-source' ? 'claire' : 'other')).native_delegation.digest = 'f'.repeat(64)
+    h.setResponder(nativeReply); h.setStatusResponder(() => fresh)
+    h.click('native-delegation-save'); await h.flush()
+    assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status'])
+    assert.deepEqual(h.calls[0].body.updates.map(row => row.profile), ['other'])
+    assert.notDeepEqual(h.data(), fresh, 'fresh validation must not silently rebase query/drafts')
+  })
+}
+
+test('native fresh status failure cannot dispatch apply', async () => {
+  const h = harness({ data: nativeBatchFixture() })
+  h.select('native-delegation-backend', 'model-router')
+  h.setResponder(nativeReply); h.setStatusResponder(() => { throw new Error('status unavailable') })
+  h.click('native-delegation-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status'])
+})
+
+for (const change of ['unmount', 'leave-and-return']) {
+  test(`native fresh status resolving after ${change} cannot dispatch apply`, async () => {
+    const h = harness({ data: nativeBatchFixture() })
+    h.select('native-delegation-backend', 'model-router')
+    let release
+    h.setResponder(nativeReply); h.setStatusResponder(() => new Promise(resolve => { release = resolve }))
+    h.click('native-delegation-save'); await h.flush()
+    assert.equal(typeof release, 'function')
+    if (change === 'unmount') h.unmount()
+    else { h.state.connectionId.value = 'elsewhere'; h.render(); h.state.connectionId.value = 'local'; h.render() }
+    release(structuredClone(h.data())); await h.flush()
+    assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status'])
+  })
+}

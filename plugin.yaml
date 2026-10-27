@@ -1,7 +1,8 @@
 name: model-router
-version: 0.4.9
-requires_hermes: ">=0.21.6"
-description: "Profile model settings, default-on Heavy/Light task routing, fallback controls, runtime limits, and session Fast inheritance"
+version: 0.6.0
+requires_hermes: ">=0.22.5"
+kind: standalone
+description: "Profile model settings, default-on Heavy/Light task routing via native delegation, allowlisted profile routes, and runtime controls"
 author: NewMetaW
 provides_tools:
   - coding_route

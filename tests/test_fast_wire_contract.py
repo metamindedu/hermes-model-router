@@ -61,7 +61,7 @@ def test_real_builder_preflight_and_sdk_obey_parent_not_stale_overrides(
         kwargs = child._build_api_kwargs([{'role': 'user', 'content': 'offline builder fixture'}])
         if api_mode == 'codex_responses':
             kwargs = child._get_transport().preflight_kwargs(
-                kwargs, allow_stream=False, is_github_responses=False, sanitize_harmony_tokens=True,
+                kwargs, allow_stream=False, drop_replay_item_ids=False, sanitize_harmony_tokens=True,
             )
         with bind_subagent_parent(child):
             kwargs = apply_llm_request_middleware(
@@ -71,7 +71,7 @@ def test_real_builder_preflight_and_sdk_obey_parent_not_stale_overrides(
         if api_mode == 'codex_responses':
             # Production repeats preflight immediately before the provider call.
             kwargs = child._get_transport().preflight_kwargs(
-                kwargs, allow_stream=False, is_github_responses=False, sanitize_harmony_tokens=True,
+                kwargs, allow_stream=False, drop_replay_item_ids=False, sanitize_harmony_tokens=True,
             )
             client.responses.create(**kwargs)
         else:

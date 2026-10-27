@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -542,317 +543,65 @@ class Router:
             fast_snapshot, profile=_service_profile(service), runtime=runtime
         )
 
-    def start(
-        self,
-        purpose: str,
-        prompt: str,
-        cwd: str | Path,
-        timeout: float | None = None,
-        *,
-        title: str | None = None,
-    ) -> dict[str, Any]:
-        if purpose not in ROUTING_PURPOSES:
-            raise RoutingError(f"unsupported routing purpose: {purpose}")
-        role, mode, verification_kind = ROUTING_PURPOSES[purpose]
-        display_title = task_presentation.validate_title(title, purpose)
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise RoutingError("prompt must be a non-empty string")
-
-        if not isinstance(cwd, (str, Path)):
-            raise RoutingError("working directory must be a path")
-        working_dir = Path(cwd).expanduser().resolve()
-        if not working_dir.is_dir():
-            raise RoutingError("working directory does not exist")
-
-        profile = _service_profile(self.service)
-        fast_snapshot = _validate_routed_fast_snapshot(
-            self.fast_snapshot, profile=profile, runtime=self.runtime
-        )
-        _check_profile_drift(self.service, profile)
-        config_method = getattr(self.service, "routing_config", None)
-        if not callable(config_method):
-            raise RoutingError("routing service does not expose routing configuration")
-        config = _as_mapping(config_method(profile))
-        if config.get("enabled") is not True:
-            raise RoutingError("routing is disabled for the active profile")
-        if timeout is None:
-            role_timeout_field = (
-                "light_timeout_seconds" if role == "LIGHTWEIGHT" else "heavy_timeout_seconds"
-            )
-            profile_timeout = (
-                config[role_timeout_field]
-                if role_timeout_field in config
-                else config.get("timeout_seconds", DEFAULT_ROUTED_TOTAL_SECONDS)
-            )
-        else:
-            profile_timeout = timeout
-        bounded_timeout = _bounded_timeout(profile_timeout)
-        revision = config.get("revision")
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-            raise RoutingError("active profile routing revision is invalid")
-        primary = {
-            "HEAVYWEIGHT": _safe_route(config.get("heavy"), "heavy"),
-            "LIGHTWEIGHT": _safe_route(config.get("light"), "light"),
-        }
-        if primary["HEAVYWEIGHT"]["reasoning"] not in RUNNER_OPERATOR_EFFORTS or primary["LIGHTWEIGHT"]["reasoning"] not in RUNNER_OPERATOR_EFFORTS:
-            raise RoutingError("selected primary reasoning effort is unsupported by the bundled route runner")
-        # Roles define independent jobs and review contracts, not model identity.
-        fallback = _as_mapping(config.get("fallback"))
-        configured_fallback_enabled = fallback.get("enabled")
-        if not isinstance(configured_fallback_enabled, bool):
-            raise RoutingError("fallback.enabled must be boolean")
-        fallback_policy = config.get("fallback_policy")
-        fallback_approved = _fallback_policy_is_approved(fallback_policy)
-        fallback_enabled = configured_fallback_enabled and fallback_approved
-        fallbacks: dict[str, dict[str, str] | None] = {}
-        for fallback_role, key in (("HEAVYWEIGHT", "heavy"), ("LIGHTWEIGHT", "light")):
-            value = fallback.get(key) if fallback_enabled else None
-            fallbacks[fallback_role] = None if value is None else _safe_route(value, f"fallback.{key}")
-        if fallback_enabled and any(fallbacks[fallback_role] is None for fallback_role in fallbacks):
-            raise RoutingError("approved enabled fallback requires explicit Heavy and Light routes")
-        for route_role, primary_route in primary.items():
-            fallback_route = fallbacks[route_role]
-            if fallback_route and (
-                fallback_route["provider"], fallback_route["model"]
-            ) == (primary_route["provider"], primary_route["model"]):
-                raise RoutingError(f"fallback.{route_role} must differ from its primary route")
-
-        core_root, runtime_paths, worker_python = _worker_runtime(working_dir)
-        home = _profile_home(self.service, profile)
-        jobs_root = _jobs_root(home)
-        job_id = str(uuid.uuid4())
-        job_dir = jobs_root / job_id
-        try:
-            job_dir.mkdir(parents=True, exist_ok=False)
-            if os.name != "nt":
-                os.chmod(job_dir, 0o700)
-        except OSError as exc:
-            raise RoutingError("could not create the active profile job directory") from exc
-
-        selected = primary[role]
-        route_evidence = {
-            "purpose_role": role,
-            "requested": {name: dict(route) for name, route in primary.items()},
-            "fallback_enabled": fallback_enabled,
-            "fallback_policy": {
-                "trigger": "subscription_exhaustion_before_tools",
-                "max_retries": 1,
-                "approved": fallback_approved,
-            },
-            "fallback": {
-                name: (dict(route) if route is not None else None)
-                for name, route in fallbacks.items()
-            },
-            "actual": None,
-        }
-        settings_digest = hashlib.sha256(
-            json.dumps(
-                {"revision": revision, "routes": route_evidence},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        snapshot = {
-            "schema": 1,
-            "job_id": job_id,
-            "profile": profile,
-            "settings_revision": revision,
-            "purpose": purpose,
-            "title": display_title,
-            "route_class": role,
-            "runner_mode": mode,
-            "parent_session_id": self.runtime.parent_session_id if self.runtime is not None else None,
-            "ui_session_id": getattr(self.runtime, "ui_session_id", "") if self.runtime is not None else "",
-            "verification_kind": verification_kind,
-            "cwd": str(working_dir),
-            "timeout_seconds": bounded_timeout,
-            "timeout_source": "profile" if timeout is None else "call",
-            "created_at": _utc_now(),
-            "settings_digest": settings_digest,
-            "model_provider_evidence": route_evidence,
-        }
-        if fast_snapshot is not None:
-            snapshot["fast_snapshot"] = fast_snapshot
-        cache = _build_job_cache(primary, fallbacks, fallback_enabled)
-        snapshot_path = _job_file(job_dir, "snapshot.json")
-        prompt_path = _job_file(job_dir, "prompt.txt")
-        cache_path = _job_file(job_dir, "routing-cache.json")
-        log_path = _job_file(job_dir, "job.log")
-        _write_json(snapshot_path, snapshot, exclusive=True)
-        with prompt_path.open("x", encoding="utf-8", newline="\n") as handle:
-            handle.write(prompt)
-        if os.name != "nt":
-            os.chmod(prompt_path, 0o600)
-        _write_json(cache_path, cache, exclusive=True)
-        with log_path.open("xb"):
-            pass
-        if os.name != "nt":
-            os.chmod(log_path, 0o600)
-
-        hermes_cli = shutil.which("hermes")
-        if not hermes_cli:
-            _write_json(
-                _job_file(job_dir, "state.json"),
-                {"status": "failed", "error_type": "HermesLauncherNotFound", "finished_at": _utc_now()},
-                exclusive=True,
-            )
-            return {
-                "job_id": job_id,
-                "status": "failed",
-                "profile": profile,
-                "purpose": purpose,
-                "title": display_title,
-                "settings_revision": revision,
-                "route_class": role,
-                "error_type": "HermesLauncherNotFound",
-            }
-        hermes_path = Path(hermes_cli).resolve()
-        if not hermes_path.is_file():
-            _write_json(
-                _job_file(job_dir, "state.json"),
-                {"status": "failed", "error_type": "HermesLauncherNotFound", "finished_at": _utc_now()},
-                exclusive=True,
-            )
-            return {
-                "job_id": job_id,
-                "status": "failed",
-                "profile": profile,
-                "purpose": purpose,
-                "title": display_title,
-                "settings_revision": revision,
-                "route_class": role,
-                "error_type": "HermesLauncherNotFound",
-            }
-
-        from tools.environments.local import served_profile_child_env
-        child_env = served_profile_child_env(target_home=home, inherit_credentials=True)
-        # The native helper intentionally strips Hermes-owned Python paths for
-        # arbitrary terminal children. Restore only this host's preflighted
-        # interpreter-owned code/generation for the Hermes worker, never an
-        # inherited/project PYTHONPATH or a newly selected generation.
-        child_env["PYTHONPATH"] = os.pathsep.join(runtime_paths)
-        child_env["HERMES_HOME"] = str(home)
-        child_env["HERMES_PROFILE"] = profile
-        command = [
-            worker_python,
-            str(WORKER_PATH),
-            "--job-dir",
-            str(job_dir),
-            "--runner",
-            str(RUNNER_PATH),
-            "--python",
-            worker_python,
-            "--hermes-exe",
-            str(hermes_path),
-            "--profile",
-            profile,
-            "--purpose",
-            purpose,
-            "--cwd",
-            str(working_dir),
-            "--timeout",
-            repr(bounded_timeout),
-        ]
-        launch_path = _job_file(job_dir, "launch.json")
-        _write_json(
-            launch_path,
-            {"worker_pid": None, "launched_at": _utc_now()},
-            exclusive=True,
-        )
-        creation: dict[str, Any] = {
-            "cwd": str(job_dir),
-            "env": child_env,
-            "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "close_fds": True,
-        }
-        # The worker itself gets no inherited pipes or console. It owns the
-        # single job log and the helper's subprocess appends to that file.
-        with log_path.open("ab") as log_handle:
-            creation["stdout"] = log_handle
-            creation["stderr"] = subprocess.STDOUT
-            if os.name == "nt":
-                creation["creationflags"] = (
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                )
-            else:
-                creation["start_new_session"] = True
-            try:
-                process = subprocess.Popen(command, **creation)
-            except OSError as exc:
-                _write_json(
-                    _job_file(job_dir, "state.json"),
-                    {
-                        "status": "failed",
-                        "error_type": type(exc).__name__,
-                        "finished_at": _utc_now(),
-                    },
-                    exclusive=True,
-                )
-                return {
-                    "job_id": job_id,
-                    "status": "failed",
-                    "profile": profile,
-                    "purpose": purpose,
-                    "title": display_title,
-                    "settings_revision": revision,
-                    "route_class": role,
-                    "error_type": type(exc).__name__,
-                }
-        tracking = {}
-        if self.runtime is not None:
-            try:
-                tracking["process_id"] = self.runtime.track(
-                    process,
-                    job_id=job_id,
-                    purpose=purpose,
-                    cwd=str(working_dir),
-                    title=display_title,
-                    role=role,
-                    model=selected["model"],
-                    reasoning=selected["reasoning"],
-                    provider=selected["provider"],
-                    profile=profile,
-                )
-            except Exception as exc:
-                # Already running: never retry the spawn or report a job failure
-                # just because native observation could not be established.
-                tracking["tracking_error"] = type(exc).__name__
-                from .runtime_tracking import DesktopSeedUnavailable
-                if isinstance(exc, DesktopSeedUnavailable):
-                    tracking["process_id"] = exc.process_id
-                    tracking["ui_seeded"] = False
-        try:
-            _write_json(
-                launch_path,
-                {"worker_pid": process.pid, "launched_at": _utc_now(), **tracking},
-            )
-        except OSError:
-            # The worker records its own PID in state.json as soon as it starts;
-            # avoid returning an ambiguous failure after the process was spawned.
-            tracking["activity_tracking_error"] = True
-        else:
-            observe = getattr(self.runtime, "observe", None)
-            if callable(observe) and tracking.get("process_id"):
-                try:
-                    observe(process, process_id=tracking["process_id"], home=home,
-                            job_id=job_id, profile=profile, timeout=bounded_timeout)
-                except Exception:
-                    tracking["activity_tracking_error"] = True
+    def start(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Retired public entry point: stale callers must never launch a process."""
         return {
-            "job_id": job_id,
-            "status": "running",
-            "profile": profile,
-            "purpose": purpose,
-            "title": display_title,
-            "settings_revision": revision,
-            "route_class": role,
-            "requested_model": selected["model"],
-            "requested_provider": selected["provider"],
-            **tracking,
+            "error": "start_retired",
+            "status": "retired",
+            "message": "Use native delegate_task with an explicitly selected model-router backend.",
         }
+
+    def join(self, job_id: str, *, wait_timeout: int | None = None) -> dict[str, Any]:
+        """Explicitly await a silent owned job, without starting or waking any turn."""
+        entered_at = time.monotonic()
+        from .joining import JoinError, owner_binding, read_record, validate_wait_timeout, wait_owned, reconcile_terminal
+        validate_wait_timeout(wait_timeout)
+        profile = _service_profile(self.service)
+        home = _profile_home(self.service, profile)
+        owner = owner_binding(self.runtime, profile, home)
+        if not isinstance(job_id, str):
+            raise JoinError("job_id must be a canonical UUID")
+        try:
+            canonical = str(uuid.UUID(job_id))
+        except ValueError:
+            raise JoinError("job_id must be a canonical UUID") from None
+        if canonical != job_id:
+            raise JoinError("job_id must be a canonical UUID")
+        root = _jobs_root(home)
+        directory = root / job_id
+        if directory.is_symlink() or directory.resolve().parent != root.resolve():
+            raise JoinError("join job directory is outside the active profile")
+        snapshot = read_record(_job_file(directory, "snapshot.json"))
+        stored_owner = snapshot.get("join_owner")
+        if (snapshot.get("job_id") != job_id or snapshot.get("profile") != profile
+                or snapshot.get("parent_session_id") != owner["parent_session_id"]
+                or snapshot.get("completion_mode") != "join"
+                or not isinstance(stored_owner, dict)
+                or type(stored_owner.get("schema")) is not int or stored_owner != owner):
+            raise JoinError("job is not a join-mode job of this exact profile/session owner")
+        launch = read_record(_job_file(directory, "launch.json"))
+        if launch.get("join_available") is not True:
+            raise JoinError("durable join binding was not published")
+        outcome = wait_owned(self.runtime, owner, launch, wait_timeout=wait_timeout, entered_at=entered_at)
+        if outcome["join_status"] == "joined":
+            # Silent jobs need no native acknowledgement. Read the artifact,
+            # then reconcile current ownership/termination before returning it.
+            output = self.status(job_id)
+            outcome = reconcile_terminal(self.runtime, owner, launch, outcome)
+            if outcome["join_status"] != "joined":
+                return {"job_id": job_id, "profile": profile, "status": "unverified",
+                        "route_verified": False, "completion_mode": "join", **outcome}
+            if output.get("status") == "completed" and (
+                    outcome.get("native_exit_code") != 0
+                    or outcome.get("native_completion_reason") != "exited"
+                    or outcome.get("native_snapshot_changed") is True):
+                output["status"] = "unverified"
+                output["route_verified"] = False
+                output["join_warning"] = "native termination does not confirm the runner result"
+        else:
+            output = {"job_id": job_id, "profile": profile, "route_verified": False,
+                      "status": "running" if outcome["join_status"] == "pending" else "unverified"}
+        return {**output, "completion_mode": "join", **outcome}
 
     def status(self, job_id: str) -> dict[str, Any]:
         if not isinstance(job_id, str):

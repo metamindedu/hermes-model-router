@@ -33,11 +33,12 @@ test('discovery and settings copy expose the direct-Main default without changin
   assert.match(registration, /Main handles small bounded changes directly/)
   assert.match(registration, /at least two substantive independent workstreams/)
   assert.match(registration, /required Heavy\/independent review remains mandatory/)
-  for (const copy of [desktop, readme]) {
-    assert.match(copy, /작고 범위가 명확한 수정은 메인 모델이 직접 처리/)
-    assert.match(copy, /독립적인 실작업 두 개 이상/)
-    assert.match(copy, /필수 Heavy·독립 검수/)
-  }
+  assert.match(desktop, /간단한 작업은 메인 모델이 직접 처리/)
+  assert.match(desktop, /계획이나 중요한 검토는 Heavy/)
+  // Detailed execution policy remains in the canonical skill/docs, not consumer UI.
+  assert.match(readme, /작고 범위가 명확한 수정은 메인 모델이 직접 처리/)
+  assert.match(readme, /독립적인 실작업 두 개 이상/)
+  assert.match(readme, /필수 Heavy·독립 검수/)
 })
 
 test('canonical and compatibility skill keep the name and share complex non-coding scope', () => {
@@ -50,17 +51,16 @@ test('canonical and compatibility skill keep the name and share complex non-codi
   assert.match(canonical, /Pilot the output before scaling/)
   assert.match(canonical, /Keep external writes serialized under existing approvals/)
   assert.match(canonical, /After two failed attempts at the same operation/)
-  assert.match(canonical, /Each job records requested and actual model\/provider evidence/)
+  assert.match(canonical, /requested route, native runtime-reported/)
   assert.match(compatibility, /skill_view\(name="model-router:adaptive-coding-orchestration"\)/)
   assert.match(compatibility, /not routine writing\/extraction/)
 })
 
 test('settings page explains broad routing scope, default-on installation, and preserved explicit opt-outs', () => {
-  assert.match(desktop, /코딩과 복잡한 비코딩 판단 작업에 공통 정책을 적용합니다/)
-  assert.match(desktop, /근거 충돌/)
-  assert.match(desktop, /단순 글쓰기·번역·요약·추출은 Heavy 대상이 아닙니다/)
-  assert.match(desktop, /플러그인이 설치되고 별도 사용 여부를 저장하지 않은 프로필은 기본 활성화/)
-  assert.match(desktop, /기존에 저장한 OFF와 명시적인 스킬 비활성화는 보존/)
+  assert.match(desktop, /계획이나 중요한 검토는 Heavy/)
+  assert.match(desktop, /단순 글쓰기·번역·요약 때문에 무조건 Heavy를 쓰지는 않습니다/)
+  assert.match(desktop, /새로 설치한 프로필은 작업 분담이 기본으로 켜집니다/)
+  assert.match(desktop, /이전에 꺼 둔 프로필은 그대로 유지/)
   assert.match(desktop, /작업·검증 라우팅 폴백/)
   assert.doesNotMatch(desktop, /코딩·검증 라우팅/)
   assert.match(readme, /동봉 정책은 프로필마다 동일합니다/)
@@ -68,14 +68,18 @@ test('settings page explains broad routing scope, default-on installation, and p
   assert.match(readme, /단순 글쓰기·번역·요약·정보 추출/)
 })
 
-test('tool identifier, purpose enum, profile gate and runtime contract remain unchanged', () => {
+test('native routing replaces launch fields while legacy read-only access remains', () => {
   assert.match(registration, /"name": "coding_route"/)
-  assert.match(registration, /"enum": \["implementation", "mechanical", "preliminary-review", "plan", "semantic-final", "independent-review"\]/)
-  assert.match(registration, /implementation\/mechanical\/preliminary-review use Light; plan\/semantic-final\/independent-review use Heavy/)
-  assert.match(registration, /Disabled profiles are denied/)
-  assert.match(registration, /This tool never changes model settings/)
-  assert.match(registration, /coding and complex non-coding judgment/)
+  assert.match(registration, /register_native_delegation\(ctx, home\)/)
+  assert.match(registration, /"enum": \["config", "status", "join"\]/)
+  assert.doesNotMatch(registration, /"enum": \["config", "start"/)
+  assert.match(registration, /start_retired/)
   assert.match(registration, /Profile-enabled coding and complex non-coding orchestration/)
-  assert.doesNotMatch(registration, /Profile-enabled coding orchestration|코딩 라우팅이 꺼져/)
-  assert.match(read('plugin.yaml'), /Profile model settings, default-on Heavy\/Light task routing/)
+  assert.match(canonical, /Native routes \(Hermes >=0.22.5\)/)
+  assert.match(canonical, /`model-router-profiles`/)
+  assert.match(canonical, /legacy fresh-task-rerun consent never authorizes/)
+  assert.match(read('plugin.yaml'), /requires_hermes: ">=0.22.5"/)
+  assert.doesNotMatch(desktop, /시간 초과 시 실행 프로세스를 정리합니다/)
+  assert.match(desktop, /중단을 요청하지만, 실제로 멈추기까지 시간이 걸릴/)
+  assert.doesNotMatch(canonical, /Routed jobs retain their existing process-tree cancellation/ )
 })

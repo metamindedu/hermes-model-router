@@ -163,8 +163,8 @@ function harness(initial = statusFixture()) {
 test('recovery and Fast inheritance notes are readonly and do not claim provider success', () => {
   const h = harness()
   const recovery = h.byId('native-fallback-recovery-note')
-  assert.match(text(recovery), /다음 턴/)
-  assert.match(text(recovery), /쿨다운/)
+  assert.match(text(recovery), /다음 응답/)
+  assert.match(text(recovery), /사용 제한이 풀리면/)
   assert.match(text(recovery), /정상 응답을 확인했다는 뜻은 아닙니다/)
   const fast = h.byId('fast-inheritance-note')
   assert.match(text(fast), /기본 위임과 Heavy\/Light/)
@@ -430,7 +430,7 @@ test('native fallback preview cannot return after source-profile change and unsu
 
 test('routing details exposes readonly fallback summary/navigation; no legacy editable fallback path remains', () => {
   assert.match(source, /legacy-routing-fallback-summary/)
-  assert.match(source, /href: '#fallback-management'/)
+  assert.match(source, /href: '#native-delegation-settings'/)
   assert.doesNotMatch(source, /id: 'fallback-enabled'/)
   assert.doesNotMatch(source, /updateFallback\s*=/)
   assert.match(source, /operation: '\/fallback-preview'/)
@@ -577,7 +577,7 @@ test('whole-page handler includes all three changed fallbacks with independent t
   ])
   assert.match(text(h.tree), /일반 대화 폴백/)
   assert.match(text(h.tree), /작업·검증 라우팅 폴백/)
-  assert.match(text(h.tree), /네이티브 서브 에이전트 폴백/)
+  assert.match(text(h.tree), /기본 위임 방식의 예비 모델/)
   assert.equal(h.calls.some(x => x.operation === 'fallback-preview'), false)
   assert.throws(() => h.byId('confirm-preview'))
   assert.deepEqual(h.calls.filter(x => x.operation === 'apply').map(x => x.body), [{ plan_id: 'combined-plan' }])
@@ -639,7 +639,7 @@ test('all consent and review checkboxes are absent; explicit single save remains
     assert.throws(() => h.byId(id))
   }
   assert.match(text(h.tree), /추가 비용/)
-  assert.match(text(h.tree), /delegate_task/)
+  assert.match(text(h.tree), /기본 위임 모델 사용/)
   h.click('routing-fallback-save')
   await h.flush()
   assert.throws(() => h.byId('routing-fallback-review'))

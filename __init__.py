@@ -25,7 +25,7 @@ def register(ctx):
             return False
 
     def cli_setup(parser):
-        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "apply"])
+        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "apply"])
         parser.add_argument("--body", default="{}")
 
     def cli_handler(args):
@@ -42,6 +42,8 @@ def register(ctx):
                     return service.status()
                 if args.operation == "preview": return service.preview(body)
                 if args.operation == "fallback-preview": return service.fallback_preview(body)
+                if args.operation == "delegation-preview": return service.delegation_preview(body)
+                if args.operation == "initial-setup-preview": return service.initial_setup_preview(body)
                 if set(body) != {"plan_id"}: raise ValueError("apply accepts only plan_id")
                 return service.apply(body["plan_id"])
             result = scoped(operation)
@@ -87,41 +89,36 @@ def register(ctx):
     from .model_router.fast_inheritance import register_fast_inheritance
     fast_controller = register_fast_inheritance(ctx, home)
 
-    if not enabled():
-        return
-    ctx.register_skill(
-        "adaptive-coding-orchestration",
-        Path(__file__).parent / "skills/adaptive-coding-orchestration/SKILL.md",
-        "Profile-enabled coding and complex non-coding orchestration: Main handles small bounded changes directly; delegate implementation only for worthwhile parallel work; retain required Heavy review.",
-    )
+    from .model_router.native_delegation import register_native_delegation
+    register_native_delegation(ctx, home)
+
+    if enabled():
+        ctx.register_skill(
+            "adaptive-coding-orchestration",
+            Path(__file__).parent / "skills/adaptive-coding-orchestration/SKILL.md",
+            "Profile-enabled coding and complex non-coding orchestration: Main handles small bounded changes directly; delegate implementation only for worthwhile parallel work; retain required Heavy review.",
+        )
 
     def handler(args, **kwargs):
         try:
             def run(service):
-                if not service.routing_config(service.active_profile())["enabled"]:
-                    return {"error": "routing_disabled", "message": "현재 프로필의 작업 라우팅이 꺼져 있습니다."}
                 action = args.get("action")
+                if action == "start":
+                    return {"error": "start_retired", "message": "New jobs use native delegate_task with an explicitly selected model-router backend; standalone starts are retired."}
                 if action == "config":
                     return service.routing_config(service.active_profile())
                 if action == "status":
                     return Router(service).status(args.get("job_id", ""))
-                if action == "start":
-                    allowed = {"action", "purpose", "prompt", "cwd", "timeout", "title"}
-                    if set(args) - allowed:
-                        raise ValueError("unsupported start fields")
+                if action == "join":
+                    if set(args) - {"action", "job_id", "wait_timeout"}:
+                        raise ValueError("unsupported join fields; wait_timeout is not a job timeout")
                     from .model_router.runtime_tracking import capture_runtime, route_session_context
                     profile = service.active_profile()
                     with route_session_context(session_id=kwargs.get("session_id", ""), expected_profile=profile):
                         runtime = capture_runtime(task_id=kwargs.get("task_id") or "", expected_profile=profile)
-                        snapshot = None
-                        if fast_controller is not None and runtime is not None:
-                            snapshot = fast_controller.capture_for_route(
-                                session_id=runtime.parent_session_id, profile=profile,
-                            )
-                        router = Router(service, runtime=runtime, fast_snapshot=snapshot)
-                        title_kwargs = {"title": args["title"]} if "title" in args else {}
-                        return router.start(args.get("purpose"), args.get("prompt"), args.get("cwd"), args.get("timeout"), **title_kwargs)
-                raise ValueError("action must be config, start, or status")
+                        return Router(service, runtime=runtime).join(
+                            args.get("job_id", ""), wait_timeout=args.get("wait_timeout"))
+                raise ValueError("action must be config, status, or join")
             return json.dumps(scoped(run), ensure_ascii=False)
         except (ValueError, PermissionError, KeyError) as exc:
             return json.dumps({"error": "invalid_or_denied", "message": str(exc)}, ensure_ascii=False)
@@ -130,18 +127,16 @@ def register(ctx):
 
     schema = {
         "name": "coding_route",
-        "description": "Run profile-approved task and verification routes for coding and complex non-coding judgment. Main handles small bounded changes directly, including tests, without this tool. Delegate ordinary implementation only for at least two substantive independent workstreams with net parallel benefit, unless explicitly requested by the user; required Heavy/independent review remains mandatory. Read model-router:adaptive-coding-orchestration first. Heavy planning and semantic review apply to complex judgment; routine writing, translation, and simple extraction do not need Heavy. config reads effective roles; start launches one bounded job; status reads its evidence. implementation/mechanical/preliminary-review use Light; plan/semantic-final/independent-review use Heavy. Disabled profiles are denied. This tool never changes model settings. A verified model identity is not itself a semantic GO.",
+        "description": "Read effective Heavy/Light roles or inspect/join historical process-backed jobs. New work uses native delegate_task with the selected model-router or model-router-profiles backend, never coding_route start. Main handles small bounded changes directly, including tests. Ordinary implementation delegation requires at least two substantive independent workstreams unless explicitly requested by the user; required Heavy/independent review remains mandatory. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["config", "start", "status"]},
-                "purpose": {"type": "string", "enum": ["implementation", "mechanical", "preliminary-review", "plan", "semantic-final", "independent-review"]},
-                "title": {"type": "string", "minLength": 1, "maxLength": 96, "description": "Short human-readable PUBLIC Background task title. Describe the deliverable; never put secrets or private prompt text here."},
-                "prompt": {"type": "string", "description": "Complete bounded handoff; independent review must be read-only."},
-                "cwd": {"type": "string", "description": "Existing task workspace."},
-                "timeout": {"type": "integer", "minimum": 0, "description": "Optional per-job TOTAL seconds. Omit to use this profile's Light or Heavy total-runtime setting for the purpose (each defaults to 3600). Settings UI inputs use minutes; this API override remains seconds. 0 disables only this job's plugin total limit; native request/tool limits remain."},
-                "job_id": {"type": "string"},
-            }, "required": ["action"],
+                "action": {"type": "string", "enum": ["config", "status", "join"]},
+                "wait_timeout": {"type": "integer", "minimum": 1, "description": "Legacy join only: seconds for this bounded wait, never a child's total runtime. Stop/steer interrupts; no automatic rejoin."},
+                "job_id": {"type": "string", "description": "Historical process-backed job ID, never a native subagent handle."},
+            },
+            "required": ["action"],
         },
     }
-    ctx.register_tool(name="coding_route", toolset="model_router", schema=schema, handler=handler, check_fn=enabled)
+    # Preserve historical results even when new purpose routing is disabled.
+    ctx.register_tool(name="coding_route", toolset="model_router", schema=schema, handler=handler, check_fn=lambda: True)

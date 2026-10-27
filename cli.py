@@ -11,6 +11,8 @@ def main(argv=None):
     sub.add_parser("status")
     p = sub.add_parser("preview"); p.add_argument("--file", required=True)
     p = sub.add_parser("fallback-preview"); p.add_argument("--file", required=True)
+    p = sub.add_parser("delegation-preview"); p.add_argument("--file", required=True)
+    p = sub.add_parser("initial-setup-preview"); p.add_argument("--file", required=True)
     p = sub.add_parser("apply"); p.add_argument("--plan-id", required=True)
     p = sub.add_parser("initialize")
     p.add_argument("--routing-profiles", nargs="*", required=True)
@@ -23,6 +25,9 @@ def main(argv=None):
     p.add_argument("--title", help="Public Background task title (1–96 characters; no secrets)")
     p = sub.add_parser("job-status"); p.add_argument("--job-id", required=True)
     args = parser.parse_args(argv)
+    if args.action == "route":
+        print(json.dumps({"error": "start_retired", "message": "New jobs use native delegate_task; no process was started."}))
+        return 2
     try:
         from model_router.service import Service
         service = Service()
@@ -32,6 +37,10 @@ def main(argv=None):
             result = service.preview(json.loads(Path(args.file).read_text(encoding="utf-8")))
         elif args.action == "fallback-preview":
             result = service.fallback_preview(json.loads(Path(args.file).read_text(encoding="utf-8")))
+        elif args.action == "delegation-preview":
+            result = service.delegation_preview(json.loads(Path(args.file).read_text(encoding="utf-8")))
+        elif args.action == "initial-setup-preview":
+            result = service.initial_setup_preview(json.loads(Path(args.file).read_text(encoding="utf-8")))
         elif args.action == "apply":
             result = service.apply(args.plan_id)
         elif args.action == "initialize":
@@ -40,10 +49,7 @@ def main(argv=None):
         else:
             from model_router.routing import Router
             router = Router(service)
-            if args.action == "route":
-                result = router.start(args.purpose, Path(args.prompt_file).read_text(encoding="utf-8"), args.cwd, args.timeout, title=args.title)
-            else:
-                result = router.status(args.job_id)
+            result = router.status(args.job_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if isinstance(result, dict) and (result.get("status") in {"failed", "partial", "unverified"} or result.get("error")):
             return 2

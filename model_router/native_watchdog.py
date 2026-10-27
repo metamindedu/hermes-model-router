@@ -30,6 +30,63 @@ _ACTIVE_DISPATCH: contextvars.ContextVar["_DispatchBinding | None"] = contextvar
 )
 
 
+def _dispatch_backend(parent: Any) -> str:
+    from agent.delegation_backends import pinned_backend
+    from agent.delegation_registry import configured_backend
+    from tools.delegate_tool_config import _load_config
+    return pinned_backend(parent) or configured_backend(_load_config())
+
+
+def _routed_policies(home: Path, args: Mapping[str, Any], backend: str = 'model-router', ordinary_total: int | float = 0) -> dict[str, tuple[str, int | float]]:
+    """Preflight the native-normalized goals before *any* child can be built."""
+    from .native_delegation import PURPOSE_ROLES, _origin, _timeout
+    from .service import Service
+    from tools.delegate_tool_tasks import _normalize_task_list
+    service = Service()
+    profile = _origin(home, service)
+    config = service.routing_config(profile) if backend == 'model-router' else {}
+    if backend == 'model-router' and config.get('enabled') is not True:
+        raise ValueError('routing disabled')
+    tasks, error = _normalize_task_list(args.get('goal'), args.get('context'), args.get('tasks'),
+                                        args.get('output_schema'), '', 2**31 - 1)
+    if error or not tasks:
+        raise ValueError('invalid tasks')
+    policies = {}
+    for task in tasks:
+        goal = task.get('goal')
+        purpose = task.get('purpose')
+        role = (PURPOSE_ROLES.get(purpose) if isinstance(purpose, str) else None) if backend == 'model-router' else 'profile'
+        if not isinstance(goal, str):
+            raise ValueError('invalid routed task')
+        if role is None:
+            # Native per-task validation/provider refusal owns this task. It
+            # must not prevent valid siblings from being routed.
+            continue
+        budget = task.get('total_timeout_seconds', config.get(role + '_timeout_seconds') if backend == 'model-router' else ordinary_total)
+        if not _timeout(budget):
+            continue  # provider refuses it before a child can be constructed
+        policy = (role, budget)
+        if goal in policies and policies[goal] != policy:
+            raise ValueError('ambiguous routed goal')
+        policies[goal] = policy
+    return policies
+
+
+def verify_routed_binding(home: Path, goal: Any, role: str, budget: int | float) -> bool:
+    """A route may proceed only in its verified, same-process native dispatch."""
+    binding = _ACTIVE_DISPATCH.get()
+    try:
+        return bool(binding is not None and not binding.closed and not binding.watchdog.closed
+                    and binding.routed_policies is not None and isinstance(goal, str)
+                    and binding.routed_policies.get(goal) == (role, budget)
+                    and _home_key(_canonical_home(home)) == binding.watchdog._home_key
+                    and binding.watchdog._same_home()
+                    and binding.watchdog.get_active_parent() is binding.parent_agent
+                    and (budget == 0 or binding.watchdog._scheduler is not None))
+    except Exception:
+        return False
+
+
 def _read_timeouts(home: Path) -> Mapping[str, Any]:
     """Read this profile's model-router settings without editing Hermes config."""
     from .timeouts import read_timeouts
@@ -145,6 +202,7 @@ class _DispatchBinding:
     parent_agent: Any
     parent_session_id: str
     total_seconds: int | float = 0
+    routed_policies: dict[str, tuple[str, int | float]] | None = None
     context: contextvars.Context | None = None
     child_ids: set[str] = field(default_factory=set)
     closed: bool = False
@@ -236,6 +294,7 @@ class NativeWatchdog:
         self._control_lock = threading.Lock()
         self._evidence_lock = threading.Lock()
         self._children: dict[tuple[int, str], _ChildWatch] = {}
+        self._pending_dispatches: set[int] = set()
         self._scheduler: Any = None
         self._closed = False
 
@@ -276,7 +335,16 @@ class NativeWatchdog:
 
         binding: _DispatchBinding | None = None
         token: contextvars.Token | None = None
+        routed = False
+        backend = ''
         try:
+            parent = self.get_active_parent()
+            try:
+                backend = _dispatch_backend(parent)
+                routed = backend in ('model-router', 'model-router-profiles')
+            except Exception:
+                # The provider itself refuses a missing binding, even if backend discovery fails.
+                routed = False
             if not self.closed and self._same_home():
                 total_seconds = self.total_seconds
                 if self.read_timeouts_fn is not None:
@@ -284,22 +352,35 @@ class NativeWatchdog:
                     total_seconds = settings.get("delegate_total_seconds") if isinstance(settings, Mapping) else None
                 if not _valid_nonnegative_number(total_seconds):
                     raise ValueError("native total-runtime settings cannot be verified")
-                parent = self.get_active_parent()
                 parent_session_id = _safe_identifier(getattr(parent, "session_id", None))
                 tool_session_id = _safe_identifier(kwargs.get("session_id"))
-                if (total_seconds > 0 and parent is not None and parent_session_id is not None
+                if ((total_seconds > 0 or routed) and parent is not None and parent_session_id is not None
                         and tool_session_id == parent_session_id):
                     binding = _DispatchBinding(self, parent, parent_session_id, total_seconds=total_seconds)
+                    if routed:
+                        binding.routed_policies = _routed_policies(self.home, kwargs.get('args'), backend, total_seconds)
                     token = _ACTIVE_DISPATCH.set(binding)
                     binding.context = contextvars.copy_context()
+                    if routed and any(budget > 0 for _role, budget in binding.routed_policies.values()):
+                        with self._lock:
+                            self._pending_dispatches.add(id(binding))
+                        self._ensure_scheduler(binding.context)
+                        if self._scheduler is None:
+                            raise ValueError('watchdog scheduler unavailable')
         except Exception:
             # Instrumentation is fail-open; the exact original native call still runs once.
             logger.warning("native total-runtime observation unavailable; original delegation remains unchanged", exc_info=False)
             if token is not None:
                 _ACTIVE_DISPATCH.reset(token)
                 token = None
+            if binding is not None:
+                with self._lock:
+                    self._pending_dispatches.discard(id(binding))
             binding = None
 
+        if routed and binding is None:
+            self._stop_scheduler_if_idle()
+            return json.dumps({'error': 'Model Router delegation refused: watchdog binding or task policies could not be verified.'})
         if binding is None:
             return next_call()
         returned: Any = None
@@ -311,6 +392,7 @@ class NativeWatchdog:
                 _ACTIVE_DISPATCH.reset(token)
             binding.closed = True
             with self._lock:
+                self._pending_dispatches.discard(id(binding))
                 for subagent_id in binding.child_ids:
                     watch = self._children.get((id(binding.parent_agent), subagent_id))
                     if watch is not None and watch.scope is binding:
@@ -325,6 +407,8 @@ class NativeWatchdog:
                     for key, watch in list(self._children.items()):
                         if watch.scope is binding:
                             self._children.pop(key, None)
+                self._stop_scheduler_if_idle()
+            elif not binding.child_ids:
                 self._stop_scheduler_if_idle()
 
     def on_subagent_start(self, **payload: Any) -> None:
@@ -345,6 +429,14 @@ class NativeWatchdog:
         subagent_id = _safe_identifier(payload.get("child_subagent_id"))
         if child_session_id is None or subagent_id is None:
             return
+        total_seconds = binding.total_seconds
+        if binding.routed_policies is not None:
+            goal = payload.get('child_goal')
+            if not isinstance(goal, str) or goal not in binding.routed_policies:
+                return
+            total_seconds = binding.routed_policies[goal][1]
+            if total_seconds == 0:
+                return
         context = binding.context
         if context is None:
             context = contextvars.copy_context()
@@ -353,7 +445,7 @@ class NativeWatchdog:
             child_session_id=child_session_id,
             parent_agent=binding.parent_agent,
             parent_session_id=binding.parent_session_id,
-            total_seconds=binding.total_seconds,
+            total_seconds=total_seconds,
             control_context=context.copy(),
             scope=binding,
         )
@@ -388,7 +480,7 @@ class NativeWatchdog:
 
     def _stop_scheduler_if_idle(self) -> None:
         with self._lock:
-            if self._children or self._scheduler is None:
+            if self._children or self._pending_dispatches or self._scheduler is None:
                 return
             scheduler, self._scheduler = self._scheduler, None
         try:
@@ -485,7 +577,7 @@ class NativeWatchdog:
                         # Not yet registered means the native child may still be queued.
                         continue
                     watch.registered = True
-                    if watch.deadline is None:
+                    if watch.deadline is None and entry.get("status") != "queued":
                         running = entry.get("running_seconds")
                         if _valid_nonnegative_number(running):
                             watch.first_running_seconds = running
