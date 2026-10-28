@@ -10,7 +10,7 @@ function api(){
 }
 const id=c=>c.repeat(64)
 function ready(state='ready'){return {schema:1,state,files:state==='missing'?'missing':'complete',python:state==='ready'?'enabled':'not_enabled',base_supported:state!=='missing',split_supported:state!=='missing',explicit_opt_out:false,managed_selection:false,version:state==='missing'?null:'0.6.0',identity:id(state==='missing'?'b':'a'),reason_codes:[]}}
-function fixture(){return {revision:0,readiness_context:{schema:1,base_identity:id('a'),source_profile:'default',release:{catalog_name:'model-router',version:'0.6.0',ref:'b'.repeat(40)}},profiles:['default','p1','p2'].map((name,i)=>({name,readiness:ready(i===2?'missing':'ready'),native_delegation:{backend:i===0?'model-router':'default'},initial_setup:{schema:1,action:i===0?'complete':i===2?'install':'select_backend',eligible:i!==0,backend_unset:i!==0,digest:id(['d','e','f'][i]),intent_digest:id(['a','b','c'][i]),reason_codes:[]}}))}}
+function fixture(){return {revision:0,readiness_context:{schema:1,base_identity:id('a'),source_profile:'default',release:{catalog_name:'model-router',version:'0.6.0',ref:'b'.repeat(40)}},profiles:['default','p1','p2'].map((name,i)=>({name,readiness:ready(i===2?'missing':'ready'),native_delegation:{backend:i===0?'model-router':'default'},initial_setup:{schema:1,default_backend:'model-router-auto',action:i===0?'complete':i===2?'install':'select_backend',eligible:i!==0,backend_unset:i!==0,digest:id(['d','e','f'][i]),intent_digest:id(['a','b','c'][i]),reason_codes:[]}}))}}
 function environment(options={}){
  const module=api(),snapshot=fixture(),current=structuredClone(snapshot),writes=[],calls=[],plans=new Map(),values=new Map()
  const storage=options.storage||{get:(k,d=null)=>values.has(k)?structuredClone(values.get(k)):d,set:(k,v)=>values.set(k,structuredClone(v))}
@@ -33,13 +33,14 @@ function environment(options={}){
    assert.deepEqual(Object.keys(body).sort(),['expected_revision','expected_root_identity','updates'].sort())
    assert.equal(body.expected_root_identity,current.readiness_context.base_identity)
    const profile=body.updates[0].profile,plan_id=String(++planCounter).repeat(32)
-   plans.set(plan_id,profile);result={plan_id,changes:[{profile,field:'delegation.backend',before:null,after:'model-router'}]}
+   plans.set(plan_id,profile);result={plan_id,default_backend:'model-router-auto',changes:[{profile,field:'delegation.backend',before:null,after:'model-router-auto'}]}
+   if(options.legacyPlan){delete result.default_backend;result.changes[0].after='model-router'}
    if(options.cancelDuringPreview)live=false
   } else if(operation==='apply'){
    writes.push({method,operation,body,profile:route.profile})
    if(options.unknownApply)throw new Error('unknown write')
    const profile=plans.get(body.plan_id),row=current.profiles.find(x=>x.name===profile)
-   row.initial_setup.action='complete';row.initial_setup.eligible=false;row.initial_setup.backend_unset=false;row.native_delegation.backend='model-router'
+   row.initial_setup.action='complete';row.initial_setup.eligible=false;row.initial_setup.backend_unset=false;row.native_delegation.backend='model-router-auto'
    result={status:'applied',plan_id:body.plan_id,applied:[{profile,key:'delegation.backend'}],remaining:[]}
   }else throw new Error(operation)
   return {code:0,output:'MODEL_ROUTER_JSON:'+JSON.stringify(result)}
@@ -58,7 +59,7 @@ test('initial setup installs exact target then selects backend through the sourc
  const e=environment(),r=await e.run(['p2'])
  assert.equal(r.outcomes[0].state,'complete');assert.equal(e.writes.length,2)
  assert.equal(e.writes[0].args.action,'install');assert.equal(e.writes[0].profile,'p2');assert.equal(e.writes[0].args.force,false)
- assert.equal(e.writes[1].profile,'default');assert.equal(e.current.profiles[2].native_delegation.backend,'model-router')
+ assert.equal(e.writes[1].profile,'default');assert.equal(e.current.profiles[2].native_delegation.backend,'model-router-auto')
 })
 test('initial setup enables a verified disabled target without reinstalling it',async()=>{
  const e=environment({enable:true}),r=await e.run(['p1'])
@@ -94,4 +95,16 @@ test('initial setup unknown or protected DTO is not eligible',()=>{
  assert.equal(e.module.initialSetupEligible(row,safe,id('a')),true)
  row.initial_setup.eligible=false;assert.equal(e.module.initialSetupEligible(row,safe,id('a')),false)
  assert.equal(e.module.initialSetupEligible({name:'p1'},safe,id('a')),false)
+})
+
+test('old setup DTO without the declared auto default refuses before any request',async()=>{
+ const e=environment()
+ for(const row of e.snapshot.profiles)delete row.initial_setup.default_backend
+ await assert.rejects(()=>e.run(['p1']))
+ assert.deepEqual(e.calls,[]);assert.deepEqual(e.writes,[])
+})
+test('old-default plan is never applied by the new setup UI',async()=>{
+ const e=environment({legacyPlan:true}),r=await e.run(['p1'])
+ assert.equal(r.manualRequired,true);assert.equal(r.unknown,false)
+ assert.deepEqual(e.writes,[])
 })

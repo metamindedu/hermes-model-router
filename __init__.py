@@ -127,7 +127,7 @@ def register(ctx):
 
     schema = {
         "name": "coding_route",
-        "description": "Read effective Heavy/Light roles or inspect/join historical process-backed jobs. New work uses native delegate_task with the selected model-router or model-router-profiles backend, never coding_route start. Main handles small bounded changes directly, including tests. Ordinary implementation delegation requires at least two substantive independent workstreams unless explicitly requested by the user; required Heavy/independent review remains mandatory. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
+        "description": "Read effective Heavy/Light roles or inspect/join historical process-backed jobs. New work uses native delegate_task with the selected model-router, model-router-profiles or model-router-auto backend, never coding_route start. Main handles small bounded changes directly, including tests. Ordinary implementation delegation requires at least two substantive independent workstreams unless explicitly requested by the user; required Heavy/independent review remains mandatory. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {

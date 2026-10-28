@@ -1322,6 +1322,8 @@ function BackendPreparationGuide({ profile }) {
   ] })
 }
 
+const INITIAL_SETUP_BACKEND = 'model-router-auto'
+
 function validInitialContext(context) {
   return Boolean(context && context.schema === 1 && PREPARATION_ID_RE.test(context.base_identity || '') &&
     typeof context.source_profile === 'string' && PREPARATION_PROFILE_RE.test(context.source_profile))
@@ -1329,6 +1331,7 @@ function validInitialContext(context) {
 
 export function validInitialSetup(value) {
   return Boolean(value && value.schema === 1 && ['install', 'enable', 'select_backend', 'complete', 'preserved', 'manual'].includes(value.action) &&
+    value.default_backend === INITIAL_SETUP_BACKEND &&
     typeof value.eligible === 'boolean' && typeof value.backend_unset === 'boolean' &&
     typeof value.digest === 'string' && (value.digest === '' || PREPARATION_ID_RE.test(value.digest)) &&
     typeof value.intent_digest === 'string' && (value.intent_digest === '' || PREPARATION_ID_RE.test(value.intent_digest)) &&
@@ -1440,7 +1443,7 @@ export async function runInitialSetup({ transport, snapshot, selected, scopeKey,
         })
         if (!current()) break
         if (typeof plan.plan_id !== 'string' || !/^[a-f0-9]{32}$/.test(plan.plan_id) || !Array.isArray(plan.changes) || plan.changes.length !== 1 ||
-            plan.changes[0].profile !== outcome.name || plan.changes[0].field !== 'delegation.backend' || plan.changes[0].after !== 'model-router') throw new Error('initial_setup_plan_invalid')
+            plan.default_backend !== INITIAL_SETUP_BACKEND || plan.changes[0].profile !== outcome.name || plan.changes[0].field !== 'delegation.backend' || plan.changes[0].after !== INITIAL_SETUP_BACKEND) throw new Error('initial_setup_plan_invalid')
         const fresh = await initialSetupRequest(transport, source, 'status')
         if (!current()) break
         const freshRow = fresh.profiles.find(item => item.name === outcome.name)
@@ -1456,7 +1459,7 @@ export async function runInitialSetup({ transport, snapshot, selected, scopeKey,
         const after = observed.profiles.find(item => item.name === outcome.name)
         if (receipt.status !== 'applied' || receipt.plan_id !== plan.plan_id || !Array.isArray(receipt.applied) || receipt.applied.length !== 1 ||
             receipt.applied[0].profile !== outcome.name || receipt.applied[0].key !== 'delegation.backend' || !Array.isArray(receipt.remaining) || receipt.remaining.length ||
-            !sameOwner(observed) || after?.initial_setup?.action !== 'complete' || after.native_delegation?.backend !== 'model-router' || after.readiness?.state !== 'ready') throw new Error('initial_setup_apply_unknown')
+            !sameOwner(observed) || !validInitialSetup(after?.initial_setup) || after.initial_setup.action !== 'complete' || after.native_delegation?.backend !== INITIAL_SETUP_BACKEND || after.readiness?.state !== 'ready') throw new Error('initial_setup_apply_unknown')
         changed = true
       }
       outcome.state = 'complete'; onProgress([...outcomes])
@@ -1538,10 +1541,11 @@ function InitialSetupCard({ pluginContext, data, scopeKey, settingsBusy, begin, 
     viewGeneration.current += 1
     setTargets(current => mode === 'all' ? [...eligible] : mode === 'none' ? [] : toggleName(current, name, value))
   }
-  const labels = { install: '설치하고 사용 준비', enable: '설치된 플러그인 사용 준비', select_backend: 'Heavy / Light 방식 선택', complete: '이미 준비됨', preserved: '기존 선택 유지', manual: '직접 확인 필요', not_started: '대기', installing: '설치 중', enabling: '활성화 중', prepared: '설치 확인', selecting_backend: '작업 방식 저장 중', unknown: '결과 확인 필요 · 자동 재시도 안 함' }
+  const labels = { install: '설치하고 사용 준비', enable: '설치된 플러그인 사용 준비', select_backend: '모델 / 전문 프로필 통합 방식 선택', complete: '이미 준비됨', preserved: '기존 선택 유지', manual: '직접 확인 필요', not_started: '대기', installing: '설치 중', enabling: '활성화 중', prepared: '설치 확인', selecting_backend: '작업 방식 저장 중', unknown: '결과 확인 필요 · 자동 재시도 안 함' }
   return jsxs('details', { id: 'initial-setup', open: eligible.length > 0, style: styles.section, children: [
     jsx('summary', { style: { cursor: 'pointer' }, children: jsxs('span', { style: styles.statusLine, children: [jsx('strong', { style: styles.heading, children: '처음 사용하는 프로필 준비' }), jsx(Badge, { variant: 'muted', children: `준비됨 ${rows.filter(row => row.initial_setup?.action === 'complete').length}/${rows.length}` })] }) }),
-    jsx('p', { style: styles.hint, children: '아래에서 고른 프로필에 필요한 플러그인을 준비하고, 아직 작업 방식을 고르지 않았다면 Heavy / Light를 사용하도록 설정합니다. 버튼을 누르기 전에는 아무것도 바뀌지 않습니다.' }),
+    jsx('p', { style: styles.hint, children: '아래에서 고른 프로필에 필요한 플러그인을 준비하고, 아직 작업 방식을 고르지 않았다면 ‘에이전트가 모델 / 전문 프로필 중 선택’을 기본 적용합니다. 버튼을 누르기 전에는 아무것도 바뀌지 않습니다.' }),
+    jsx('p', { style: styles.hint, children: '처음에는 다른 프로필 사용을 허용하지 않아 Heavy / Light 모델 경로만 사용합니다. 전문 프로필 경로는 아래 작업 분담 카드에서 사용 대상을 직접 허용한 뒤 이용할 수 있습니다.' }),
     jsx('p', { style: styles.hint, children: '모델·로그인 정보·예비 모델·시간 제한·다른 프로필 계정 사용 권한은 바꾸지 않습니다. 이전에 꺼 두거나 다른 작업 방식을 고른 프로필도 그대로 둡니다. 새로 만든 프로필은 나중에 이 목록에서 준비할 수 있습니다.' }),
     jsxs('div', { style: styles.selectionToolbar, children: [jsx('strong', { children: `${targets.length}개 선택` }), jsxs('div', { style: styles.actions, children: [
       jsx(Button, { id: 'initial-setup-all', size: 'sm', variant: 'secondary', disabled: locked || !supported, onClick: () => chooseTargets('all'), children: '준비 가능한 프로필 전체 선택' }),
@@ -1667,20 +1671,26 @@ function ProfilePreparationCard({ pluginContext, data, scopeKey, settingsBusy, b
 export const NATIVE_DELEGATION_BACKENDS = freezeDeep([
   { value: 'default', label: '기본 위임 모델 사용' },
   { value: 'model-router', label: '작업에 맞춰 Heavy / Light 선택' },
+  { value: 'model-router-auto', label: '에이전트가 모델 / 전문 프로필 중 선택' },
   { value: 'model-router-profiles', label: '전문 프로필에 맡기기' }
 ])
+
+const nativeModelMode = backend => ['model-router', 'model-router-auto'].includes(backend)
+const nativeProfileMode = backend => ['model-router-profiles', 'model-router-auto'].includes(backend)
+const nativeEmptyPolicy = () => ({ heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } })
+const nativeDraftPolicy = draft => draft.backend === 'model-router-auto' ? draft.autoPolicy : draft.policy
 
 export function copyNativeDelegationDraft(dto) {
   if (dto?.schema !== 1 || dto.supported !== true || typeof dto.digest !== 'string' ||
     typeof dto.backend !== 'string' || !dto.policy || !dto.profile_routes) return null
   return { backend: dto.backend, expectedDigest: dto.digest, policy: deepClone(dto.policy),
-    profile_routes: deepClone(dto.profile_routes), allowProfileAccess: false }
+    autoPolicy: deepClone(dto.auto_policy || nativeEmptyPolicy()), profile_routes: deepClone(dto.profile_routes), allowProfileAccess: false }
 }
 
 export function nativeDelegationValidation(draft, profileNames) {
   if (!draft || !NATIVE_DELEGATION_BACKENDS.some(item => item.value === draft.backend)) return '작업을 맡기는 방식을 선택하세요.'
   for (const role of ['heavy', 'light']) {
-    const policy = draft.policy?.[role]
+    const policy = nativeDraftPolicy(draft)?.[role]
     if (!policy || !['off', 'custom'].includes(policy.mode) || !Array.isArray(policy.chain) ||
       (policy.mode === 'off' && policy.chain.length) || (policy.mode === 'custom' && (!policy.chain.length || policy.chain.length > 5))) return '예비 모델 목록을 확인하세요.'
     const seen = new Set()
@@ -1708,8 +1718,8 @@ export function buildNativeDelegationPreviewBody(revision, profile, draft, dto, 
   if (draft.expectedDigest !== dto?.digest) throw new Error('다른 곳에서 작업 분담 설정이 바뀌었습니다. 입력 내용을 확인하고 상태를 다시 불러오세요.')
   if (dto?.editable !== true || dto.supported !== true || typeof dto.digest !== 'string') throw new Error('이 프로필의 작업 분담 설정은 현재 바꿀 수 없습니다.')
   return { expected_revision: revision, updates: [{ profile, expected_digest: dto.digest,
-    backend: draft.backend, policy: deepClone(draft.policy), profile_routes: deepClone(draft.profile_routes),
-    allow_additional_cost: ['heavy', 'light'].some(role => draft.policy[role].mode === 'custom'),
+    backend: draft.backend, policy: deepClone(nativeDraftPolicy(draft)), profile_routes: deepClone(draft.profile_routes),
+    allow_additional_cost: ['heavy', 'light'].some(role => nativeDraftPolicy(draft)[role].mode === 'custom'),
     allow_profile_access: draft.allowProfileAccess === true }] }
 }
 
@@ -1721,7 +1731,8 @@ export function copyNativeDelegationBaselines(profiles) {
 
 export function nativeDelegationTargetReason(row, backend) {
   if (!row || row.native_delegation?.supported !== true || row.native_delegation.editable !== true) return '이 프로필은 설정을 변경할 수 없습니다.'
-  if (backend === 'model-router' && row.routing?.enabled !== true) return '이 프로필의 작업 분담이 꺼져 있습니다. 아래 작업 분담 설정에서 먼저 켜세요.'
+  if (backend === 'model-router-auto' && row.native_delegation.auto_supported !== true) return '설치된 플러그인이 모델 / 프로필 통합 선택을 지원하지 않습니다. 먼저 플러그인을 업데이트하세요.'
+  if (nativeModelMode(backend) && row.routing?.enabled !== true) return '이 프로필의 작업 분담이 꺼져 있습니다. 아래 작업 분담 설정에서 먼저 켜세요.'
   return ''
 }
 
@@ -1742,8 +1753,13 @@ export function buildNativeDelegationBatchBody(revision, origin, targets, draft,
     // Copy visible fields only. A mode change must never overwrite hidden permissions/policies.
     const next = { ...deepClone(draft), expectedDigest: baseline.digest,
       policy: deepClone(draft.backend === 'model-router' ? draft.policy : baseline.policy),
-      profile_routes: deepClone(draft.backend === 'model-router-profiles' ? draft.profile_routes : baseline.profile_routes),
-      allowProfileAccess: draft.backend === 'model-router-profiles' && draft.allowProfileAccess === true }
+      autoPolicy: deepClone(draft.backend === 'model-router-auto' ? draft.autoPolicy : baseline.auto_policy || nativeEmptyPolicy()),
+      profile_routes: deepClone(nativeProfileMode(draft.backend) ? draft.profile_routes : baseline.profile_routes),
+      allowProfileAccess: nativeProfileMode(draft.backend) && draft.allowProfileAccess === true }
+    if (draft.backend === 'model-router-auto') {
+      // The default is hidden here: only explicit per-task profile choices are supported.
+      next.profile_routes.default = next.profile_routes.profiles.some(item => item.name === baseline.profile_routes.default) ? baseline.profile_routes.default : null
+    }
     const beforeNames = new Set(baseline.profile_routes.profiles.map(item => item.name))
     const addsAccess = next.profile_routes.profiles.some(item => !beforeNames.has(item.name)) ||
       (next.profile_routes.default !== null && next.profile_routes.default !== baseline.profile_routes.default)
@@ -1811,7 +1827,10 @@ function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets
   const stale = Boolean(draft && draft.expectedDigest !== dto?.digest)
   const locked = disabled || dto?.editable !== true || !draft || stale
   const selected = Array.isArray(targets) ? targets : []
-  const updatePolicy = (role, updater) => onChange(current => ({ ...current, policy: { ...current.policy, [role]: updater(current.policy[role]) } }))
+  const updatePolicy = (role, updater) => onChange(current => {
+    const key = current.backend === 'model-router-auto' ? 'autoPolicy' : 'policy'
+    return { ...current, [key]: { ...current[key], [role]: updater(current[key][role]) } }
+  })
   const profileSettings = draft?.profile_routes
   const configured = profileSettings?.profiles || []
   const setProfile = (name, checked) => onChange(current => {
@@ -1819,7 +1838,7 @@ function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets
     return { ...current, allowProfileAccess: false, profile_routes: { profiles, default: profiles.some(entry => entry.name === current.profile_routes.default) ? current.profile_routes.default : null } }
   })
   const fallbackRole = role => {
-    const policy = draft.policy[role]
+    const policy = nativeDraftPolicy(draft)[role]
     const primary = nativePrimaryModel(sourceRow, role)
     return jsxs('article', { style: { ...styles.roleCard, gap: '0.9rem' }, children: [
       jsxs('div', { style: styles.statusLine, children: [
@@ -1859,12 +1878,13 @@ function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets
       jsx(ChoiceField, { id: 'native-delegation-backend', label: '작업을 맡기는 방식', value: draft.backend, disabled: locked,
         options: NATIVE_DELEGATION_BACKENDS.some(item => item.value === draft.backend) ? NATIVE_DELEGATION_BACKENDS : [{ value: draft.backend, label: '현재 별도 고급 설정' }, ...NATIVE_DELEGATION_BACKENDS],
         onChange: backend => onChange(current => ({ ...current, backend, allowProfileAccess: false })) }),
-      draft.backend === 'model-router' ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
+      draft.backend === 'model-router-auto' ? jsx('p', { id: 'native-auto-explanation', role: 'note', style: styles.hint, children: '같은 대화에서 에이전트가 작업마다 Heavy / Light 모델 경로 또는 아래에서 허용한 전문 프로필을 고릅니다. 전문 프로필은 그 프로필의 기존 기본 모델·추론 설정을 사용하며, Heavy / Light를 다시 고르지 않습니다. 필수 Heavy 검수는 모델 경로로 수행합니다. 예비 모델 설정도 기존 모델 전용 방식과 별도로 저장됩니다.' }) : null,
+      nativeModelMode(draft.backend) ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { style: styles.hint, children: '계획과 중요한 검토는 Heavy, 구현과 반복 작업은 Light 모델에 맡깁니다. 아래는 불러온 프로필에 저장된 기본 모델이며, 다른 프로필의 기본 모델은 각자의 설정을 따릅니다.' }),
         jsx('div', { style: styles.roleGrid, children: ['heavy', 'light'].map(fallbackRole) }),
-        ['heavy', 'light'].some(role => draft.policy[role].mode === 'custom') ? jsx('p', { role: 'note', style: styles.warning, children: `예비 모델을 설정하고 저장하면 선택한 ${selected.length}개 프로필에서 필요할 때 사용할 수 있습니다. 제공자의 요금제에 따라 사용량이나 비용이 늘 수 있습니다.` }) : null
+        ['heavy', 'light'].some(role => nativeDraftPolicy(draft)[role].mode === 'custom') ? jsx('p', { role: 'note', style: styles.warning, children: `예비 모델을 설정하고 저장하면 선택한 ${selected.length}개 프로필에서 필요할 때 사용할 수 있습니다. 제공자의 요금제에 따라 사용량이나 비용이 늘 수 있습니다.` }) : null
       ] }) : null,
-      draft.backend === 'model-router-profiles' ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
+      nativeProfileMode(draft.backend) ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { role: 'note', style: styles.warning, children: '선택한 전문 프로필의 모델과 연결된 계정으로 새 작업을 맡깁니다. 해당 계정의 사용량이나 요금이 발생할 수 있습니다. 기존 대화에 이어 쓰는 기능은 아닙니다. 신뢰할 수 있는 프로필만 허용하세요.' }),
         ...profiles.map(row => {
           const entry = configured.find(item => item.name === row.name)
@@ -1875,9 +1895,9 @@ function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets
           ] }, row.name)
         }),
         ...configured.filter(entry => !profiles.some(row => row.name === entry.name)).map(entry => jsxs('div', { style: styles.warning, children: [jsx('span', { children: `더 이상 없는 프로필: ${entry.name}` }), jsx(Button, { size: 'sm', variant: 'secondary', disabled: locked, onClick: () => setProfile(entry.name, false), children: '허용 목록에서 제거' })] }, entry.name)),
-        jsx(ChoiceField, { id: 'native-profile-default', label: '맡길 프로필을 따로 고르지 않으면', value: profileSettings.default || '__parent__', disabled: locked,
+        draft.backend === 'model-router-profiles' ? jsx(ChoiceField, { id: 'native-profile-default', label: '맡길 프로필을 따로 고르지 않으면', value: profileSettings.default || '__parent__', disabled: locked,
           options: [{ value: '__parent__', label: '현재 대화의 모델 사용' }, ...configured.map(entry => ({ value: entry.name, label: entry.name }))],
-          onChange: value => onChange(current => ({ ...current, allowProfileAccess: false, profile_routes: { ...current.profile_routes, default: value === '__parent__' ? null : value } })) }),
+          onChange: value => onChange(current => ({ ...current, allowProfileAccess: false, profile_routes: { ...current.profile_routes, default: value === '__parent__' ? null : value } })) }) : jsx('p', { style: styles.hint, children: '통합 방식에서는 맡길 프로필을 작업마다 명시적으로 선택합니다. 기존 프로필 전용 방식의 기본 대상은 유지하며, 그 대상을 허용 목록에서 제거하면 기본 선택도 해제됩니다. 허용 프로필이 없으면 모델 경로만 사용할 수 있습니다.' }),
         jsx(CheckRow, { id: 'native-profile-access-consent', label: `선택한 ${selected.length}개 저장 대상에서 위 프로필의 계정과 기능 사용을 허용합니다`, detail: '허용 대상을 새로 추가하거나 기본 프로필을 바꿀 때 필요합니다. 새로 만드는 프로필은 자동으로 허용되지 않습니다.', checked: draft.allowProfileAccess, disabled: locked,
           onChange: checked => onChange(current => ({ ...current, allowProfileAccess: checked })) })
       ] }) : null,
@@ -1903,8 +1923,8 @@ function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets
         jsx('strong', { children: '저장할 내용' }),
         jsx('p', { style: styles.hint, children: `적용 대상: ${selected.join(', ') || '선택 안 됨'}` }),
         jsx('p', { style: styles.hint, children: `작업 분담: ${nativeBackendLabel(draft.backend)}` }),
-        draft.backend === 'model-router' ? jsx('p', { style: styles.hint, children: `Heavy: ${nativeSpareLabel(draft.policy.heavy)} · Light: ${nativeSpareLabel(draft.policy.light)}` }) : null,
-        draft.backend === 'model-router-profiles' ? jsx('p', { style: styles.hint, children: `허용할 전문 프로필: ${configured.map(row => row.name).join(', ') || '없음'} · 기본: ${profileSettings.default || '현재 대화 모델'}. 예비 모델은 각 저장 대상의 기존 설정을 유지합니다.` }) : jsx('p', { style: styles.hint, children: '전문 프로필의 계정 사용 허용 목록은 각 프로필의 기존 설정을 유지합니다.' }),
+        nativeModelMode(draft.backend) ? jsx('p', { style: styles.hint, children: `Heavy: ${nativeSpareLabel(nativeDraftPolicy(draft).heavy)} · Light: ${nativeSpareLabel(nativeDraftPolicy(draft).light)}` }) : null,
+        nativeProfileMode(draft.backend) ? jsx('p', { style: styles.hint, children: `허용할 전문 프로필: ${configured.map(row => row.name).join(', ') || '없음'} · ${draft.backend === 'model-router-auto' ? '작업마다 명시 선택 · 대상 프로필의 기본 모델·추론 설정 사용' : `기본: ${profileSettings.default || '현재 대화 모델'}. 예비 모델은 각 저장 대상의 기존 설정을 유지합니다.`}` }) : jsx('p', { style: styles.hint, children: '전문 프로필의 계정 사용 허용 목록은 각 프로필의 기존 설정을 유지합니다.' }),
         jsx('p', { style: styles.hint, children: '기본 모델·시간 제한·다른 카드의 설정은 바꾸지 않습니다.' })
       ] }),
       Array.isArray(dto?.warnings) && dto.warnings.length ? jsx('p', { style: styles.warning, children: dto.warnings.includes('profile_target_missing_remove_from_allowlist') ? '허용 목록에 더 이상 없는 프로필이 있습니다. 목록을 확인하고 제거하세요.' : '이 설정을 변경할 수 있는지 확인이 필요합니다. 설치 상태를 확인한 뒤 다시 불러오세요.' }) : null,
@@ -3175,7 +3195,7 @@ function RouterPage({ ctx: pluginContext }) {
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.6.0',
+  version: '0.7.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

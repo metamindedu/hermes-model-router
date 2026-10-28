@@ -34,7 +34,7 @@ def test_real_classes_registration_and_deterministic_schema(env):
     providers = nd.register_native_delegation(SimpleNamespace(register_delegation_provider=captured.append), home)
     assert captured == list(providers)
     assert all(isinstance(p, DelegationProvider) for p in providers)
-    assert [p.name for p in providers] == ['model-router', 'model-router-profiles']
+    assert [p.name for p in providers] == ['model-router', 'model-router-profiles', 'model-router-auto']
     p = nd.ModelRouterProvider(home, lambda: service)
     assert p.task_parameters({}) == p.task_parameters({'api_key': 'SECRET'})
     assert list(p.task_parameters({})['purpose']['enum']) == list(nd.PURPOSE_ROLES)
@@ -53,6 +53,7 @@ def test_actual_core_plugin_registration(env):
         providers = nd.register_native_delegation(ctx, home)
         assert get_provider('model-router') is providers[0]
         assert get_provider('model-router-profiles') is providers[1]
+        assert get_provider('model-router-auto') is providers[2]
     finally:
         manager.unload('model-router')
 

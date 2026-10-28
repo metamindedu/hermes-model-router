@@ -93,7 +93,7 @@ def test_profile_routes_require_exact_existing_unique_names_and_allowlisted_defa
 def test_only_owned_keys_are_identified():
     from model_router.config_writer import ALLOWED_KEYS
     assert ns.KEYS == ('delegation.backend', 'delegation.backends.model-router',
-                       'delegation.backends.model-router-profiles')
+                       'delegation.backends.model-router-profiles', 'delegation.backends.model-router-auto')
     assert 'delegation.backends' not in ns.KEYS
     assert set(ns.KEYS) <= ALLOWED_KEYS
     assert 'delegation.backends' not in ALLOWED_KEYS

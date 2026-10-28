@@ -51,7 +51,7 @@ def test_real_initial_setup_boundary(tmp_path, case):
         writes=[]
         service = None
         def writer(profile,key,value):
-            assert key == 'delegation.backend' and value == 'model-router'
+            assert key == 'delegation.backend' and value == 'model-router-auto'
             home = root if profile == 'default' else root/'profiles'/profile
             token = set_hermes_home_override(home)
             try: set_config_value(key,value)
@@ -74,8 +74,18 @@ def test_real_initial_setup_boundary(tmp_path, case):
             assert not service._lock_path.parent.exists(), 'status must not create service data'
             plan=service.initial_setup_preview(request())
             assert service.apply(plan['plan_id'])['status']=='applied'
-            before['delegation']['backend']='model-router'
+            before['delegation']['backend']='model-router-auto'
             assert config()==before and len(writes)==1 and not service.store_path.exists()
+            from hermes_cli.plugins import get_plugin_manager
+            from tools.registry import registry
+            from tools import delegate_tool  # bootstrap the genuine core tool registration
+            manager=get_plugin_manager(); manager.discover_and_load()
+            assert manager._plugins['model-router'].enabled and not manager._plugins['model-router'].error
+            definition=registry.get_definitions({'delegate_task'})[0]['function']
+            parameters=definition['parameters']['properties']['tasks']['items']['properties']
+            assert parameters['execution']['enum']==['model'] and 'purpose' in parameters
+            assert 'profile' not in parameters, 'initial setup must not grant other profiles'
+            manager.unload()
         elif case == 'native_toolsets':
             status=dto('target')
             assert status['action']=='manual' and status['reason_codes']==['native_enable_changes_tool_selection'],status
@@ -144,7 +154,7 @@ def test_real_initial_setup_boundary(tmp_path, case):
                 assert not writes and 'backend' not in config('target')['delegation']
             elif case=='pyd_readback':
                 assert service.apply(plan['plan_id'])['status']=='partial'
-                assert len(writes)==1 and config('target')['delegation']['backend']=='model-router'
+                assert len(writes)==1 and config('target')['delegation']['backend']=='model-router-auto'
             else:
                 status=dto('target')
                 assert status['action']=='manual' and not status['eligible'] and path.exists() and not writes,status

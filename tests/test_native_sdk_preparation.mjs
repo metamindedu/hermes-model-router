@@ -75,7 +75,7 @@ for (const topology of ['primary', 'shared', 'isolated']) test(`actual native SD
 for (const topology of ['primary', 'shared', 'isolated']) test(`actual SDK ${topology} initial enable and backend selection retain distinct owners`, { skip: !core && 'set HERMES_DESKTOP_SOURCE_ROOT' }, async () => {
   const api = plugin(), source = { mode: 'local', connectionId: 'local-source', profile: 'source', targetProfile: 'source' }
   const target = { ...source, profile: 'future', targetProfile: 'future' }
-  const complete = { schema: 1, action: 'complete', eligible: false, backend_unset: false, digest: id('a'), intent_digest: id('b'), reason_codes: [] }
+  const complete = { schema: 1, default_backend: 'model-router-auto', action: 'complete', eligible: false, backend_unset: false, digest: id('a'), intent_digest: id('b'), reason_codes: [] }
   const snapshot = { revision: 0, readiness_context: { schema: 1, base_identity: id('a'), source_profile: 'source', release: null }, profiles: [
     { name: 'source', readiness: { ...readiness(true), version: '0.6.0' }, initial_setup: complete, native_delegation: { backend: 'model-router' } },
     { name: 'future', readiness: { ...readiness(true), state: 'disabled', python: 'not_enabled', version: '0.6.0' }, initial_setup: { ...complete, action: 'enable', eligible: true, backend_unset: true, digest: id('c') }, native_delegation: { backend: 'default' } }
@@ -94,10 +94,10 @@ for (const topology of ['primary', 'shared', 'isolated']) test(`actual SDK ${top
     if (operation === 'status') reply = structuredClone(current)
     else if (operation === 'initial-setup-preview') {
       assert.equal(body.updates[0].profile, 'future')
-      reply = { plan_id: 'a'.repeat(32), changes: [{ profile: 'future', field: 'delegation.backend', after: 'model-router' }] }
+      reply = { plan_id: 'a'.repeat(32), default_backend: 'model-router-auto', changes: [{ profile: 'future', field: 'delegation.backend', after: 'model-router-auto' }] }
     } else {
       assert.equal(operation, 'apply'); writes.push('backend-future')
-      current.profiles[1].initial_setup = { ...complete }; current.profiles[1].native_delegation.backend = 'model-router'
+      current.profiles[1].initial_setup = { ...complete }; current.profiles[1].native_delegation.backend = 'model-router-auto'
       reply = { status: 'applied', plan_id: body.plan_id, applied: [{ profile: 'future', key: 'delegation.backend' }], remaining: [] }
     }
     return { code: 0, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(reply) }

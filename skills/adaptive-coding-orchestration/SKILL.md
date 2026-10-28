@@ -42,20 +42,27 @@ Use the existing approved tool purposes without changing the plugin implementati
 
 NEW work uses the real `delegate_task`, never `coding_route(action="start")`, a runner script, or a subprocess workaround. `coding_route(action="config")` reads effective Heavy/Light roles; it does NOT prove this session selected a native backend. The selected session tool schema must actually offer the fields below. If it does not, report that native backend selection and a supported session/tool rebuild are required; do not change settings, force a reload, or pretend wording selects Heavy.
 
-Two namespaced providers are available, with one active backend per session:
+Three namespaced providers are available, with one active backend per session:
 
 | backend | per-task selector | behavior |
 |---|---|---|
 | `model-router` | required `purpose` | purpose selects operator-assigned Heavy/Light |
 | `model-router-profiles` | allowlisted `profile`, or an explicit configured default | child runs with that profile's identity and policy |
+| `model-router-auto` | required `execution` and the matching `purpose` or `profile` selector | choose the current profile's purpose route OR an allowed profile per task |
 
 For the purpose backend, pass `tasks=[{"goal":"specific deliverable", "context":"complete bounded handoff", "purpose":"independent-review"}]`. Allowed Light purposes: `implementation`, `mechanical`, `preliminary-review`. Allowed Heavy purposes: `plan`, `semantic-final`, `independent-review`. This preserves fresh-context independent reviews; a purpose does not enforce a read-only OS sandbox. Read-only review remains a handoff/approval constraint.
 
 For profile routing, `tasks=[{"goal":"specific deliverable", "context":"complete bounded handoff", "profile":"exact-allowlisted-name"}]`. Profile routing is NOT a Heavy adapter. A target name, description or persona is not model identity evidence or a substitute for required Heavy review. If Heavy review is required but this session only offers profile routing, leave the gate unmet unless exact actual route evidence establishes the configured Heavy identity. Do not switch backends silently.
 
+For automatic selection, choose per task within the already approved scope: `execution="model"` requires a valid `purpose` and forbids `profile`; `execution="profile"` requires an explicit allowlisted `profile` and forbids `purpose`. Missing, invalid or contradictory selectors refuse that task; never retry on the other branch. Required Heavy planning/final review uses `execution="model"` with a Heavy purpose. PROFILE uses the target's existing primary model/reasoning/ordinary fallback, not its Heavy/Light settings. These are native children in one backend, not profile children re-delegating. Native labels are `model:heavy`, `model:light`, or `profile:<name>` and do not prove successful API responses. Keep the Direct-Main and substantive-parallel-work thresholds unchanged.
+
+Automatic-mode MODEL continuation has its own `delegation.backends.model-router-auto` policy and exact backend-bound cost consent; old model-only consent is not inherited. PROFILE uses the existing explicitly saved profile allowlist and target's ordinary chain. Registration, a mode draft and installation do not grant or activate anything. Apply changes only at a supported user-selected session/tool boundary; do not change the global backend per task.
+
 A profile child uses target model, credentials, fallback chain, reasoning, skills, SOUL and terminal policy, but keeps the parent's toolset ceiling and parent-owned transcript storage. It does not join an existing profile conversation and is not an OS security boundary. Missing credentials, invalid defaults and revoked/invalid allowlists must remain explicit errors; never install/enable another profile or expand permissions to repair a task. Omitted profile without a configured default follows the native parent route, not `delegation.model`.
 
 Registering/installing this plugin, reading settings, model presets and Heavy/Light saves do not select `delegation.backend`. Backend activation and profile execution grants require explicit scoped settings saves. Respect existing saved opt-outs. Existing sessions retain pinned tools until a supported rebuild boundary; compression can also rebuild. Do not claim a disk update activated this session.
+
+The explicit first-use preparation flow defaults eligible raw-unset backends to `model-router-auto`; it is not installation-time activation or a migration of saved choices. Fresh profile allowlists stay empty and auto continuation stays OFF. Dormant auto cost/profile authority requires manual review; initial preparation must not enable it. Existing Heavy/Light/model-only selections remain unchanged.
 
 ### Native completion and evidence
 

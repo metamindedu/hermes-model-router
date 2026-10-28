@@ -117,6 +117,7 @@ function harness(options = {}) {
     setResponder(fn) { responder = fn }, setStatusResponder(fn) { statusResponder = fn }, setRefetcher(fn) { refetcher = fn }, setData(next) { data = next }, data: () => data,
     check(id, value) { byId(id).props.onCheckedChange(value); render() },
     input(id, value) { byId(id).props.onChange({ target: { value } }); render() },
+    selectValue(id) { return find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === id)).props.value },
     select(id, value) { find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === id)).props.onValueChange(value); render() } }
 }
 
@@ -536,6 +537,79 @@ test('fresh connection/profile scope starts all-selected without leaking previou
   assert.deepEqual(h.selected('routing-profile-'), ['claire'])
 })
 
+const autoFixture = () => {
+  const data = fixture()
+  for (const row of data.profiles) {
+    row.routing.enabled = true
+    row.native_delegation.auto_supported = true
+    row.native_delegation.auto_policy = { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } }
+  }
+  return data
+}
+
+test('automatic mode exposes both choices without writes and saves its own policy plus explicit grants', async () => {
+  const data = autoFixture()
+  data.profiles[1].native_delegation.policy.heavy = { mode: 'custom', chain: [{ provider: 'old', model: 'old-spare' }] }
+  const h = harness({ data })
+  h.select('native-delegation-backend', 'model-router-auto')
+  assert.deepEqual(h.calls, [])
+  assert.match(text(h.byId('native-auto-explanation')), /기본 모델·추론 설정/)
+  assert.match(text(h.byId('native-auto-explanation')), /필수 Heavy 검수는 모델 경로/)
+  assert.equal(h.selectValue('native-heavy-fallback-mode'), 'off')
+  assert.throws(() => h.selectValue('native-profile-default'))
+  h.check('native-profile-other', true)
+  h.check('native-profile-access-consent', true)
+  h.select('native-heavy-fallback-mode', 'custom')
+  h.input('native-heavy-provider-0', 'new')
+  h.input('native-heavy-model-0', 'auto-spare')
+  h.setResponder(operation => operation === 'delegation-preview' ? { plan_id: 'auto-plan', changes: [] } : { status: 'applied' })
+  h.click('native-delegation-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
+  const update = h.calls[0].body.updates[0]
+  assert.equal(update.backend, 'model-router-auto')
+  assert.deepEqual(update.policy.heavy.chain, [{ provider: 'new', model: 'auto-spare' }])
+  assert.equal(update.allow_additional_cost, true)
+  assert.equal(update.allow_profile_access, true)
+  assert.deepEqual(update.profile_routes, { profiles: [{ name: 'other', description: '' }], default: null })
+})
+
+test('automatic bulk save preserves each hidden ordinary-profile default', async () => {
+  const data = autoFixture()
+  for (const [i, row] of data.profiles.entries()) {
+    row.native_delegation.profile_routes = { profiles: [{ name: 'default', description: 'General' }, { name: 'other', description: 'Specialist' }], default: i === 1 ? 'other' : 'default' }
+  }
+  const h = harness({ data })
+  h.select('native-delegation-backend', 'model-router-auto')
+  h.click('native-target-all')
+  h.setResponder(operation => operation === 'delegation-preview' ? { plan_id: 'auto-plan', changes: [] } : { status: 'applied' })
+  h.click('native-delegation-save'); await h.flush()
+  for (const update of h.calls[0].body.updates) {
+    assert.equal(update.profile_routes.default, data.profiles.find(row => row.name === update.profile).native_delegation.profile_routes.default)
+    assert.equal(update.allow_profile_access, false)
+  }
+})
+
+test('old backend capability cannot save automatic mode', () => {
+  const h = harness()
+  h.select('native-delegation-backend', 'model-router-auto')
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  assert.match(text(h.byId('native-delegation-settings')), /통합 선택을 지원하지 않습니다/)
+  assert.deepEqual(h.calls, [])
+})
+
+test('automatic and model-only spare drafts stay independent when switching modes', () => {
+  const h = harness({ data: autoFixture() })
+  h.select('native-delegation-backend', 'model-router-auto')
+  h.select('native-heavy-fallback-mode', 'custom')
+  h.input('native-heavy-provider-0', 'auto-provider')
+  h.input('native-heavy-model-0', 'auto-model')
+  h.select('native-delegation-backend', 'model-router')
+  assert.equal(h.selectValue('native-heavy-fallback-mode'), 'off')
+  h.select('native-delegation-backend', 'model-router-auto')
+  assert.equal(h.byId('native-heavy-model-0').props.value, 'auto-model')
+  assert.deepEqual(h.calls, [])
+})
+
 test('native backend selection is draft-only; explicit save uses its own frozen scope', async () => {
   const h = harness()
   h.select('native-delegation-backend', 'model-router')
@@ -873,7 +947,7 @@ function initialSetupFixture() {
   data.readiness_context.release = { catalog_name: 'model-router', version: '0.6.0', ref: 'b'.repeat(40) }
   data.profiles.forEach((row, index) => {
     row.readiness = { ...setupReadiness('ready'), version: '0.6.0' }
-    row.initial_setup = { schema: 1, action: 'select_backend', eligible: true, backend_unset: true,
+    row.initial_setup = { schema: 1, default_backend: 'model-router-auto', action: 'select_backend', eligible: true, backend_unset: true,
       digest: String(index + 1).repeat(64), intent_digest: 'a'.repeat(64), reason_codes: ['backend_unset'] }
   })
   return data
@@ -927,10 +1001,10 @@ test('actual initial page handler preserves dirty drafts and uses only explicit 
     if (operation === 'status') result = structuredClone(backend)
     else if (operation === 'initial-setup-preview') {
       const profile = body.updates[0].profile, plan_id = 'b'.repeat(32)
-      plans.set(plan_id, profile); result = { plan_id, changes: [{ profile, field: 'delegation.backend', before: null, after: 'model-router' }] }
+      plans.set(plan_id, profile); result = { plan_id, default_backend: 'model-router-auto', changes: [{ profile, field: 'delegation.backend', before: null, after: 'model-router-auto' }] }
     } else if (operation === 'apply') {
       const profile = plans.get(body.plan_id), row = backend.profiles.find(row => row.name === profile)
-      row.initial_setup.action = 'complete'; row.initial_setup.eligible = false; row.native_delegation.backend = 'model-router'
+      row.initial_setup.action = 'complete'; row.initial_setup.eligible = false; row.native_delegation.backend = 'model-router-auto'
       result = { status: 'applied', plan_id: body.plan_id, applied: [{ profile, key: 'delegation.backend' }], remaining: [] }
     } else throw new Error(operation)
     return { code: 0, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(result) }

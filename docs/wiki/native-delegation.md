@@ -1,4 +1,4 @@
-# Native delegation architecture — local candidate
+# Native delegation architecture — 0.7.0
 
 ## Consumer settings refinement (0.5.1)
 
@@ -7,7 +7,7 @@ The UI separates configured primary Heavy/Light models from optional spare-model
 
 ## Ownership
 
-The plugin registers two real `DelegationProvider` implementations through
+The plugin registers three real `DelegationProvider` implementations through
 `PluginContext.register_delegation_provider`. Hermes >=0.22.5 owns child
 construction, concurrency, profile scope, progress, steering, cancellation,
 output-schema validation and result delivery. No production Router launch method
@@ -24,6 +24,7 @@ already-started work; the archived launcher test oracle is not a runtime entry.
   as the origin inventory; a same-named profile in a different root is refused.
   This is not a running-session handoff or OS
   security boundary, and profile names/personas do not qualify a Heavy review.
+- `model-router-auto`: explicit `execution=model` + `purpose`, OR `execution=profile` + exact allowed `profile`, per task. Contradictory/missing selectors refuse; a profile route is never a Heavy adapter. No target-role override or secondary delegation is performed.
 - `default`, `model_map` and `profile_routes` are never registered/replaced by this
   plugin. One delegation backend is selected for a session.
 
@@ -36,6 +37,7 @@ only these native keys:
 delegation.backend
 delegation.backends.model-router
 delegation.backends.model-router-profiles
+delegation.backends.model-router-auto
 ```
 
 Installation/registration/read/refresh/model presets/ordinary section saves never
@@ -67,7 +69,7 @@ Native fallback means continuing the existing child conversation. They are not
 interchangeable. New purpose routes return `fallback_providers: []` unless a new,
 exact origin/backend/role/chain/version/continuation-bound consent is present.
 Neither old rerun consent nor ordinary delegation fallback authorizes this.
-Profile routes use the target's own chain. No wrapper retries native execution.
+Automatic MODEL continuation has its own backend-bound consent and policy block; old model-only policies remain untouched and are not migrated into it. Profile routes use the target's own chain. No wrapper retries native execution. Automatic MODEL gets the origin role total; automatic PROFILE gets the origin ordinary total. The same branch decision is validated in provider and watchdog preflight.
 
 Keep requested route, native runtime-reported result.route, response-observed
 identity where available and semantic acceptance distinct. The plugin does not

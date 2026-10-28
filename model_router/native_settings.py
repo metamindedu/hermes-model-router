@@ -11,12 +11,14 @@ import json
 import re
 from typing import Any
 
+AUTO_ROUTING_SUPPORTED = True
 SCHEMA = 1
-BACKENDS = frozenset({"default", "model-router", "model-router-profiles"})
+BACKENDS = frozenset({"default", "model-router", "model-router-profiles", "model-router-auto"})
 KEY_BACKEND = "delegation.backend"
 KEY_POLICY = "delegation.backends.model-router"
 KEY_PROFILES = "delegation.backends.model-router-profiles"
-KEYS = (KEY_BACKEND, KEY_POLICY, KEY_PROFILES)
+KEY_AUTO_POLICY = "delegation.backends.model-router-auto"
+KEYS = (KEY_BACKEND, KEY_POLICY, KEY_PROFILES, KEY_AUTO_POLICY)
 ROLES = ("heavy", "light")
 _PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 _PROVIDER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
@@ -88,7 +90,7 @@ def validate_profiles(value: Any, inventory: set[str] | list[str]) -> dict[str, 
 def make_consent(profile: str, backend: str, role: str, chain: list[dict[str, str]]) -> dict[str, Any]:
     """Bind approval to native within-child continuation, never legacy reruns."""
     _literal(profile, _PROFILE, "profile")
-    if backend != "model-router" or role not in ROLES:
+    if backend not in ("model-router", "model-router-auto") or role not in ROLES:
         raise ValueError("invalid consent scope")
     policy = {r: {"mode": "custom" if r == role else "off", "chain": chain if r == role else []} for r in ROLES}
     chain = validate_policy(policy)[role]["chain"]
@@ -113,7 +115,7 @@ def default_policy() -> dict[str, Any]:
     return {role: {"mode": "off", "chain": []} for role in ROLES}
 
 
-def build_policy_block(profile: str, policy: Any, allow_additional_cost: bool) -> dict[str, Any]:
+def build_policy_block(profile: str, policy: Any, allow_additional_cost: bool, *, backend: str = "model-router") -> dict[str, Any]:
     """Construct a whole owned block; a custom policy always requires fresh consent."""
     if not isinstance(allow_additional_cost, bool):
         raise ValueError("cost confirmation must be boolean")
@@ -122,11 +124,11 @@ def build_policy_block(profile: str, policy: Any, allow_additional_cost: bool) -
     for role, item in parsed.items():
         if item["mode"] == "custom" and not allow_additional_cost:
             raise ValueError("custom continuation requires explicit additional-cost confirmation")
-        entries[role] = {**copy.deepcopy(item), "consent": make_consent(profile, "model-router", role, item["chain"]) if item["mode"] == "custom" else None}
+        entries[role] = {**copy.deepcopy(item), "consent": make_consent(profile, backend, role, item["chain"]) if item["mode"] == "custom" else None}
     return {"schema": SCHEMA, "fallbacks": entries}
 
 
-def validate_policy_block(profile: str, block: Any) -> dict[str, Any]:
+def validate_policy_block(profile: str, block: Any, *, backend: str = "model-router") -> dict[str, Any]:
     """Validate the final persisted block and its profile-bound consent."""
     if not isinstance(block, dict) or set(block) != {"schema", "fallbacks"} or type(block["schema"]) is not int or block["schema"] != SCHEMA:
         raise ValueError("invalid native policy block")
@@ -145,7 +147,7 @@ def validate_policy_block(profile: str, block: Any) -> dict[str, Any]:
         if parsed[role]["mode"] == "off":
             if item["consent"] is not None:
                 raise ValueError("off policy cannot carry consent")
-        elif not consent_matches(profile, "model-router", role, parsed[role]["chain"], item["consent"]):
+        elif not consent_matches(profile, backend, role, parsed[role]["chain"], item["consent"]):
             raise ValueError("invalid native continuation consent")
     return parsed
 

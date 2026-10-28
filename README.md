@@ -2,15 +2,16 @@
 
 Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. New work uses `delegate_task`; the plugin no longer starts a separate routed worker. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
-## Native delegation migration (local candidate)
+## Native delegation routing (0.7.0)
 
-Requires **Hermes >=0.22.5**. Two namespaced DelegationProvider backends reuse core spawning, concurrency, progress, cancellation and result delivery:
+Requires **Hermes >=0.22.5**. Three namespaced DelegationProvider backends reuse core spawning, concurrency, progress, cancellation and result delivery:
 
 | Saved `delegation.backend` | Per-task selector | Route |
 |---|---|---|
 | `default` | none | Existing Hermes delegation settings |
 | `model-router` | required `purpose` | Existing operator-assigned Heavy/Light roles |
 | `model-router-profiles` | allowlisted `profile` or configured default | Target profile identity and execution policy |
+| `model-router-auto` | required `execution`, then `purpose` OR explicit `profile` | Agent chooses a model route or a profile route per task |
 
 Select and explicitly save the backend in **Settings → Plugins → 모델 및 라우팅 → 작업 분담과 예비 모델**. Registration, installation, refresh, presets and existing Heavy/Light saves do **not** select a backend or grant access to other profiles. This dedicated card has its own explicit save-target selection, initially the loaded profile only, and is not silently included in the other cards' combined save. Explicit subsets/empty selections survive source changes and refresh; new profiles are never automatically included. Each selected profile keeps its own frozen settings digest. Hidden per-target permission/fallback blocks are preserved rather than copied from the source. Existing sessions keep pinned tools until a supported rebuild boundary; compression may also rebuild them. The saved setting alone does not prove current-session activation. No forced reload or shared restart is performed.
 
@@ -29,6 +30,23 @@ For profile routes:
 ```
 
 The allowlist starts empty. Adding a profile/default is an explicit grant to use its model, credentials, fallback chain, reasoning, skills, SOUL and terminal policy. New profiles are never automatically included. A child keeps the parent's toolset ceiling and transcript storage; it does not attach to an existing target conversation and is not an OS security boundary. An omitted profile with no configured default follows the native parent route, not `delegation.model`. Profile routing is not automatically a Heavy review. Only one backend is active per session; these namespaces coexist with Advanced Delegation without replacing `model_map` or `profile_routes`.
+
+### Automatic model-or-profile choice (0.7.0)
+
+Choose **에이전트가 모델 / 전문 프로필 중 선택** in the dedicated settings card and explicitly save. Once that backend is active in a new or explicitly rebuilt session, the agent can choose for each subtask without switching modes:
+
+```json
+{"tasks":[
+  {"goal":"Plan the current project change","execution":"model","purpose":"plan"},
+  {"goal":"Collect specialist evidence","execution":"profile","profile":"exact-allowlisted-profile"}
+]}
+```
+
+MODEL uses the launching profile's configured Heavy/Light role and role total limit. PROFILE uses the selected profile's existing primary model, reasoning and ordinary fallback, with the launching profile's ordinary-child total limit. It does not select the target's Heavy/Light model. `execution` is required; MODEL requires `purpose` and forbids `profile`, while PROFILE requires an explicit allowed `profile` and forbids `purpose`. Missing/contradictory selectors refuse that task, never silently fall back to the parent or other branch. PROFILE is not a Heavy adapter: required Heavy review uses MODEL with its Heavy purpose. Native labels distinguish `model:heavy`, `model:light` and `profile:<name>`.
+
+The existing account-access allowlist is reused without expanding it; new names still require explicit approval. No allowed profiles means only MODEL is offered. The ordinary profile-only default is not used by automatic tasks and is retained independently for each save target. MODEL continuation has its own `delegation.backends.model-router-auto` exact-backend cost consent, initially OFF; the model-only policy is preserved and not automatically copied. Direct-Main and substantive-parallel-work guidance is unchanged. No core patch, secondary delegation layer, subprocess worker or per-task settings write is needed.
+
+Native profile routing follows Hermes auth resolution, including any configured/global-root credential sharing; this is not a new target-local-only credential guarantee. Target SOUL and available skills do not imply the full target conversation, memory/context auto-load or every target-only MCP tool is available. The native parent-derived toolset ceiling and normal approval rules still apply.
 
 **Fallback is not automatically migrated.** Legacy routed fallback starts a fresh task under a restricted exhaustion trigger; native fallback continues the same child conversation. New per-role continuation lists default OFF and require a new explicit exact-chain save/cost permission. Old rerun consent is never reused. Profile routes use the target profile's own chain. Native `result.route` is runtime-reported identity, not proof of every API response or a semantic GO.
 
@@ -147,11 +165,11 @@ Hermes builds that retired the bundled Tirith scanner no longer provide `tools.t
 
 ## Development
 
-### First-time setup (0.6.0)
+### First-time setup (0.7.0)
 
-After native installation/enablement, open **Settings → Plugins → 모델 및 라우팅 → 처음 사용하는 프로필 준비**. Eligible current profiles start selected. The user must explicitly run setup; viewing, refreshing, registration and future-profile discovery never install or save settings. Existing explicit OFF, saved backend choices (including `default`), managed/unsafe state and dormant paid continuation remain protected.
+After native installation/enablement, open **Settings → Plugins → 모델 및 라우팅 → 처음 사용하는 프로필 준비**. This explicit flow defaults new, raw-unset profiles to **에이전트가 모델 / 전문 프로필 중 선택**; plain install/enable alone still never writes the selector. Eligible current profiles start selected. The user must explicitly run setup; viewing, refreshing, registration and future-profile discovery never install or save settings. Existing explicit OFF, saved backend choices (including `default`), managed/unsafe state and dormant paid continuation remain protected.
 
-Setup reuses native exact-profile admission/install/enable operations, then a one-shot `initial-setup-preview`/`apply` operation owning **only `delegation.backend = model-router`** for raw-absent selectors. It does not materialize optional backend blocks, copy models/credentials/fallbacks/timeouts, grant cross-profile access, or rewrite canonical settings. Other cards' drafts remain untouched and require an explicit state reload after a mutation. Newly added profiles are offered, never automatically provisioned.
+Setup reuses native exact-profile admission/install/enable operations, then a one-shot `initial-setup-preview`/`apply` operation owning **only `delegation.backend = model-router-auto`** for raw-absent selectors. It does not materialize optional backend blocks, copy models/credentials/fallbacks/timeouts, grant cross-profile access, or rewrite canonical settings. Fresh allowlists remain empty (MODEL only until profile access is explicitly granted), and auto continuation remains OFF. Dormant auto cost or profile-authority declarations require manual review rather than becoming active through initial preparation. Existing model-only mode remains selected, not migrated. Both the installed source and ready target must support automatic routing; old DTOs/plans cannot silently apply the previous default. Other cards' drafts remain untouched and require an explicit state reload after a mutation. Newly added profiles are offered, never automatically provisioned.
 
 Automatic installation additionally requires the catalog repository, full SHA **and version** to match the source. Until a new release's catalog update is maintainer-merged/visible, new-profile automatic installation is truthfully unavailable; a public source release alone is not catalog admission. Differing/custom existing packages require native manual review. Normal native security/dependency/capability gates are retained. See `after-install.md`.
 

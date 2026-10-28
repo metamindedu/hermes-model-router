@@ -45,6 +45,14 @@ def fixture(tmp_path, monkeypatch):
         put_path(config, key, value)
         path.write_text(yaml.safe_dump(config), encoding='utf-8')
     service = Service(root=root, writer=writer)
+    # General settings transactions use current installed capability fixtures;
+    # detector tests separately install exact legacy/current package bytes.
+    source = Path(__file__).resolve().parents[1] / 'model_router'
+    for name in ('default', 'p1', 'p2'):
+        directory = service._profile_home(name) / 'plugins/model-router/model_router'
+        directory.mkdir(parents=True, exist_ok=True)
+        for module in ('native_delegation', 'native_watchdog', 'native_settings', 'native_service', 'config_writer'):
+            (directory / (module + '.py')).write_bytes((source / (module + '.py')).read_bytes())
     monkeypatch.setattr('hermes_constants.get_default_hermes_root', lambda: root)
     monkeypatch.setattr(service, '_native_delegation_code_signature', lambda profile: 'fixture-code')
     monkeypatch.setattr(service, 'routing_config', lambda profile: {'enabled': True})

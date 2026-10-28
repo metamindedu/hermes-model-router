@@ -1,8 +1,8 @@
 name: model-router
-version: 0.6.0
+version: 0.7.0
 requires_hermes: ">=0.22.5"
 kind: standalone
-description: "Profile model settings, default-on Heavy/Light task routing via native delegation, allowlisted profile routes, and runtime controls"
+description: "Profile model settings, native per-task model-or-profile selection, explicit first-use preparation, and runtime controls"
 author: NewMetaW
 provides_tools:
   - coding_route

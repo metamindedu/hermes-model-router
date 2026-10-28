@@ -12,10 +12,11 @@ import subprocess
 import sys
 import threading
 
+AUTO_ROUTING_SUPPORTED = True
 ALLOWED_KEYS = frozenset({
     "model.provider", "model.default", "model.base_url", "model.api_mode", "agent.reasoning_effort",
     "delegation.provider", "delegation.model", "delegation.reasoning_effort", "delegation.base_url", "delegation.api_mode", "delegation.fallback_providers",
-    "delegation.backend", "delegation.backends.model-router", "delegation.backends.model-router-profiles",
+    "delegation.backend", "delegation.backends.model-router", "delegation.backends.model-router-profiles", "delegation.backends.model-router-auto",
     "auxiliary.compression.provider", "auxiliary.compression.model", "auxiliary.compression.reasoning_effort",
     "auxiliary.title_generation.provider", "auxiliary.title_generation.model", "auxiliary.title_generation.reasoning_effort",
     "fallback_providers", "fallback_model", "skills.disabled", "skills.external_dirs",

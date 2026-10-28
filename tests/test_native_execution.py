@@ -14,9 +14,12 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.mark.parametrize('profile_route', [False, True])
-@pytest.mark.parametrize('cancel', ['complete', 'stop', 'budget', 'noncooperative'])
-def test_real_native_child_completion_and_cooperative_stop(tmp_path, monkeypatch, cancel, profile_route):
+@pytest.mark.parametrize('cancel,profile_route,automatic', [
+    (cancel, profile, auto)
+    for cancel in ('complete', 'stop', 'budget', 'noncooperative')
+    for profile in (False, True) for auto in (False, True)
+] + [('complete', 'mixed', True)])
+def test_real_native_child_completion_and_cooperative_stop(tmp_path, monkeypatch, cancel, profile_route, automatic):
     import httpx
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from hermes_cli import plugins, middleware
@@ -28,7 +31,7 @@ def test_real_native_child_completion_and_cooperative_stop(tmp_path, monkeypatch
     home = tmp_path / 'home'
     shutil.copytree(root, home / 'plugins/model-router',
         ignore=shutil.ignore_patterns('.git', 'tests', '__pycache__', '.hermes-catalog.json'))
-    backend = 'model-router-profiles' if profile_route else 'model-router'
+    backend = 'model-router-auto' if automatic else ('model-router-profiles' if profile_route else 'model-router')
     target = home / 'profiles/specialist'
     target.mkdir(parents=True)
     (target / 'config.yaml').write_text(json.dumps({'model': {'provider': 'openrouter', 'default': 'fixture-target', 'base_url': 'http://127.0.0.1:9/v1', 'api_key': 'target-offline-fixture'}, 'agent': {'reasoning_effort': 'low'}}), encoding='utf-8')
@@ -85,7 +88,15 @@ def test_real_native_child_completion_and_cooperative_stop(tmp_path, monkeypatch
         assert manager._plugins['model-router'].enabled and not manager._plugins['model-router'].error
         def run():
             with bind_subagent_parent(parent):
-                args = {'tasks': [{'goal': 'Exercise the real offline native child', **({'profile': 'specialist'} if profile_route else {'purpose': 'mechanical'}), **({'total_timeout_seconds': .05} if cancel == 'budget' else {})}]}
+                selectors = ([{'purpose': 'mechanical'}, {'purpose': 'plan'}, {'profile': 'specialist'}]
+                             if profile_route == 'mixed' else [{'profile': 'specialist'} if profile_route else {'purpose': 'mechanical'}])
+                tasks = [{'goal': f'Exercise the real offline native child {i}', **selection,
+                          **({'execution': 'profile' if 'profile' in selection else 'model'} if automatic else {}),
+                          **({'total_timeout_seconds': .05} if cancel == 'budget' else {})}
+                         for i, selection in enumerate(selectors)]
+                if profile_route == 'mixed':
+                    tasks.append({'goal': 'Contradictory selectors must refuse alone', 'execution': 'profile', 'profile': 'specialist', 'purpose': 'plan'})
+                args = {'tasks': tasks}
                 result['value'] = json.loads(middleware.run_tool_execution_middleware(
                     'delegate_task', args, lambda values: dt.delegate_task(**values, parent_agent=parent),
                     session_id=parent.session_id))
@@ -107,15 +118,25 @@ def test_real_native_child_completion_and_cooperative_stop(tmp_path, monkeypatch
             assert not thread.is_alive()
         else:
             run()
-        assert len(children) == 1 and isinstance(children[0], AIAgent)
-        entry = result['value']['results'][0]
-        assert entry['status'] in ({'interrupted', 'failed'} if cancel != 'complete' else {'completed'})
-        assert entry['route']['backend'] == backend
-        assert entry['route']['model'] == ('fixture-target' if profile_route else 'fixture-light')
+        assert len(children) == (3 if profile_route == 'mixed' else 1)
+        assert all(isinstance(child, AIAgent) for child in children)
+        expected = ['fixture-light', 'fixture-heavy', 'fixture-target'] if profile_route == 'mixed' else ['fixture-target' if profile_route else 'fixture-light']
+        for entry, model in zip(result['value']['results'], expected):
+            assert entry['status'] in ({'interrupted', 'failed'} if cancel != 'complete' else {'completed'})
+            assert entry['route']['backend'] == backend
+            assert entry['route']['model'] == model
+            assert entry['api_calls'] == 0
+            if automatic:
+                assert entry['route']['label'].startswith('profile:' if model == 'fixture-target' else 'model:')
+            if model == 'fixture-target':
+                assert entry['route']['reasoning_effort'] == 'low'
+        if profile_route == 'mixed':
+            assert result['value']['results'][3]['status'] == 'error'
+            assert result['value']['results'][3]['route']['refused'] is True
         if profile_route:
-            assert children[0]._delegate_profile_home == target
-            assert children[0].api_key != parent.api_key  # target's unauthenticated local endpoint never borrows the parent key
-        assert entry['api_calls'] == 0
+            child = next(child for child in children if child.model == 'fixture-target')
+            assert child._delegate_profile_home == target
+            assert child.api_key != parent.api_key  # target's unauthenticated local endpoint never borrows the parent key
         assert parent._active_children == []
         if cancel == 'budget':
             rows = [json.loads(line) for line in (home/'plugin-data/model-router/native-watchdog.jsonl').read_text().splitlines()]

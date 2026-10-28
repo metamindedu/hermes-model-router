@@ -52,21 +52,21 @@ def test_initial_status_preview_are_readonly_and_plan_contains_no_raw_values(set
     assert not service.store_path.exists()
     saved = (service.store_path.parent / 'plans' / (plan['plan_id'] + '.json')).read_text()
     assert 'sentinel-private-never-in-plan' not in saved
-    assert plan['changes'] == [{'profile': 'default', 'field': ns.KEY_BACKEND, 'before': None, 'after': 'model-router'}]
+    assert plan['changes'] == [{'profile': 'default', 'field': ns.KEY_BACKEND, 'before': None, 'after': 'model-router-auto'}]
 
 
 def test_initial_apply_owns_only_backend_and_preserves_opaque_inactive_blocks(setup_fixture):
     service, calls, _, _ = setup_fixture
     value = config(service)
-    value['delegation']['backends']['model-router-profiles'] = {'unrecognized': {'preserve': 'opaque'}}
+    value['delegation']['backends']['unrelated'] = {'unrecognized': {'preserve': 'opaque'}}
     write_config(service, value)
     before = copy.deepcopy(value)
     result = service.apply(service.initial_setup_preview(request(service))['plan_id'])
     assert result['status'] == 'applied'
-    assert calls == [('default', ns.KEY_BACKEND, 'model-router')]
-    before['delegation']['backend'] = 'model-router'
+    assert calls == [('default', ns.KEY_BACKEND, 'model-router-auto')]
+    before['delegation']['backend'] = 'model-router-auto'
     assert config(service) == before
-    assert ns.KEY_POLICY.split('.')[-1] not in config(service)['delegation']['backends']
+    assert ns.KEY_AUTO_POLICY.split('.')[-1] not in config(service)['delegation']['backends']
     assert not service.store_path.exists()
 
 
@@ -97,7 +97,7 @@ def test_initial_never_activates_dormant_paid_continuation(setup_fixture):
     service, calls, _, _ = setup_fixture
     value = config(service)
     policy = ns.default_policy(); policy['heavy'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'paid'}]}
-    value['delegation']['backends']['model-router'] = ns.build_policy_block('default', policy, True)
+    value['delegation']['backends']['model-router-auto'] = ns.build_policy_block('default', policy, True, backend='model-router-auto')
     write_config(service, value)
     assert native.initial_setup_status(service, 'default')['eligible'] is False
     with pytest.raises(ValueError): service.initial_setup_preview(request(service))
@@ -195,7 +195,7 @@ def test_initial_delegation_container_presence_is_preserved(setup_fixture, conta
     before = copy.deepcopy(value)
     receipt = service.apply(service.initial_setup_preview(request(service))['plan_id'])
     assert receipt['status'] == 'applied'
-    before.setdefault('delegation', {})['backend'] = 'model-router'
+    before.setdefault('delegation', {})['backend'] = 'model-router-auto'
     assert config(service) == before
 
 
@@ -210,5 +210,5 @@ def test_initial_real_native_writer_preserves_every_other_value(setup_fixture, m
     before = config(service)
     receipt = service.apply(service.initial_setup_preview(request(service))['plan_id'])
     assert receipt['status'] == 'applied', receipt
-    before['delegation']['backend'] = 'model-router'
+    before['delegation']['backend'] = 'model-router-auto'
     assert config(service) == before

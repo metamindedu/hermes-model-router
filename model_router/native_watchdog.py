@@ -30,6 +30,9 @@ _ACTIVE_DISPATCH: contextvars.ContextVar["_DispatchBinding | None"] = contextvar
 )
 
 
+AUTO_ROUTING_SUPPORTED = True
+
+
 def _dispatch_backend(parent: Any) -> str:
     from agent.delegation_backends import pinned_backend
     from agent.delegation_registry import configured_backend
@@ -39,12 +42,18 @@ def _dispatch_backend(parent: Any) -> str:
 
 def _routed_policies(home: Path, args: Mapping[str, Any], backend: str = 'model-router', ordinary_total: int | float = 0) -> dict[str, tuple[str, int | float]]:
     """Preflight the native-normalized goals before *any* child can be built."""
-    from .native_delegation import PURPOSE_ROLES, _origin, _timeout
+    from .native_delegation import PURPOSE_ROLES, auto_execution, _origin, _timeout
     from .service import Service
     from tools.delegate_tool_tasks import _normalize_task_list
     service = Service()
     profile = _origin(home, service)
-    config = service.routing_config(profile) if backend == 'model-router' else {}
+    config = {}
+    if backend in ('model-router', 'model-router-auto'):
+        try:
+            config = service.routing_config(profile)
+        except Exception:
+            if backend == 'model-router':
+                raise
     if backend == 'model-router' and config.get('enabled') is not True:
         raise ValueError('routing disabled')
     tasks, error = _normalize_task_list(args.get('goal'), args.get('context'), args.get('tasks'),
@@ -55,14 +64,22 @@ def _routed_policies(home: Path, args: Mapping[str, Any], backend: str = 'model-
     for task in tasks:
         goal = task.get('goal')
         purpose = task.get('purpose')
-        role = (PURPOSE_ROLES.get(purpose) if isinstance(purpose, str) else None) if backend == 'model-router' else 'profile'
+        execution = 'model' if backend == 'model-router' else 'profile'
+        if backend == 'model-router-auto':
+            try:
+                execution = auto_execution(task)
+            except (ValueError, TypeError):
+                continue  # Native provider owns per-task refusal, preserving valid siblings.
+            if execution == 'model' and config.get('enabled') is not True:
+                continue
+        role = (PURPOSE_ROLES.get(purpose) if isinstance(purpose, str) else None) if execution == 'model' else 'profile'
         if not isinstance(goal, str):
             raise ValueError('invalid routed task')
         if role is None:
             # Native per-task validation/provider refusal owns this task. It
             # must not prevent valid siblings from being routed.
             continue
-        budget = task.get('total_timeout_seconds', config.get(role + '_timeout_seconds') if backend == 'model-router' else ordinary_total)
+        budget = task.get('total_timeout_seconds', config.get(role + '_timeout_seconds') if execution == 'model' else ordinary_total)
         if not _timeout(budget):
             continue  # provider refuses it before a child can be constructed
         policy = (role, budget)
@@ -341,7 +358,7 @@ class NativeWatchdog:
             parent = self.get_active_parent()
             try:
                 backend = _dispatch_backend(parent)
-                routed = backend in ('model-router', 'model-router-profiles')
+                routed = backend in ('model-router', 'model-router-profiles', 'model-router-auto')
             except Exception:
                 # The provider itself refuses a missing binding, even if backend discovery fails.
                 routed = False
