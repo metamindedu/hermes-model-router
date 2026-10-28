@@ -56,13 +56,31 @@ def test_skill_inventory_is_bounded_and_external_skill_paths_are_not_traversed(e
     assert str(outside) not in json.dumps(review) and 'PRIVATE_EXTERNAL_BODY' not in json.dumps(review)
 
 
-def test_credential_environment_change_stales_payer_without_leaking_value(environment, monkeypatch):
+def test_credential_environment_presence_change_stales_without_reading_value(environment, monkeypatch):
     service, root, target, body = environment
-    monkeypatch.setenv('OPENROUTER_API_KEY', 'fixture-owner-key-a')
+    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
     review, req = request(service, root, body)
     assert 'fixture-owner-key' not in json.dumps(review)
     monkeypatch.setenv('OPENROUTER_API_KEY', 'fixture-owner-key-b')
     assert rp.generate(service, root, req, lambda **kw: pytest.fail('payer changed but model called'))['code'] == 'payer_changed'
+
+
+def test_payer_never_acquires_credential_environment_values(environment, monkeypatch):
+    service, root, target, body = environment
+    import hermes_cli.auth  # metadata module loaded, no provider requests
+    class PresenceOnly(dict):
+        def __getitem__(self, key):
+            if key == 'OPENROUTER_API_KEY':
+                pytest.fail('plugin acquired a credential value')
+            return super().__getitem__(key)
+        def get(self, key, default=None):
+            if key == 'OPENROUTER_API_KEY':
+                pytest.fail('plugin acquired a credential value')
+            return super().get(key, default)
+    env = PresenceOnly(os.environ)
+    env['OPENROUTER_API_KEY'] = 'fixture-never-readable'
+    monkeypatch.setattr(rp.os, 'environ', env)
+    assert len(rp._payer_provenance(service, root, {'openrouter'})) == 64
 
 
 def test_endpoint_overrides_are_unavailable_instead_of_sending_role_sources(environment, monkeypatch):

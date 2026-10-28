@@ -104,14 +104,14 @@ def _payer(service, owner):
 
 
 def _payer_provenance(service, home, providers):
-    """Opaque binding of the native owner's credential environment, not key values.
+    """Bind nonsecret environment presence and file metadata, never key values.
 
-    Never reads auth.json or .env contents. Native OAuth refresh/account choice
-    remains host-owned and is not certified/frozen by this stateless preflight.
+    Never acquires credential environment values or reads auth.json/.env bytes.
+    Native OAuth refresh/account choice and credential-value changes remain
+    host-owned, not certified/frozen by this stateless preflight.
     Explicit endpoint overrides cannot be explained by this bounded preview.
     """
     from .installation import _inspect
-    import hashlib
     envs = {
         'openrouter': ('OPENROUTER_API_KEY', 'OPENROUTER_BASE_URL'),
         'openai': ('OPENAI_API_KEY', 'OPENAI_BASE_URL'),
@@ -125,7 +125,7 @@ def _payer_provenance(service, home, providers):
         'nvidia': ('NVIDIA_API_KEY', 'NVIDIA_BASE_URL'),
     }
     relevant = sorted({key for provider in providers for key in envs[provider]})
-    if any(os.environ.get(key, '').strip() for key in relevant if key.endswith(('_BASE_URL', '_PORTAL_URL'))):
+    if any(key in os.environ for key in relevant if key.endswith(('_BASE_URL', '_PORTAL_URL'))):
         raise ValueError('payer_unavailable')
     # Public registry metadata only: do not resolve clients or retrieve auth state.
     # A home-scoped provider plugin shadow is not an understood built-in route.
@@ -134,7 +134,7 @@ def _payer_provenance(service, home, providers):
         key = 'openai-api' if provider == 'openai' else provider
         if PROVIDER_REGISTRY.get(key) != dict.get(PROVIDER_REGISTRY, key):
             raise ValueError('payer_unavailable')
-    env_signature = {key: hashlib.sha256(os.environ[key].encode()).hexdigest() if key in os.environ else None for key in relevant}
+    env_signature = {key: key in os.environ for key in relevant}
     dotenv_signatures = []
     for directory in sorted({home, service.root}, key=str):
         info, signature = _inspect(directory / '.env', 'file', base=service.root)
