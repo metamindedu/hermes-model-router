@@ -6,7 +6,7 @@ function api(){
  const names=[]
  for(const m of source.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"][^'"]+['"]/g))for(const n of m[1].split(',').map(s=>s.trim()).filter(Boolean))names.push(n)
  const code=source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g,'').replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m,'').replace(/export default /g,'const pluginDefinition = ').replace(/^export\s+/gm,'')
- return new Function('DesktopSDK',...names,code+'\nreturn {profileRoleView,editProfileRoleDescription,buildNativeDelegationBatchBody,createRoleProposalController}')( {},...names.map(n=>n))
+ return new Function('DesktopSDK',...names,code+'\nreturn {profileRoleView,editProfileRoleDescription,buildNativeDelegationBatchBody,createRoleProposalController,RoleProposalDialog}')( {},...names.map(n=>['jsx','jsxs'].includes(n)?((type,props)=>({type,props})):n))
 }
 const id=x=>x.repeat(64)
 const intro=(text='웹앱 구현',state='available')=>({schema:1,state,default_description:text,default_source:state==='available'?'profile_metadata':'none',description_auto:false,digest:id('b')})
@@ -57,6 +57,13 @@ test('disposed or cancelled callback cannot apply and duplicate generate is sing
  const e=env();await e.c.open('target');let resolve;e.reply(()=>new Promise(r=>{resolve=r}));const pending=e.c.generate();await Promise.resolve();await Promise.resolve();const second=e.c.generate();await second;assert.equal(e.calls.length,2)
  e.c.dispose();resolve({code:0,output:'MODEL_ROUTER_JSON:'+JSON.stringify({schema:1,status:'proposed',owner:context().owner,target_profile:'target',source_digest:id('b'),route_digest:id('c'),proposal:{description:'late'},stale:false})});await pending;assert.deepEqual(e.used,[])
 })
+test('role source review discloses omissions, truncation and requested output limit',()=>{
+ const a=api(),ctx=context();ctx.source.omitted_sources=['external_skills_omitted'];ctx.source.truncated=true
+ const tree=a.RoleProposalDialog({view:{phase:'review',target:'target',context:ctx},onCancel:()=>{},onGenerate:()=>{},onUse:()=>{}})
+ const collect=value=>typeof value==='string'?value:Array.isArray(value)?value.map(collect).join(' '):value&&typeof value==='object'?Object.values(value).map(collect).join(' '):''
+ const rendered=collect(tree);assert.match(rendered,/자료 제외: 외부 스킬/);assert.match(rendered,/자료 축약: 있음/);assert.match(rendered,/출력 요청 상한: 512 토큰/)
+})
+
 test('source or payer change before Use cannot overwrite draft',async()=>{
  const e=env();await e.c.open('target');await e.c.generate();e.reply(()=>({code:0,output:'MODEL_ROUTER_JSON:'+JSON.stringify({...context(),source:{...context().source,digest:id('d')}})}));await e.c.use();assert.deepEqual(e.used,[]);assert.equal(e.view.phase,'error')
 })

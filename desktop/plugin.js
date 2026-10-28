@@ -1967,6 +1967,7 @@ function RoleProposalDialog({ view, onCancel, onGenerate, onUse }) {
     sources ? jsxs('details', { open: true, children: [
       jsx('summary', { children: '모델에 보낼 역할 자료 확인' }),
       jsx('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '13rem', overflowY: 'auto', font: 'inherit', fontSize: '0.8rem', padding: '0.75rem', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: '0.5rem' }, children: JSON.stringify({ '프로필 소개': sources.native_description, 'SOUL 역할 부분': sources.soul_role_excerpt, '활성 스킬 이름': sources.enabled_skill_names }, null, 2) }),
+      jsx('p', { style: styles.hint, children: `자료 제외: ${(sources.omitted_sources || []).map(code => ({ external_skills_omitted: '외부 스킬', skills_unavailable: '확인할 수 없는 스킬 목록', soul_sensitive: '민감한 역할 문구', deep_skills_omitted: '깊은 스킬 경로' })[code] || '일부 자료').join(', ') || '없음'} · 자료 축약: ${sources.truncated ? '있음' : '없음'} · 출력 요청 상한: ${Number.isSafeInteger(context?.limits?.max_output_tokens) ? context.limits.max_output_tokens : '확인 불가'} 토큰` }),
       jsx('p', { style: styles.hint, children: '대화·기억·인증 파일·스킬 본문은 읽지 않습니다. 위 전송 자료에 민감한 내용이 보이면 취소하세요. 제안은 확인 후 사용하세요.' })
     ] }) : null,
     context?.capability?.available === false ? jsx('p', { role: 'note', style: styles.warning, children: roleProposalMessage(context.capability.reason_code) }) : null,

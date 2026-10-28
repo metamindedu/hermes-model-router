@@ -116,7 +116,7 @@ def _payer_provenance(service, home, providers):
         'openrouter': ('OPENROUTER_API_KEY', 'OPENROUTER_BASE_URL'),
         'openai': ('OPENAI_API_KEY', 'OPENAI_BASE_URL'),
         'openai-api': ('OPENAI_API_KEY', 'OPENAI_BASE_URL'),
-        'openai-codex': ('CODEX_HOME', 'OPENAI_CODEX_TOKEN', 'OPENAI_CODEX_BASE_URL'),
+        'openai-codex': ('CODEX_HOME', 'OPENAI_CODEX_TOKEN', 'OPENAI_CODEX_BASE_URL', 'HERMES_CODEX_BASE_URL'),
         'anthropic': ('ANTHROPIC_API_KEY', 'ANTHROPIC_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'),
         'nous': ('NOUS_API_KEY', 'NOUS_BASE_URL', 'NOUS_INFERENCE_BASE_URL', 'NOUS_PORTAL_URL'),
         'gemini': ('GOOGLE_API_KEY', 'GEMINI_API_KEY', 'GEMINI_BASE_URL'),
@@ -130,8 +130,13 @@ def _payer_provenance(service, home, providers):
     # Public registry metadata only: do not resolve clients or retrieve auth state.
     # A home-scoped provider plugin shadow is not an understood built-in route.
     from hermes_cli.auth import PROVIDER_REGISTRY
+    from providers import provider_source
     for provider in providers:
         key = 'openai-api' if provider == 'openai' else provider
+        # Registry-field equality alone cannot establish transport authority:
+        # a user profile may keep identical metadata but replace create_client.
+        if any(provider_source(alias) not in (None, 'bundled') for alias in {provider, key}):
+            raise ValueError('payer_unavailable')
         if PROVIDER_REGISTRY.get(key) != dict.get(PROVIDER_REGISTRY, key):
             raise ValueError('payer_unavailable')
     env_signature = {key: key in os.environ for key in relevant}
