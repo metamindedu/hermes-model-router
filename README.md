@@ -2,6 +2,22 @@
 
 Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. New work uses `delegate_task`; the plugin no longer starts a separate routed worker. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
+## Profile role introductions (0.8.0)
+
+The specialist allowlist no longer requires you to retype what each profile does. A route whose stored `description` is exactly empty uses that profile's native `profile.yaml` introduction in a new capable provider's tool schema. Existing nonempty descriptions remain delegation-only overrides, including their exact saved whitespace; there is no config migration or introduction copy. The schema contains bounded, escaped role hints **only for allowed targets**. Hints are descriptive data, not instructions, account grants, capability attestations or a substitute for required Heavy review.
+
+In **Settings → Plugins → 모델 및 라우팅 → 작업 분담과 예비 모델**:
+
+- Default introductions are shown read-only. **이 위임에서만 다르게 설명** opens an optional custom field without copying the introduction; **기본 소개로 되돌리기** clears just that draft override.
+- **AI로 역할 제안** is optional. First review the exact bounded role sources and the connected owner's saved main model / existing ordinary fallback policy. **제안 만들기** explicitly authorizes a host-managed completion; **위임용 설명으로 사용** changes only the captured row's local draft. Normal settings Save is still separate.
+- The data target, loaded editing template and usage-paying connected profile are separate. The native CLI uses public `ctx.llm.complete_structured` with no provider/model/profile/task overrides or new trust grants. It does not open another profile's conversation or use that target's account. It does not use the native auto-describer that immediately persists the global introduction.
+- On page/status/schema reads there is no generation. An explicit source-review request may read only the native introduction, a bounded explicit Role/역할 SOUL section and bounded enabled local skill **identifiers**, not skill bodies or capability attestations. External skill directories are not traversed; omissions are shown in the preview. Conversation/history/private memory/auth files, MCP details and skill bodies are not role sources. Review the projected text for sensitive material before sending; filtering does not guarantee perfect declassification of arbitrary user text.
+- Generation uses the connected profile's **saved** main route and native retry/auth-refresh/fallback policy, not a live conversation-only model choice or `auxiliary.profile_describer`. One plugin facade operation is not a guarantee of one network attempt, a frozen billing route or response-verified provider attribution. Unknown/auto/dynamic/unexplainable routes fail unavailable rather than discovering a different account. The plugin does not retry or replay failed/unknown operations.
+- Source/payer changes, scope/template switches, manual edits, row removal, cancel or unmount invalidate late results. Cancel cannot recall an already-issued native request or its cost. Before accepting a proposal, source/payer context is read again. No proposal path writes the profile introduction, SOUL, settings, permission, plan or receipt; native credential refresh/usage audit remains host-owned.
+- A newly selected inherited route/cleared override requires capable save-origin code. Old/partial packages can show the native intro as **reference only**, retain legacy empty values and accept explicit manual overrides; a new manager is not proof that old providers inherit. Downgrading to 0.7.0 preserves the config shape but removes empty-description inheritance. Existing sessions keep their pinned tool schema until a supported user-chosen boundary.
+
+Selecting a profile remains a separate explicit account/tool-use grant. Role preview or AI proposal never selects/permits a profile, changes backend/model/fallback/budget values, starts a worker or saves another card. Unedited bulk-save destinations preserve their own existing override descriptions; only deliberate row edits/clear/AI acceptance propagate text.
+
 ## Native delegation routing (0.7.0)
 
 Requires **Hermes >=0.22.5**. Three namespaced DelegationProvider backends reuse core spawning, concurrency, progress, cancellation and result delivery:

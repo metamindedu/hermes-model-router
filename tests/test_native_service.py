@@ -51,7 +51,7 @@ def fixture(tmp_path, monkeypatch):
     for name in ('default', 'p1', 'p2'):
         directory = service._profile_home(name) / 'plugins/model-router/model_router'
         directory.mkdir(parents=True, exist_ok=True)
-        for module in ('native_delegation', 'native_watchdog', 'native_settings', 'native_service', 'config_writer'):
+        for module in ('native_delegation', 'native_watchdog', 'native_settings', 'native_service', 'config_writer', 'role_metadata'):
             (directory / (module + '.py')).write_bytes((source / (module + '.py')).read_bytes())
     monkeypatch.setattr('hermes_constants.get_default_hermes_root', lambda: root)
     monkeypatch.setattr(service, '_native_delegation_code_signature', lambda profile: 'fixture-code')
@@ -216,7 +216,7 @@ def test_noop_final_capability_loss_never_reports_no_change(fixture, monkeypatch
     count = [0]
     def signature(profile):
         count[0] += 1
-        return 'fixture-code' if count[0] == 1 else 'changed-code'
+        return 'fixture-code' if count[0] <= 2 else 'changed-code'
     monkeypatch.setattr(service, '_native_delegation_code_signature', signature)
     receipt = service.apply(plan['plan_id'])
     assert receipt['status'] == 'partial' and calls == []

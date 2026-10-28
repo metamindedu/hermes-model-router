@@ -24,7 +24,8 @@ const fixture = () => ({ revision: 7, current_profile: 'claire', recent_apply: n
     actual_models: structuredClone(models), routing: { ...structuredClone(routing), enabled: name === 'claire' }, drift: [],
     native_delegation: { schema: 1, supported: true, editable: true, backend: 'default', digest: 'a'.repeat(64),
       policy: { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } },
-      profile_routes: { profiles: [], default: null }, warnings: [] } })) })
+      profile_routes: { profiles: [], default: null }, role_intro_inheritance: { schema: 1, supported: true, code_identity: 'e'.repeat(64), activation: 'new_session_or_supported_rebuild' }, warnings: [] },
+    role_intro: { schema: 1, state: 'available', default_description: `Role of ${name}`, default_source: 'profile_metadata', description_auto: false, digest: 'f'.repeat(64) } })) })
 function* walk(node) {
   if (Array.isArray(node)) { for (const item of node) yield* walk(item); return }
   if (!node || typeof node !== 'object') return
@@ -53,6 +54,12 @@ function harness(options = {}) {
     const result = await (operation === 'status' ? statusResponder(body) : responder(operation, body))
     return { code: 0, output: `MODEL_ROUTER_JSON:${JSON.stringify(result)}\n` }
   } }
+  host.profileRoutes = async () => ['default', 'claire', 'other'].map(profile => ({ mode: 'local', connectionId: 'local', profile, targetProfile: profile, primary: profile === 'claire' }))
+  host.requestProfile = async (descriptor, method, args) => {
+    assert.equal(args.profile, descriptor.profile)
+    assert.equal(args.argv[1], descriptor.targetProfile)
+    return host.request(method, args)
+  }
   const useState = initial => {
     const index = cursor++
     if (!(index in hooks)) hooks[index] = typeof initial === 'function' ? initial() : initial
@@ -84,7 +91,7 @@ function harness(options = {}) {
   for (const match of source.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"][^'"]+['"]/g)) {
     for (const name of match[1].split(',').map(s => s.trim()).filter(Boolean)) imports[name] = name
   }
-  Object.assign(imports, { useState, useRef, useEffect, jsx, jsxs: jsx, host,
+  Object.assign(imports, { DesktopSDK: { Dialog: 'Dialog', DialogContent: 'DialogContent', DialogHeader: 'DialogHeader', DialogTitle: 'DialogTitle', DialogDescription: 'DialogDescription', DialogFooter: 'DialogFooter' }, useState, useRef, useEffect, jsx, jsxs: jsx, host,
     useValue: atom => atom.get(), useQuery: () => query })
   const executable = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
     .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
@@ -634,6 +641,7 @@ test('profile execution grants start empty and do not follow model-copy targets'
   h.select('native-delegation-backend', 'model-router-profiles')
   assert.deepEqual(h.selected('native-profile-'), [])
   h.check('native-profile-other', true)
+  h.click('native-profile-role-custom-other')
   h.input('native-profile-description-other', 'Read-only evidence collection')
   h.select('native-profile-default', 'other')
   h.check('native-profile-access-consent', true)
@@ -796,6 +804,73 @@ test('native role save preserves each target hidden profile access rather than c
   const other = h.calls[0].body.updates.find(row => row.profile === 'other')
   assert.deepEqual(other.profile_routes, data.profiles[2].native_delegation.profile_routes)
   assert.equal(other.allow_profile_access, false)
+})
+
+test('profile roles inherit native intro without making an input or copying it on custom toggle', () => {
+  const h = harness()
+  h.select('native-delegation-backend', 'model-router-profiles'); h.check('native-profile-other', true)
+  assert.match(text(h.byId('native-profile-role-other')), /Role of other/)
+  assert.throws(() => h.byId('native-profile-description-other'))
+  h.click('native-profile-role-custom-other')
+  assert.equal(h.byId('native-profile-description-other').props.value, '')
+  assert.deepEqual(h.calls, [])
+  h.input('native-profile-description-other', 'Only for this delegation')
+  h.click('native-profile-role-reset-other')
+  assert.throws(() => h.byId('native-profile-description-other'))
+  assert.match(text(h.byId('native-profile-role-other')), /Role of other/)
+  assert.deepEqual(h.calls, [])
+})
+
+test('untouched descriptions retain each save origin and explicit edit propagates only its row', async () => {
+  const data = nativeBatchFixture()
+  for (const [index, row] of data.profiles.entries()) row.native_delegation.profile_routes = { profiles: [{ name: 'other', description: `Own description ${index}` }], default: null }
+  const h = harness({ data }); h.select('native-delegation-backend', 'model-router-profiles'); h.click('native-target-all')
+  h.setResponder(nativeReply); h.click('native-delegation-save'); await h.flush()
+  for (const update of h.calls[0].body.updates) assert.equal(update.profile_routes.profiles[0].description, data.profiles.find(row => row.name === update.profile).native_delegation.profile_routes.profiles[0].description)
+  const g = harness({ data }); g.select('native-delegation-backend', 'model-router-profiles'); g.click('native-target-all')
+  g.input('native-profile-description-other', 'Explicit new override'); g.setResponder(nativeReply); g.click('native-delegation-save'); await g.flush()
+  for (const update of g.calls[0].body.updates) assert.equal(update.profile_routes.profiles[0].description, 'Explicit new override')
+})
+
+test('legacy origin refuses new inheritance but permits old blank, removal or explicit override', async () => {
+  const data = fixture(); delete data.profiles[1].native_delegation.role_intro_inheritance
+  const h = harness({ data }); h.select('native-delegation-backend', 'model-router-profiles'); h.check('native-profile-other', true); h.check('native-profile-access-consent', true)
+  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  h.click('native-profile-role-custom-other'); h.input('native-profile-description-other', 'Manual role'); assert.equal(h.byId('native-delegation-save').props.disabled, false)
+  const existing = fixture(); delete existing.profiles[1].native_delegation.role_intro_inheritance
+  existing.profiles[1].native_delegation.profile_routes = { profiles: [{ name: 'other', description: '' }], default: null }
+  const g = harness({ data: existing }); g.select('native-delegation-backend', 'model-router-profiles'); assert.equal(g.byId('native-delegation-save').props.disabled, false)
+  g.check('native-profile-other', false); assert.equal(g.byId('native-delegation-save').props.disabled, false)
+})
+
+function roleContext() { return { schema: 1, owner: { profile: 'claire', base_identity: 'd'.repeat(64) }, target_profile: 'other',
+  capability: { available: true, reason_code: null }, source: { digest: 'e'.repeat(64), native_description: 'Reviewed role', soul_role_excerpt: '', enabled_skill_names: [], omitted_sources: [], truncated: false },
+  payer: { profile: 'claire', basis: 'owner_saved_main', provider: 'fixture', model: 'owner-saved-model', fallback_policy: [], native_recovery: 'host_managed', route_digest: 'f'.repeat(64), estimate_usd: null }, limits: { input_bytes: 8192, max_output_tokens: 512, request_timeout_seconds: 30 } } }
+function roleAIReply(operation) {
+  const context = roleContext()
+  if (operation === 'role-proposal-context') return context
+  if (operation === 'role-proposal') return { schema: 1, status: 'proposed', owner: context.owner, target_profile: 'other', source_digest: context.source.digest, route_digest: context.payer.route_digest, proposal: { description: 'AI role draft only' }, model_attribution: { provider_verified: false }, usage: {}, stale: false }
+  return nativeReply(operation)
+}
+test('real page AI controls preview first, generate once and accept into draft without saving', async () => {
+  const data = fixture(); data.role_proposal = { schema: 1, available: true, transport: 'native_cli' }
+  const h = harness({ data }); h.select('native-delegation-backend', 'model-router-profiles'); h.check('native-profile-other', true); h.setResponder(roleAIReply)
+  h.click('native-profile-role-ai-other'); await h.flush()
+  assert.deepEqual(h.calls.map(row => row.operation), ['role-proposal-context'])
+  h.clickLabel('제안 만들기'); await h.flush()
+  assert.deepEqual(h.calls.map(row => row.operation), ['role-proposal-context', 'role-proposal'])
+  h.clickLabel('위임용 설명으로 사용'); await h.flush()
+  assert.equal(h.byId('native-profile-description-other').props.value, 'AI role draft only')
+  assert.equal(h.byId('native-profile-access-consent').props.checked, false)
+  assert.deepEqual(h.calls.map(row => row.operation), ['role-proposal-context', 'role-proposal', 'role-proposal-context'])
+  assert.ok(h.calls.every(row => row.profile === 'claire'))
+})
+test('AI result cannot overwrite later manual description or a different loaded template', async () => {
+  const data = fixture(); data.role_proposal = { schema: 1, available: true, transport: 'native_cli' }
+  const h = harness({ data }); h.select('native-delegation-backend', 'model-router-profiles'); h.check('native-profile-other', true); h.setResponder(roleAIReply)
+  h.click('native-profile-role-ai-other'); await h.flush(); h.click('native-profile-role-custom-other'); h.input('native-profile-description-other', 'Keep manual draft'); await h.flush()
+  assert.throws(() => h.button('제안 만들기')); assert.equal(h.byId('native-profile-description-other').props.value, 'Keep manual draft')
+  assert.equal(h.calls.filter(row => row.operation === 'role-proposal').length, 0)
 })
 
 test('native profile-mode bulk save preserves each target hidden spare policy', async () => {

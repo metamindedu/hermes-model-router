@@ -1684,7 +1684,7 @@ export function copyNativeDelegationDraft(dto) {
   if (dto?.schema !== 1 || dto.supported !== true || typeof dto.digest !== 'string' ||
     typeof dto.backend !== 'string' || !dto.policy || !dto.profile_routes) return null
   return { backend: dto.backend, expectedDigest: dto.digest, policy: deepClone(dto.policy),
-    autoPolicy: deepClone(dto.auto_policy || nativeEmptyPolicy()), profile_routes: deepClone(dto.profile_routes), allowProfileAccess: false }
+    autoPolicy: deepClone(dto.auto_policy || nativeEmptyPolicy()), profile_routes: deepClone(dto.profile_routes), allowProfileAccess: false, descriptionEdits: {} }
 }
 
 export function nativeDelegationValidation(draft, profileNames) {
@@ -1756,6 +1756,14 @@ export function buildNativeDelegationBatchBody(revision, origin, targets, draft,
       autoPolicy: deepClone(draft.backend === 'model-router-auto' ? draft.autoPolicy : baseline.auto_policy || nativeEmptyPolicy()),
       profile_routes: deepClone(nativeProfileMode(draft.backend) ? draft.profile_routes : baseline.profile_routes),
       allowProfileAccess: nativeProfileMode(draft.backend) && draft.allowProfileAccess === true }
+    if (nativeProfileMode(draft.backend) && draft.descriptionEdits) {
+      next.profile_routes.profiles = next.profile_routes.profiles.map(entry => ({ ...entry, description: draft.descriptionEdits[entry.name] === true
+        ? entry.description : baseline.profile_routes.profiles.find(old => old.name === entry.name)?.description ?? '' }))
+    }
+    if (nativeProfileMode(draft.backend)) {
+      const inheritanceIssue = profileRoleInheritanceIssue(next.profile_routes, baseline.profile_routes, row.native_delegation)
+      if (inheritanceIssue) throw new Error(`${name}: ${inheritanceIssue}`)
+    }
     if (draft.backend === 'model-router-auto') {
       // The default is hidden here: only explicit per-task profile choices are supported.
       next.profile_routes.default = next.profile_routes.profiles.some(item => item.name === baseline.profile_routes.default) ? baseline.profile_routes.default : null
@@ -1823,7 +1831,193 @@ function writeNativeSaveFence(storage, scopeKey, value, expectedId = null) {
   } catch { return false }
 }
 
-function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets, disabled, onChange, onTargets, onSave, error }) {
+export function profileRoleView(row, entry) {
+  if (typeof entry?.description === 'string' && entry.description !== '') return { source: 'override', description: entry.description, auto: false }
+  const intro = row?.role_intro
+  if (intro?.schema === 1 && intro.state === 'available' && typeof intro.default_description === 'string' && intro.default_description) {
+    return { source: 'profile_metadata', description: intro.default_description, auto: intro.description_auto === true }
+  }
+  return { source: 'unknown', description: '', auto: false }
+}
+
+export function editProfileRoleDescription(draft, name, description) {
+  if (!draft?.profile_routes?.profiles.some(row => row.name === name) || typeof description !== 'string') return draft
+  return { ...draft, descriptionEdits: { ...(draft.descriptionEdits || {}), [name]: true },
+    profile_routes: { ...draft.profile_routes, profiles: draft.profile_routes.profiles.map(row => row.name === name ? { ...row, description } : row) } }
+}
+
+function profileRoleInheritanceIssue(next, before, dto) {
+  const requestsInheritance = next.profiles.some(row => row.description === '' &&
+    (!before.profiles.some(old => old.name === row.name) || before.profiles.find(old => old.name === row.name).description !== ''))
+  return requestsInheritance && dto?.role_intro_inheritance?.supported !== true
+    ? '이 저장 대상은 기본 소개 자동 사용을 지원하지 않습니다. 플러그인을 업데이트하거나 직접 작성한 위임용 설명을 사용하세요.' : ''
+}
+
+const ROLE_PROPOSAL_MESSAGES = {
+  source_changed: '역할 자료가 바뀌었습니다. 내용을 다시 확인한 뒤 새로 요청하세요.',
+  payer_changed: '연결 프로필의 모델 설정이 바뀌었습니다. 사용량 정보를 다시 확인하세요.',
+  stale_result: '자료나 편집 상태가 바뀌어 이 제안을 사용할 수 없습니다.',
+  no_evidence: '역할을 제안할 근거가 부족합니다. 프로필 기본 소개를 먼저 작성하거나 직접 설명하세요.',
+  unsafe_target: '이 프로필의 역할 자료를 안전하게 읽을 수 없습니다.',
+  owner_mismatch: '연결 또는 프로필이 바뀌었습니다. 현재 연결에서 다시 확인하세요.',
+  provider_failed: '모델이 제안을 완료하지 못했습니다. 자동으로 다시 요청하지 않습니다.',
+  invalid_output: '안전한 한 줄 역할 설명을 얻지 못했습니다. 자동으로 다시 요청하지 않습니다.',
+  unsupported_transport: '이 연결에서는 역할 제안을 사용할 수 없습니다.',
+  unsupported_sdk: '현재 Hermes에서 역할 제안을 지원하지 않습니다.'
+}
+const roleProposalMessage = code => ROLE_PROPOSAL_MESSAGES[code] || '역할 제안을 확인할 수 없습니다. 기존 소개와 입력한 설명은 유지했습니다.'
+
+export function createRoleProposalController({ transport, readState, onUpdate, onUse }) {
+  let serial = 0, disposed = false, pending = false, current = null
+  const stateSignature = target => JSON.stringify(readState(target))
+  const valid = item => !disposed && current === item && item.serial === serial && item.signature === stateSignature(item.target)
+  const emit = view => { if (!disposed) onUpdate(view) }
+  const cancel = () => { serial += 1; current = null; pending = false; emit(null) }
+  const fail = (item, code) => { if (valid(item)) emit({ phase: 'error', target: item.target, context: item.context || null, message: roleProposalMessage(code) }) }
+  const call = async (item, operation, body) => {
+    if (!valid(item)) throw new Error('stale_result')
+    const reply = await transport.requestProfile(item.route, 'cli.exec', {
+      argv: ['--profile', item.route.targetProfile, 'model-router', operation, '--body', JSON.stringify(body)],
+      profile: item.route.targetProfile, timeout: 180
+    }, 210000)
+    if (!valid(item)) throw new Error('stale_result')
+    const frames = String(reply?.output || '').split(/\r?\n/).filter(line => line.startsWith('MODEL_ROUTER_JSON:'))
+    if (!reply || reply.blocked || frames.length !== 1) throw new Error('unsupported_transport')
+    let value
+    try { value = JSON.parse(frames[0].slice('MODEL_ROUTER_JSON:'.length)) } catch { throw new Error('invalid_output') }
+    if (value?.status === 'error' || value?.error) throw new Error(Object.hasOwn(ROLE_PROPOSAL_MESSAGES, value.code) ? value.code : 'invalid_output')
+    if (reply.code !== 0) throw new Error('unsupported_transport')
+    return value
+  }
+  const contextBody = item => ({ schema: 1, owner_profile: item.ownerProfile, base_identity: item.baseIdentity, target_profile: item.target })
+  const validContext = (value, item) => value?.schema === 1 && value.owner?.profile === item.ownerProfile &&
+    value.owner?.base_identity === item.baseIdentity && value.target_profile === item.target &&
+    typeof value.capability?.available === 'boolean' && PREPARATION_ID_RE.test(value.source?.digest || '') &&
+    value.payer?.profile === item.ownerProfile && PREPARATION_ID_RE.test(value.payer?.route_digest || '') &&
+    typeof value.source?.native_description === 'string' && typeof value.source?.soul_role_excerpt === 'string' &&
+    Array.isArray(value.source?.enabled_skill_names) && value.source.enabled_skill_names.every(name => typeof name === 'string')
+  return {
+    cancel,
+    dispose() { cancel(); disposed = true },
+    invalidate() { if (current && !valid(current)) cancel() },
+    async open(target) {
+      if (disposed || pending) return
+      cancel()
+      const observed = readState(target)
+      const item = { serial, target, ownerProfile: observed?.ownerProfile, baseIdentity: observed?.baseIdentity, signature: stateSignature(target) }
+      current = item; pending = true; emit({ phase: 'loading', target })
+      try {
+        if (observed?.blocked || !PREPARATION_PROFILE_RE.test(target || '') || !PREPARATION_PROFILE_RE.test(item.ownerProfile || '') || !PREPARATION_ID_RE.test(item.baseIdentity || '')) throw new Error('unsupported_transport')
+        const routes = await transport.profileRoutes()
+        if (!valid(item)) return
+        item.route = selectPreparationRoute(routes, observed.connectionId, item.ownerProfile)
+        if (!item.route || item.route.profile !== item.ownerProfile) throw new Error('unsupported_transport')
+        const value = await call(item, 'role-proposal-context', contextBody(item))
+        if (!validContext(value, item)) throw new Error('invalid_output')
+        item.context = value; emit({ phase: 'review', target, context: value })
+      } catch (error) { fail(item, error.message) }
+      finally { if (current === item) pending = false }
+    },
+    async generate() {
+      const item = current
+      if (pending || !item || !valid(item) || item.context?.capability?.available !== true || item.generated) return
+      pending = true; item.generated = true; emit({ phase: 'generating', target: item.target, context: item.context })
+      try {
+        const value = await call(item, 'role-proposal', { ...contextBody(item), source_digest: item.context.source.digest,
+          route_digest: item.context.payer.route_digest, consent: { send_reviewed_sources: true, use_owner_native_policy: true } })
+        const text = value?.proposal?.description
+        if (value?.schema !== 1 || value.status !== 'proposed' || value.stale !== false ||
+          value.owner?.profile !== item.ownerProfile || value.owner?.base_identity !== item.baseIdentity || value.target_profile !== item.target ||
+          value.source_digest !== item.context.source.digest || value.route_digest !== item.context.payer.route_digest ||
+          typeof text !== 'string' || !text.trim() || Array.from(text).length > 512 || /[\u0000-\u001f\u007f-\u009f]/.test(text)) throw new Error('invalid_output')
+        item.result = value; emit({ phase: 'proposed', target: item.target, context: item.context, proposal: text })
+      } catch (error) { fail(item, error.message) }
+      finally { if (current === item) pending = false }
+    },
+    async use() {
+      const item = current
+      if (pending || !item || !valid(item) || !item.result) return
+      pending = true; emit({ phase: 'checking', target: item.target, context: item.context, proposal: item.result.proposal.description })
+      try {
+        const fresh = await call(item, 'role-proposal-context', contextBody(item))
+        if (!validContext(fresh, item) || fresh.capability.available !== true || fresh.source.digest !== item.context.source.digest || fresh.payer.route_digest !== item.context.payer.route_digest) throw new Error('stale_result')
+        if (!valid(item)) return
+        const target = item.target, text = item.result.proposal.description
+        cancel(); onUse(target, text)
+      } catch (error) { fail(item, error.message) }
+      finally { if (current === item) pending = false }
+    }
+  }
+}
+
+function RoleProposalDialog({ view, onCancel, onGenerate, onUse }) {
+  if (!view) return null
+  const context = view.context, busy = ['loading', 'generating', 'checking'].includes(view.phase)
+  const payer = context?.payer, sources = context?.source
+  const content = [
+    jsx(DesktopSDK.DialogHeader, { children: jsx(DesktopSDK.DialogTitle, { children: 'AI 역할 제안' }) }),
+    jsx(DesktopSDK.DialogDescription, { children: `자료 대상: ${view.target} · 제안은 위임용 설명 초안에만 적용합니다. 프로필 기본 소개와 SOUL은 바꾸지 않습니다.` }),
+    busy ? jsx('p', { role: 'status', style: styles.hint, children: view.phase === 'loading' ? '전송할 역할 자료와 사용량 정보를 확인하고 있습니다.' : view.phase === 'checking' ? '역할 자료와 편집 상태가 그대로인지 확인하고 있습니다.' : '제안을 만들고 있습니다. 취소해도 이미 시작한 요청에는 사용량이 발생할 수 있습니다.' }) : null,
+    payer ? jsxs('div', { style: styles.cardSection, children: [
+      jsx('strong', { children: `사용량을 사용하는 연결 프로필: ${payer.profile}` }),
+      jsx('p', { style: styles.hint, children: `저장된 기본 모델: ${payer.provider} / ${payer.model}` }),
+      jsx('p', { style: styles.hint, children: `기존 예비 모델: ${(payer.fallback_policy || []).map(row => `${row.provider} / ${row.model}`).join(' → ') || '없음'}` }),
+      jsx('p', { style: styles.hint, children: '이 요청에는 해당 프로필의 기존 Hermes 복구 정책이 적용됩니다. 연결 실패나 인증 갱신 등으로 다시 시도하거나 예비 모델을 사용할 수 있으며, 사용량·비용이 발생할 수 있습니다. 금액은 미리 확정할 수 없습니다.' })
+    ] }) : null,
+    sources ? jsxs('details', { open: true, children: [
+      jsx('summary', { children: '모델에 보낼 역할 자료 확인' }),
+      jsx('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '13rem', overflowY: 'auto', font: 'inherit', fontSize: '0.8rem', padding: '0.75rem', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: '0.5rem' }, children: JSON.stringify({ '프로필 소개': sources.native_description, 'SOUL 역할 부분': sources.soul_role_excerpt, '활성 스킬 이름': sources.enabled_skill_names }, null, 2) }),
+      jsx('p', { style: styles.hint, children: '대화·기억·인증 파일·스킬 본문은 읽지 않습니다. 위 전송 자료에 민감한 내용이 보이면 취소하세요. 제안은 확인 후 사용하세요.' })
+    ] }) : null,
+    context?.capability?.available === false ? jsx('p', { role: 'note', style: styles.warning, children: roleProposalMessage(context.capability.reason_code) }) : null,
+    view.message ? jsx('p', { role: 'alert', style: styles.warning, children: view.message }) : null,
+    typeof view.proposal === 'string' ? jsxs('div', { style: styles.cardSection, children: [jsx('strong', { children: '제안 · 확인 후 사용하세요' }), jsx('p', { style: { margin: '0.5rem 0 0', overflowWrap: 'anywhere' }, children: view.proposal })] }) : null,
+    jsxs(DesktopSDK.DialogFooter, { style: { flexWrap: 'wrap', gap: '0.5rem' }, children: [
+      jsx(Button, { variant: 'secondary', onClick: onCancel, children: '취소' }),
+      view.phase === 'review' ? jsx(Button, { disabled: context?.capability?.available !== true, onClick: onGenerate, children: '제안 만들기' }) : null,
+      view.phase === 'proposed' ? jsx(Button, { onClick: onUse, children: '위임용 설명으로 사용' }) : null
+    ] })
+  ]
+  return jsx(DesktopSDK.Dialog, { open: true, onOpenChange: open => { if (!open) onCancel() }, children: jsx(DesktopSDK.DialogContent, { style: { maxWidth: 'min(44rem, calc(100vw - 2rem))', maxHeight: '85vh', overflowY: 'auto', overflowWrap: 'anywhere' }, children: content }) })
+}
+
+function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets, disabled, onChange, onTargets, onSave, error, roleScope }) {
+  const [roleEditors, setRoleEditors] = useState({})
+  const [rolePreview, setRolePreview] = useState(null)
+  const roleInputs = useRef(null)
+  const roleMounted = useRef(true)
+  const roleController = useRef(null)
+  roleInputs.current = { dto, draft, profiles, origin, targets, disabled, roleScope, onChange }
+  if (!roleController.current) roleController.current = createRoleProposalController({
+    transport: { profileRoutes: () => host.profileRoutes(), requestProfile: (...args) => host.requestProfile(...args) },
+    readState: target => {
+      const value = roleInputs.current
+      const liveProfile = host.state?.profile?.get?.() || value.roleScope?.ownerProfile
+      const liveConnection = host.state?.connectionId?.get?.() || null
+      const liveScope = host.state?.gateway?.get ? scopeFingerprint(liveConnection, liveProfile, host.state.gateway.get()) : value.roleScope?.scopeKey
+      const entry = value.draft?.profile_routes?.profiles.find(row => row.name === target)
+      return { ownerProfile: value.roleScope?.ownerProfile, connectionId: value.roleScope?.connectionId,
+        scopeKey: liveScope, expectedScope: value.roleScope?.scopeKey, baseIdentity: value.roleScope?.baseIdentity,
+        template: value.origin, generation: value.roleScope?.generation, draft: JSON.stringify(value.draft), targets: value.targets,
+        metadataDigest: value.profiles.find(row => row.name === target)?.role_intro?.digest,
+        blocked: !roleMounted.current || value.disabled || value.roleScope?.available !== true || liveProfile !== value.roleScope?.ownerProfile ||
+          liveScope !== value.roleScope?.scopeKey || !entry || !nativeProfileMode(value.draft?.backend) }
+    },
+    onUpdate: view => { if (roleMounted.current) setRolePreview(view) },
+    onUse: (name, description) => {
+      if (!roleMounted.current) return
+      roleInputs.current.onChange(current => editProfileRoleDescription(current, name, description))
+      setRoleEditors(current => ({ ...current, [name]: true }))
+    }
+  })
+  useEffect(() => {
+    roleMounted.current = true
+    const disposers = [host.state?.profile, host.state?.connectionId, host.state?.gateway]
+      .filter(atom => typeof atom?.listen === 'function').map(atom => atom.listen(() => roleController.current.cancel()))
+    return () => { roleMounted.current = false; for (const dispose of disposers) dispose(); roleController.current.cancel() }
+  }, [])
+  useEffect(() => { roleController.current.invalidate() })
+
   const stale = Boolean(draft && draft.expectedDigest !== dto?.digest)
   const locked = disabled || dto?.editable !== true || !draft || stale
   const selected = Array.isArray(targets) ? targets : []
@@ -1834,7 +2028,7 @@ function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets
   const profileSettings = draft?.profile_routes
   const configured = profileSettings?.profiles || []
   const setProfile = (name, checked) => onChange(current => {
-    const profiles = checked ? [...current.profile_routes.profiles, { name, description: '' }] : current.profile_routes.profiles.filter(entry => entry.name !== name)
+    const profiles = checked ? [...current.profile_routes.profiles, { name, description: dto?.profile_routes?.profiles.find(entry => entry.name === name)?.description ?? '' }] : current.profile_routes.profiles.filter(entry => entry.name !== name)
     return { ...current, allowProfileAccess: false, profile_routes: { profiles, default: profiles.some(entry => entry.name === current.profile_routes.default) ? current.profile_routes.default : null } }
   })
   const fallbackRole = role => {
@@ -1874,6 +2068,7 @@ function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets
     jsx('p', { style: styles.hint, children: '작업을 나눠 맡길 때 사용할 방식을 고릅니다. 기본 모델과, 그 모델을 사용할 수 없을 때의 예비 모델은 별도로 설정합니다.' }),
     jsx('p', { style: styles.hint, children: '저장한 방식은 새 대화부터 적용됩니다. 지금 진행 중인 대화나 작업을 중단하지 않습니다.' }),
     stale ? jsx('p', { role: 'alert', style: styles.warning, children: '다른 곳에서 설정이 바뀌었습니다. 입력한 내용은 남겨 두었으니 상태를 다시 불러온 뒤 저장하세요.' }) : null,
+    jsx(RoleProposalDialog, { view: rolePreview, onCancel: () => roleController.current.cancel(), onGenerate: () => void roleController.current.generate(), onUse: () => void roleController.current.use() }),
     !draft ? jsx('p', { role: 'note', style: styles.warning, children: '이 기능의 설정을 불러오지 못했습니다. Hermes와 플러그인 설치 상태를 확인한 뒤 다시 불러오세요. 기존 값은 바꾸지 않습니다.' }) : jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [
       jsx(ChoiceField, { id: 'native-delegation-backend', label: '작업을 맡기는 방식', value: draft.backend, disabled: locked,
         options: NATIVE_DELEGATION_BACKENDS.some(item => item.value === draft.backend) ? NATIVE_DELEGATION_BACKENDS : [{ value: draft.backend, label: '현재 별도 고급 설정' }, ...NATIVE_DELEGATION_BACKENDS],
@@ -1888,10 +2083,24 @@ function NativeDelegationCard({ dto, draft, profiles, origin, sourceRow, targets
         jsx('p', { role: 'note', style: styles.warning, children: '선택한 전문 프로필의 모델과 연결된 계정으로 새 작업을 맡깁니다. 해당 계정의 사용량이나 요금이 발생할 수 있습니다. 기존 대화에 이어 쓰는 기능은 아닙니다. 신뢰할 수 있는 프로필만 허용하세요.' }),
         ...profiles.map(row => {
           const entry = configured.find(item => item.name === row.name)
+          const role = profileRoleView(row, entry)
+          const custom = entry && (entry.description !== '' || roleEditors[row.name] === true)
+          const inherited = selected.length > 0 && selected.every(name => profiles.find(item => item.name === name)?.native_delegation?.role_intro_inheritance?.supported === true)
           return jsxs('div', { style: { ...styles.cardSection, minWidth: 0 }, children: [
             jsx(CheckRow, { id: `native-profile-${row.name}`, label: row.name, detail: '이 프로필의 연결 계정과 기능 사용 허용', checked: Boolean(entry), disabled: locked, onChange: checked => setProfile(row.name, checked) }),
-            entry ? jsx(Field, { id: `native-profile-description-${row.name}`, label: '어떤 일을 맡길 프로필인가요?', value: entry.description, disabled: locked,
-              onChange: description => onChange(current => ({ ...current, profile_routes: { ...current.profile_routes, profiles: current.profile_routes.profiles.map(item => item.name === row.name ? { ...item, description } : item) } })) }) : null
+            jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: 0, overflowWrap: 'anywhere' }, children: [
+              jsx(Badge, { variant: 'muted', children: role.source === 'override' ? '이 위임의 설명' : role.source === 'profile_metadata' ? entry && inherited ? '프로필 기본 소개 자동 사용 · 새 대화부터' : '프로필 기본 소개 · 참고용' : '기본 소개 없음' }),
+              jsx('p', { id: `native-profile-role-${row.name}`, style: styles.hint, children: role.description || '역할을 추측하지 않습니다. 필요한 경우 직접 설명하거나 AI 제안을 검토하세요.' }),
+              role.auto ? jsx('p', { style: styles.hint, children: '프로필에 저장된 자동 작성 소개입니다. 내용이 맞는지 확인하세요.' }) : null,
+              entry ? jsxs('div', { style: styles.actions, children: [
+                !custom ? jsx(Button, { id: `native-profile-role-custom-${row.name}`, size: 'sm', variant: 'secondary', disabled: locked, onClick: () => setRoleEditors(current => ({ ...current, [row.name]: true })), children: '이 위임에서만 다르게 설명' }) : null,
+                custom ? jsx(Button, { id: `native-profile-role-reset-${row.name}`, size: 'sm', variant: 'secondary', disabled: locked, onClick: () => { onChange(current => editProfileRoleDescription(current, row.name, '')); setRoleEditors(current => ({ ...current, [row.name]: false })) }, children: '기본 소개로 되돌리기' }) : null,
+                jsx(Button, { id: `native-profile-role-ai-${row.name}`, size: 'sm', variant: 'secondary', disabled: locked || roleScope?.available !== true || Boolean(rolePreview), onClick: () => void roleController.current.open(row.name), children: 'AI로 역할 제안' })
+              ] }) : null,
+              custom ? jsx(Field, { id: `native-profile-description-${row.name}`, label: '이 위임에서 사용할 설명 · 선택 사항', value: entry.description, disabled: locked, onChange: description => onChange(current => editProfileRoleDescription(current, row.name, description)) }) : null,
+              entry && !inherited && entry.description === '' ? jsx('p', { role: 'note', style: styles.hint, children: '선택한 저장 대상 중 기본 소개 자동 사용을 지원하지 않는 설치본이 있습니다. 원래 빈 값은 유지하지만, 새로 자동 사용하려면 업데이트가 필요합니다.' }) : null,
+              entry && roleScope?.available !== true ? jsx('p', { style: styles.hint, children: '이 연결에서는 AI 제안을 사용할 수 없습니다. 기존 소개나 직접 작성한 설명은 사용할 수 있습니다.' }) : null
+            ] })
           ] }, row.name)
         }),
         ...configured.filter(entry => !profiles.some(row => row.name === entry.name)).map(entry => jsxs('div', { style: styles.warning, children: [jsx('span', { children: `더 이상 없는 프로필: ${entry.name}` }), jsx(Button, { size: 'sm', variant: 'secondary', disabled: locked, onClick: () => setProfile(entry.name, false), children: '허용 목록에서 제거' })] }, entry.name)),
@@ -3140,6 +3349,7 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length ? section('불러올 프로필', '아래에 불러올 설정을 고릅니다. 실제로 바꿀 프로필은 각 카드의 적용 대상에서 따로 선택하세요.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `지금 사용 중인 프로필: ${activeProfile || '확인 중'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
       profiles.length ? section('모델 대상', '대화·작업·요약·제목에 쓸 모델을 정합니다. 선택한 프로필에만 이 모델 값을 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [modelFields, modelTargetGroup] })) : null,
       profiles.length ? jsx(NativeDelegationCard, { dto: currentRow?.native_delegation, draft: nativeDelegationDraft, profiles, origin: selectedProfile, sourceRow: currentRow,
+        roleScope: { scopeKey, ownerProfile: activeProfile || 'default', connectionId, baseIdentity: statusQuery.data?.readiness_context?.base_identity, available: statusQuery.data?.role_proposal?.available === true, generation: renderGeneration },
         targets: nativeDelegationTargets, disabled: disabled || !nativeStorageAvailable,
         error: sectionErrors.native_delegation || nativeDelegationError || (!nativeStorageAvailable ? '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.' : ''),
         onChange: updateNativeDelegationDraft, onTargets: chooseNativeDelegationTargets, onSave: () => void saveNativeDelegation() }) : null,
@@ -3195,7 +3405,7 @@ function RouterPage({ ctx: pluginContext }) {
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.7.0',
+  version: '0.8.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

@@ -25,7 +25,7 @@ def register(ctx):
             return False
 
     def cli_setup(parser):
-        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "apply"])
+        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "apply", "role-proposal-context", "role-proposal"])
         parser.add_argument("--body", default="{}")
 
     def cli_handler(args):
@@ -37,15 +37,44 @@ def register(ctx):
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
             def operation(service):
+                def completion_available():
+                    try:
+                        return callable(getattr(ctx.llm, 'complete_structured', None))
+                    except Exception:
+                        return False
                 if args.operation == "status":
                     if body: raise ValueError("status does not accept a body")
-                    return service.status()
+                    result = service.status()
+                    available = completion_available()
+                    result['role_proposal'] = {'schema': 1, 'transport': 'native_cli', 'available': available, 'reason_code': None if available else 'unsupported_sdk'}
+                    return result
+                if args.operation in ('role-proposal-context', 'role-proposal'):
+                    from .model_router import role_proposal
+                    try:
+                        role_proposal._body(body, args.operation == 'role-proposal')
+                        role_proposal._owner(service, home, body)
+                    except Exception:
+                        return role_proposal._failure('owner_mismatch')
+                    if args.operation == 'role-proposal-context':
+                        return role_proposal.context(service, home, body, completion_available())
+                    def complete(**kwargs):
+                        return ctx.llm.complete_structured(**kwargs)
+                    return role_proposal.generate(service, home, body, complete if completion_available() else None)
                 if args.operation == "preview": return service.preview(body)
                 if args.operation == "fallback-preview": return service.fallback_preview(body)
                 if args.operation == "delegation-preview": return service.delegation_preview(body)
                 if args.operation == "initial-setup-preview": return service.initial_setup_preview(body)
                 if set(body) != {"plan_id"}: raise ValueError("apply accepts only plan_id")
                 return service.apply(body["plan_id"])
+            if args.operation in ('role-proposal-context', 'role-proposal'):
+                try:
+                    current = Path(get_hermes_home()).resolve(strict=True)
+                    captured = home.resolve(strict=True)
+                    if os.path.normcase(str(current)) != os.path.normcase(str(captured)):
+                        raise ValueError('owner_mismatch')
+                except Exception:
+                    print('MODEL_ROUTER_JSON:' + json.dumps({'schema': 1, 'status': 'error', 'code': 'owner_mismatch'}, separators=(',', ':')))
+                    return 0
             result = scoped(operation)
             print("MODEL_ROUTER_JSON:" + json.dumps(result, ensure_ascii=False, separators=(",", ":")))
             return 0

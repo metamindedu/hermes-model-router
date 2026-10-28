@@ -1008,6 +1008,10 @@ class Service:
     def initial_setup_preview(self, body: dict) -> dict[str, Any]:
         return native_service.initial_setup_preview(self, body)
 
+    def _role_intro(self, profile: str) -> dict[str, Any]:
+        from .role_metadata import resolve
+        return resolve(self, profile)
+
     def status(self) -> dict[str, Any]:
         discovered = self._discover_profiles()
         stored = self._load_store()
@@ -1054,6 +1058,7 @@ class Service:
                 "fallbacks": self._fallback_dto(name, view_entry),
                 "readiness": installation.profile_readiness(self, name, stored),
                 "native_delegation": native_service.status(self, name),
+                "role_intro": self._role_intro(name),
                 "initial_setup": native_service.initial_setup_status(self, name),
                 "timeouts": {
                     **timeouts.timeout_status(
@@ -1064,6 +1069,7 @@ class Service:
                 },
             })
         return {
+            "role_proposal": {"schema": 1, "transport": "native_cli", "available": False, "reason_code": "unsupported_transport"},
             "revision": stored["revision"] if stored else 0,
             "current_profile": self.active_profile(),
             "profiles": result_profiles,

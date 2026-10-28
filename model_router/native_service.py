@@ -126,6 +126,50 @@ def _auto_code_signature(service, profile: str, code: str | None) -> str | None:
         return None
 
 
+def _role_intro_code_signature(service, profile: str, code: str | None) -> str | None:
+    """Observe installed provider and resolver as a single feature identity."""
+    if code is None:
+        return None
+    from .role_metadata import read_bounded
+    root = service._profile_home(profile) / 'plugins/model-router/model_router'
+    try:
+        payloads = []
+        for name in ('native_delegation', 'role_metadata'):
+            suffixes = tuple(set((*BYTECODE_SUFFIXES, *EXTENSION_SUFFIXES, '.pyd')))
+            if any(p.name == name or (p.name.startswith(name + '.') and p.name.endswith(suffixes)) for p in root.iterdir()):
+                return None
+            data, _ = read_bounded(root / (name + '.py'), root, 256 * 1024)
+            reference, _ = read_bounded(Path(__file__).parent / (name + '.py'), Path(__file__).parent, 256 * 1024)
+            # Recognize only the provider/resolver pair whose implementation this
+            # manager actually knows. Unknown future implementations fail closed.
+            if data is None or reference is None or data != reference:
+                return None
+            tree = ast.parse(data.decode('utf-8-sig'))
+            markers = [n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'ROLE_INTRO_INHERITANCE_SCHEMA' for t in n.targets)]
+            if len(markers) != 1 or not isinstance(markers[0].value, ast.Constant) or type(markers[0].value.value) is not int or markers[0].value.value != 1:
+                return None
+            if name == 'native_delegation':
+                provider = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == 'ModelRouterProfilesProvider')
+                method = next(n for n in provider.body if isinstance(n, ast.FunctionDef) and n.name == 'task_parameters')
+                if not any(isinstance(n, ast.ImportFrom) and n.module == 'role_metadata' and any(x.name == 'resolve' for x in n.names) for n in ast.walk(method)) or not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'resolve' for n in ast.walk(method)):
+                    return None
+            payloads.append(data)
+        if service._native_delegation_code_signature(profile) != code:
+            return None
+        for name, data in zip(('native_delegation', 'role_metadata'), payloads):
+            if read_bounded(root / (name + '.py'), root, 256 * 1024)[0] != data:
+                return None
+        return hashlib.sha256(code.encode() + b'\0' + b'\0'.join(payloads)).hexdigest()
+    except Exception:
+        return None
+
+
+def _check_role_record(service, record):
+    if _role_intro_code_signature(service, record['profile'], record['code']) != record.get('role_code'):
+        from .service import RevisionConflict
+        raise RevisionConflict('role inheritance implementation changed')
+
+
 def _check_auto_record(service, record):
     if record['after'][ns.KEY_BACKEND] == 'model-router-auto':
         signature = _auto_code_signature(service, record['profile'], record['code'])
@@ -166,7 +210,9 @@ def _plain(snapshot, profile, names):
 
 def status(service, profile: str) -> dict[str, Any]:
     code = service._native_delegation_code_signature(profile)
+    role_code = _role_intro_code_signature(service, profile, code)
     result = {"schema": 1, "supported": code is not None, "editable": False, "backend": "unavailable",
+              "role_intro_inheritance": {"schema": 1, "supported": role_code is not None, "code_identity": role_code, "activation": "new_session_or_supported_rebuild"},
               "digest": "", "policy": ns.default_policy(),
               "profile_routes": {"profiles": [], "default": None}, "auto_policy": ns.default_policy(), "auto_supported": False, "warnings": []}
     try:
@@ -178,7 +224,7 @@ def status(service, profile: str) -> dict[str, Any]:
         auto_code = _auto_code_signature(service, profile, code)
         from .service import _digest
         result.update(backend=backend, policy=policy, profile_routes=profiles, auto_policy=auto_policy, auto_supported=auto_code is not None,
-                      digest=_digest({"snapshot": snapshot.cas_digest, "code": code, "auto_code": auto_code, "profile": profile}),
+                      digest=_digest({"snapshot": snapshot.cas_digest, "code": code, "auto_code": auto_code, "role_code": role_code, "profile": profile}),
                       editable=code is not None)
         if any(row["name"] not in names for row in profiles["profiles"]):
             result["warnings"].append("profile_target_missing_remove_from_allowlist")
@@ -232,6 +278,9 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
             profiles = ns.validate_profiles(update["profile_routes"], names)
             validate_native_targets(service, profiles)
             old_profiles = dto["profile_routes"]
+            old_descriptions = {row['name']: row['description'] for row in old_profiles['profiles']}
+            if not dto['role_intro_inheritance']['supported'] and any(row['description'] == '' and (row['name'] not in old_descriptions or old_descriptions[row['name']] != '') for row in profiles['profiles']):
+                raise ValueError('role inheritance is unsupported by this installed profile')
             added = {row["name"] for row in profiles["profiles"]} - {row["name"] for row in old_profiles["profiles"]}
             default_grant = profiles["default"] is not None and profiles["default"] != old_profiles["default"]
             if (added or default_grant) and update["allow_profile_access"] is not True:
@@ -241,8 +290,9 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
             snapshot = service._read_native_delegation_snapshot(profile)
             code = service._native_delegation_code_signature(profile)
             auto_code = _auto_code_signature(service, profile, code)
+            role_code = _role_intro_code_signature(service, profile, code)
             # Do not pair the DTO with a later, independently changed snapshot.
-            if dto["digest"] != _digest({"snapshot": snapshot.cas_digest, "code": code, "auto_code": auto_code, "profile": profile}):
+            if dto["digest"] != _digest({"snapshot": snapshot.cas_digest, "code": code, "auto_code": auto_code, "role_code": role_code, "profile": profile}):
                 raise RevisionConflict("native delegation changed during preview")
             if backend == 'model-router-auto' and auto_code is None:
                 raise RevisionConflict('automatic routing support changed during preview')
@@ -252,7 +302,7 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                 if before[key] != desired[key]:
                     changes.append({"profile": profile, "field": key, "before": copy.deepcopy(before[key]), "after": copy.deepcopy(desired[key])})
             records.append({"profile": profile, "before": before, "after": desired,
-                            "cas": snapshot.cas_digest, "provenance": snapshot.provenance_digest, "code": code, "auto_code": auto_code})
+                            "cas": snapshot.cas_digest, "provenance": snapshot.provenance_digest, "code": code, "auto_code": auto_code, "role_code": role_code})
         plan_id = uuid.uuid4().hex
         expires = time.time() + 300
         plan = {"kind": "native_delegation", "owner_profile": service.active_profile(), "revision": revision,
@@ -280,6 +330,7 @@ def apply_consumed(service, plan, plan_id):
         if service._native_delegation_code_signature(profile) != record["code"] or record["code"] is None:
             raise RevisionConflict("native delegation implementation changed")
         _check_auto_record(service, record)
+        _check_role_record(service, record)
         snapshot = service._read_native_delegation_snapshot(profile)
         _plain(snapshot, profile, names)
         if snapshot.cas_digest != record["cas"]:
@@ -299,6 +350,7 @@ def apply_consumed(service, plan, plan_id):
             profile, key = item["profile"], item["key"]
             record = next(r for r in records if r["profile"] == profile)
             _check_auto_record(service, record)
+            _check_role_record(service, record)
             snapshot = service._read_native_delegation_snapshot(profile)
             _plain(snapshot, profile, inventory(service))
             if (snapshot.provenance_digest != record["provenance"] or
@@ -321,6 +373,7 @@ def apply_consumed(service, plan, plan_id):
         for record in records:
             profile = service._require_profile(record["profile"], current_names)
             _check_auto_record(service, record)
+            _check_role_record(service, record)
             observed = service._read_native_delegation_snapshot(profile)
             _plain(observed, profile, current_names)
             validate_native_targets(service, ns.validate_profiles_block(record["after"][ns.KEY_PROFILES], current_names))

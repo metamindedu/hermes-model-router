@@ -1,8 +1,8 @@
 name: model-router
-version: 0.7.0
+version: 0.8.0
 requires_hermes: ">=0.22.5"
 kind: standalone
-description: "Profile model settings, native per-task model-or-profile selection, explicit first-use preparation, and runtime controls"
+description: "Native model/profile delegation, automatic role introductions, optional AI role drafts, and profile model controls"
 author: NewMetaW
 provides_tools:
   - coding_route
