@@ -1,5 +1,9 @@
 # Model Router implementation contract
 
+## 2026-11-04: Common optional-PR and CI policy only
+
+Apply the common default for existing and future projects: small bounded changes need no obligatory PR when repository protections permit; retain local verification, required independent review and applicable preview/publication approval. This source-only change excludes tag-push duplicates and cancels only superseded PR runs while retaining both OS syntax/regression checks on all branch pushes and PRs. There is no publisher in this workflow. Do not install the plugin, change any live profile/settings/auth, issue a catalog/version release or reinterpret earlier runtime rollout authority. Validate the workflow contract, actionlint and complete Node regression suite, then verify the actual hosted branch/PR runs.
+
 ## 2026-10-28: Profile role introductions, optional AI preview, release and rollout
 
 The latest user explicitly authorizes implementing the recommended UX and completing installation, source/release publication and official-catalog update. Scope: reuse native per-profile `profile.yaml` introductions by default, optional tools-free AI role proposals, optional origin-specific delegation description override. Main owns UX/layout and integration. Preserve existing nonempty custom descriptions; empty descriptions may inherit native intro without config migration. Show missing/unsafe introductions honestly rather than inventing from names. Only explicitly allowlisted profiles' bounded role hints enter the delegation schema; metadata does not grant accounts/tools, satisfy Heavy review or imply actual target capabilities. Retain current session/schema activation boundaries.
