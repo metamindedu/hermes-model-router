@@ -33,7 +33,7 @@ test('native settings replaces main sidebar, preserving RouterPage/context and p
   assert.equal(items[0].render().type, render.type)
   assert.equal(items[0].render().props.ctx, ctx)
   assert.equal(ui.rpcCalls(), 0)
-  assert.doesNotMatch(source, /SIDEBAR_NAV_AREA|COMPOSER_AREAS|ComposerProgress|progressScopeAllowed|model-router-progress|focusedSessionId|process\.kill|process\.list|MutationObserver|ResizeObserver|setInterval/)
+  assert.doesNotMatch(source, /SIDEBAR_NAV_AREA|ComposerProgress|progressScopeAllowed|model-router-progress|process\.kill|process\.list|MutationObserver|ResizeObserver|setInterval/)
 })
 
 test('palette opens native plugin settings instead of legacy workspace route', () => {

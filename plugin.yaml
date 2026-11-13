@@ -1,11 +1,12 @@
 name: model-router
-version: 0.8.0
-requires_hermes: ">=0.22.5"
+version: 0.9.0
+requires_hermes: ">=0.23.1"
 kind: standalone
-description: "Native model/profile delegation, automatic role introductions, optional AI role drafts, and profile model controls"
+description: "Native delegation visibility, opt-in Gateway-owned profile jobs, operator-separated permissions, and profile model controls"
 author: NewMetaW
 provides_tools:
   - coding_route
+  - profile_task
 provides_hooks:
   - pre_api_request
   - post_api_request
@@ -14,6 +15,8 @@ provides_hooks:
   - post_tool_call
   - subagent_start
   - subagent_stop
+  - post_compaction
+
 provides_middleware:
   - tool_execution
   - llm_request

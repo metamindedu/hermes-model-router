@@ -25,11 +25,18 @@ def register(ctx):
             return False
 
     def cli_setup(parser):
-        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "apply", "role-proposal-context", "role-proposal"])
+        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "apply", "role-proposal-context", "role-proposal", "profile-jobs-status", "profile-jobs-configure"])
         parser.add_argument("--body", default="{}")
 
     def cli_handler(args):
-        # Native cli.exec passes an argv array, never a renderer shell command.
+        # Grant administration belongs to this original host CLI context only.
+        # Never bridge these operations through renderer cli.exec or plugin RPC.
+        if args.operation in ('profile-jobs-status', 'profile-jobs-configure'):
+            from .model_router.full_profile_policy import operator_cli
+            result = operator_cli(ctx, home, args.operation, args.body)
+            print('MODEL_ROUTER_JSON:' + json.dumps(result, ensure_ascii=False, separators=(',', ':')))
+            return 0 if result.get('status') in ('ready', 'saved', 'noop') else 2
+        # Existing ordinary settings/proposal commands retain their native path.
         try:
             if len(args.body) > 16384:
                 raise ValueError("payload too large")
@@ -120,6 +127,14 @@ def register(ctx):
 
     from .model_router.native_delegation import register_native_delegation
     register_native_delegation(ctx, home)
+
+    # Passive metadata only: this never dispatches, reroutes or controls a child.
+    from .model_router.execution_roster import register_execution_roster
+    register_execution_roster(ctx, home)
+
+    # Independent opt-in jobs. Native delegate_task and retired starts stay untouched.
+    from .model_router.profile_jobs import register_profile_jobs
+    register_profile_jobs(ctx, home)
 
     if enabled():
         ctx.register_skill(

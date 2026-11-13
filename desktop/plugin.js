@@ -3403,10 +3403,470 @@ function RouterPage({ ctx: pluginContext }) {
   })
 }
 
+// The execution roster is a passive projection, not a second native runtime.
+const EXECUTION_EMPTY_ATOM = { get: () => null, listen: () => () => {} }
+const EXECUTION_PROFILE = /^[a-z0-9][a-z0-9_-]{0,63}$/
+export function executionId(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 && value === value.trim() && !/[\x00-\x1f\x7f]/.test(value)
+}
+export function executionScopeKey(scope) {
+  return scope && executionId(scope.connectionId) && executionId(scope.profile) && executionId(scope.sessionId)
+    ? JSON.stringify([scope.connectionId, scope.profile, scope.sessionId]) : null
+}
+export function selectExecutionRoute(routes, scope) {
+  if (!executionScopeKey(scope) || !Array.isArray(routes)) return null
+  const matches = routes.filter(row => row && ['local', 'remote'].includes(row.mode) && row.connectionId === scope.connectionId &&
+    row.profile === scope.profile && typeof row.targetProfile === 'string' && EXECUTION_PROFILE.test(row.targetProfile))
+  return matches.length === 1 ? { ...matches[0] } : null
+}
+function executionUnknown() { return { kind: 'unknown', role: null, profile: null, evidence: 'unknown' } }
+export function executionIdentity(value) {
+  if (!value || typeof value !== 'object') return executionUnknown()
+  if (value.kind === 'model' && ['heavy', 'light'].includes(value.role) && value.profile == null) {
+    return { kind: 'model', role: value.role, profile: null, evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
+  }
+  if (value.kind === 'profile' && typeof value.profile === 'string' && EXECUTION_PROFILE.test(value.profile) && value.role == null) {
+    return { kind: 'profile', role: null, profile: value.profile, evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
+  }
+  return executionUnknown()
+}
+export function executionLabel(identity) {
+  const known = executionIdentity(identity)
+  return known.kind === 'model' ? `모델 · ${known.role === 'heavy' ? 'Heavy' : 'Light'}` : known.kind === 'profile' ? `프로필 · ${known.profile}` : '실행 종류 미확인'
+}
+function executionSafeText(value, limit = 256) {
+  return typeof value === 'string' && value.length <= limit && value === value.trim() && !/[\x00-\x1f\x7f]/.test(value) ? value : null
+}
+export function mergeExecutionRows(snapshot, live, targetProfile) {
+  if (!snapshot || snapshot.schema !== 1 || snapshot.origin_profile !== targetProfile || !Array.isArray(snapshot.rows)) return []
+  const seen = new Set(), rows = []
+  const native = Array.isArray(live?.subagents) ? live.subagents : []
+  for (const input of snapshot.rows.slice(0, 128)) {
+    if (!input || !executionId(input.id) || seen.has(input.id) || input.execution_mode !== 'native' ||
+      !Number.isInteger(input.task_index) || input.task_index < 0 || !executionId(input.conversation_id) || !executionId(input.parent_session_id)) continue
+    seen.add(input.id)
+    const observed = executionIdentity(input.observed), requested = executionIdentity(input.requested)
+    const matches = executionId(input.subagent_id) ? native.filter(row => row?.subagent_id === input.subagent_id &&
+      executionId(row.delegation_id) && row.delegation_id === input.delegation_id) : []
+    const runtime = matches.length === 1 ? matches[0] : null
+    rows.push({ id: input.id, execution_mode: 'native', requested, observed,
+      status: runtime?.status === 'running' ? 'running' : executionSafeText(input.status, 40) || 'unknown',
+      subagent_id: executionId(input.subagent_id) ? input.subagent_id : null,
+      delegation_id: executionId(input.delegation_id) ? input.delegation_id : null,
+      conversation_id: input.conversation_id, parent_session_id: input.parent_session_id, task_index: input.task_index,
+      model: executionSafeText(runtime?.model) || executionSafeText(input.observed?.model),
+      provider: executionSafeText(input.observed?.provider), backend: executionSafeText(input.observed?.backend, 64),
+      updated_at: typeof input.updated_at === 'number' && Number.isFinite(input.updated_at) ? input.updated_at : null })
+  }
+  // An uncorrelated native child stays unknown. Never match by goal/model/order.
+  for (const item of native.slice(0, 128)) {
+    if (!executionId(item?.subagent_id) || rows.some(row => row.subagent_id === item.subagent_id && row.delegation_id === item.delegation_id)) continue
+    rows.push({ id: `live:${item.subagent_id}`, execution_mode: 'native', requested: executionUnknown(), observed: executionUnknown(),
+      status: item.status === 'running' ? 'running' : 'unknown', subagent_id: item.subagent_id,
+      delegation_id: executionId(item.delegation_id) ? item.delegation_id : null, task_index: null,
+      model: executionSafeText(item.model), provider: null, backend: null })
+  }
+  return rows.slice(0, 128)
+}
+export async function readExecutionSnapshot(transport, scope, isCurrent = () => true) {
+  const key = executionScopeKey(scope)
+  if (!key || typeof transport?.profileRoutes !== 'function' || typeof transport?.requestProfile !== 'function') throw new Error('execution_unavailable')
+  const route = selectExecutionRoute(await transport.profileRoutes(), scope)
+  if (!route || !isCurrent()) throw new Error('execution_scope_changed')
+  const params = { session_id: scope.sessionId }
+  const replies = await Promise.allSettled([
+    transport.requestProfile(route, 'plugin.model-router.execution.list', params),
+    transport.requestProfile(route, 'subagent.list', params),
+    transport.requestProfile(route, 'plugin.model-router.profile_jobs.list', params)
+  ])
+  if (!isCurrent()) throw new Error('execution_scope_changed')
+  const snapshot = replies[0].status === 'fulfilled' ? replies[0].value : null
+  const live = replies[1].status === 'fulfilled' ? replies[1].value : null
+  const full = replies[2].status === 'fulfilled' ? normalizeProfileJobs(replies[2].value, route.targetProfile, scope.sessionId) : null
+  const metadataAvailable = Boolean(snapshot && snapshot.schema === 1 && snapshot.origin_profile === route.targetProfile && Array.isArray(snapshot.rows))
+  const nativeAvailable = Boolean(live && Array.isArray(live.subagents))
+  const nativeRows = mergeExecutionRows(metadataAvailable ? snapshot : { schema: 1, origin_profile: route.targetProfile, rows: [] }, live, route.targetProfile)
+  const fullJobs = full || []
+  const combined = [...fullJobs.map(profileJobExecutionRow), ...nativeRows]
+  // The server authorizes the requested session and resolves its own aliases.
+  return { scope_key: key, rows: combined.slice(0, 128), full_jobs: fullJobs, full_available: full !== null,
+    available: Boolean(metadataAvailable || nativeAvailable || full !== null), metadata_available: metadataAvailable,
+    native_available: nativeAvailable, limited: combined.length > 128, reason: metadataAvailable ? snapshot.reason_code || null : 'execution_metadata_unavailable' }
+}
+export function executionScopeFromState(state) {
+  // A provided-but-unresolved focused owner is not permission to use the
+  // ambient socket's profile. The same profile name can exist on two hosts.
+  if (state?.focusedSessionOwner && state?.focusedSessionId) {
+    const owner = state.focusedSessionOwner.get()
+    return { connectionId: owner?.connectionId, profile: owner?.profile, sessionId: state.focusedSessionId.get() }
+  }
+  return { connectionId: state?.connectionId?.get?.(), profile: state?.profile?.get?.(), sessionId: state?.activeSessionId?.get?.() }
+}
+function currentExecutionScope() { return executionScopeFromState(host.state) }
+function useExecutionSnapshot() {
+  const owner = useValue(host.state?.focusedSessionOwner || EXECUTION_EMPTY_ATOM)
+  const focusedId = useValue(host.state?.focusedSessionId || EXECUTION_EMPTY_ATOM)
+  const connectionId = useValue(host.state?.connectionId || EXECUTION_EMPTY_ATOM)
+  const profile = useValue(host.state?.profile || EXECUTION_EMPTY_ATOM)
+  const sessionId = useValue(host.state?.activeSessionId || EXECUTION_EMPTY_ATOM)
+  const gateway = useValue(host.state?.gateway || EXECUTION_EMPTY_ATOM)
+  const scope = host.state?.focusedSessionOwner && host.state?.focusedSessionId
+    ? { connectionId: owner?.connectionId, profile: owner?.profile, sessionId: focusedId } : { connectionId, profile, sessionId }
+  const key = executionScopeKey(scope)
+  const query = useQuery({ queryKey: ['model-router', 'execution', key, gateway],
+    queryFn: () => readExecutionSnapshot(host, scope, () => executionScopeKey(currentExecutionScope()) === key),
+    enabled: Boolean(key && gateway !== 'closed' && gateway !== 'disconnected' && gateway !== 'idle'),
+    retry: false, staleTime: 2000, refetchInterval: 5000 })
+  useEffect(() => {
+    if (!key || typeof host.onEvent !== 'function') return
+    // Events are invalidation hints only: the tap does not attest their owner.
+    // Re-read the exact authenticated profile/session, never adopt event rows.
+    const invalidate = () => { if (executionScopeKey(currentExecutionScope()) === key) Promise.resolve(query.refetch()).catch(() => {}) }
+    const disposers = ['plugin.model-router.execution.changed', 'async_delegation', 'subagent_complete'].map(type => host.onEvent(type, invalidate))
+    return () => { for (const dispose of disposers) if (typeof dispose === 'function') dispose() }
+  }, [key, gateway, query.refetch])
+  const data = query.data?.scope_key === key ? query.data : null
+  return { scope, key, query, data }
+}
+const executionStyles = {
+  panel: { minWidth: 0, minHeight: 0, width: '100%', height: '100%', flex: '1 1 auto', overflowY: 'auto', boxSizing: 'border-box', padding: '0.85rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', color: 'var(--ui-text-primary)' },
+  list: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 22rem), 1fr))', gap: '0.6rem', minWidth: 0 },
+  row: { minWidth: 0, border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.6rem', padding: '0.7rem', display: 'flex', flexDirection: 'column', gap: '0.45rem', overflowWrap: 'anywhere' },
+  badges: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem', minWidth: 0 },
+  badge: { display: 'inline-flex', maxWidth: '100%', minWidth: 0, whiteSpace: 'normal', overflowWrap: 'anywhere', padding: '0.2rem 0.45rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.4rem', fontSize: '0.76rem', lineHeight: 1.4 },
+  details: { minWidth: 0, color: 'var(--ui-text-secondary)', fontSize: '0.76rem', lineHeight: 1.55, overflowWrap: 'anywhere' },
+  summary: { cursor: 'pointer', color: 'var(--ui-text-secondary)', fontSize: '0.78rem', lineHeight: 1.5 },
+  compact: { minWidth: 0, width: '100%', maxHeight: 'min(45vh, 24rem)', overflowY: 'auto', boxSizing: 'border-box', padding: '0.45rem 0', color: 'var(--ui-text-secondary)' }
+}
+const EXECUTION_STATUS = { requested: '요청', dispatched: '위임 접수', preparing: '실행 준비', creating: '세션 생성 요청', submitting: '작업 제출 요청', queued: '대기', running: '실행 중', approval_wait: '승인 대기', clarify_wait: '답변 대기', stop_requested: '중지 요청', completed: '완료', succeeded: '완료', error: '오류', failed: '실패', interrupted: '중단', cancelled: '취소', timeout: '시간 제한', unknown: '상태 미확인' }
+export function ExecutionRow({ row, bare = false }) {
+  const observed = row.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
+  const identity = observed ? row.observed : row.requested
+  return jsxs('article', { style: bare ? { ...executionStyles.row, border: 0, padding: 0 } : executionStyles.row, 'data-execution-row': row.id, children: [
+    jsxs('div', { style: executionStyles.badges, children: [
+      jsx('span', { style: executionStyles.badge, children: executionLabel(identity) }),
+      jsx('span', { style: executionStyles.badge, children: row.execution_mode === 'gateway' ? '전체 프로필' : '네이티브' }),
+      jsx('span', { style: styles.hint, children: EXECUTION_STATUS[row.status] || '상태 미확인' })
+    ] }),
+    jsx('p', { style: styles.actual, children: observed ? '실행 정보: 런타임 보고 · 개별 API 응답의 모델 검증과는 다릅니다.' : '요청한 실행 종류입니다. 실제 프로필·역할은 아직 확인되지 않았습니다.' }),
+    row.model ? jsx('p', { style: styles.actual, children: `보고된 모델: ${row.model}${row.provider ? ` · ${row.provider}` : ''}` }) : null,
+    jsxs('details', { style: executionStyles.details, children: [jsx('summary', { style: executionStyles.summary, children: '실행 식별 정보' }),
+      jsx('div', { children: `요청: ${executionLabel(row.requested)}` }),
+      jsx('div', { children: `실행: ${observed ? executionLabel(row.observed) : '미확인'}` }),
+      row.backend ? jsx('div', { children: `방식: ${row.backend}` }) : null,
+      row.subagent_id ? jsx('div', { children: `하위 작업: ${row.subagent_id}` }) : null,
+      row.delegation_id ? jsx('div', { children: `위임: ${row.delegation_id}` }) : null,
+      row.job?.target_session_id ? jsx('div', { children: `작업 세션: ${row.job.target_session_id}` }) : null,
+      row.job?.admission_id ? jsx('div', { children: `접수: ${row.job.admission_id}` }) : null
+    ] })
+  ] })
+}
+export function ExecutionPanel({ compact = false, ctx } = {}) {
+  const { scope, key, query, data } = useExecutionSnapshot()
+  const fence = useExecutionFence()
+  const [filter, setFilter] = useState('all')
+  const rows = (data?.rows || []).filter(row => filter === 'all' || (row.observed?.evidence === 'runtime_reported' ? row.observed : row.requested)?.kind === filter)
+  const content = !key ? jsx('p', { style: styles.hint, children: '대화를 선택하면 해당 연결·프로필·대화의 실행 현황을 표시합니다.' }) : query.isPending && !data ? jsx('p', { style: styles.hint, children: '실행 정보를 확인하고 있습니다…' }) :
+    query.isError || data?.available === false ? jsx('p', { style: styles.hint, role: 'status', children: '이 대화의 실행 정보를 읽을 수 없습니다. 연결과 해당 프로필의 플러그인 준비 상태를 확인하세요. 다른 프로필로 전환해 조회하지 않습니다.' }) :
+      rows.length ? jsx('div', { style: executionStyles.list, children: rows.map(row => !compact && row.execution_mode === 'gateway'
+        ? jsx(ProfileJobControls, { job: row.job, scope, storage: ctx?.storage, fence, refresh: () => query.refetch() }, `${key}:${row.id}`)
+        : jsx(ExecutionRow, { row }, row.id)) }) : jsx('p', { style: styles.hint, children: '확인된 실행 기록이 없습니다. 플러그인 로드 이전 작업은 종류가 확인되지 않을 수 있습니다.' })
+  if (compact) return jsxs('details', { style: executionStyles.compact, 'data-model-router-execution': 'compact', children: [
+    jsxs('summary', { style: executionStyles.summary, children: ['포커스 대화 · 실행 현황', data?.rows?.length ? ` · ${data.rows.length}개` : '',
+      ...(data?.rows || []).slice(0, 3).map(row => jsx('span', { style: { ...executionStyles.badge, marginInlineStart: '0.4rem' }, children: executionLabel(row.observed?.evidence === 'runtime_reported' ? row.observed : row.requested) }, row.id))] }),
+    content
+  ] })
+  return jsxs('section', { style: executionStyles.panel, 'data-model-router-execution': 'panel', 'aria-label': '모델 라우터 실행 현황', children: [
+    jsxs('header', { style: styles.sectionHeading, children: [jsx('h2', { style: styles.heading, children: '실행 현황' }),
+      jsx(Button, { size: 'sm', variant: 'ghost', disabled: !key || query.isFetching, onClick: () => query.refetch(), children: '새로고침' })] }),
+    key ? jsx('p', { style: styles.hint, children: `포커스한 대화 · ${scope.profile} · ${scope.connectionId}` }) : null,
+    jsxs('div', { style: executionStyles.badges, children: ['all', 'model', 'profile'].map(value => jsx(Button, { size: 'sm', variant: filter === value ? 'secondary' : 'ghost', onClick: () => setFilter(value), 'aria-pressed': filter === value,
+      children: { all: '전체', model: '모델', profile: '프로필' }[value] }, value)) }),
+    content,
+    data?.limited ? jsx('p', { style: styles.hint, children: '최근 관찰 기록은 최대 128개까지 표시합니다.' }) : null,
+    jsx('p', { style: styles.hint, children: '기존 서브에이전트 카드와 중지·지시 기능은 그대로 유지합니다. 이 패널은 실행 종류와 확인된 식별 정보를 보완합니다.' }),
+    key ? jsx(ProfileJobsPanel, { ctx, scope, executionData: data, refreshExecutions: () => query.refetch() }, key) : null
+  ] })
+}
+
+const PROFILE_JOB_STATES = new Set(['preparing', 'creating', 'submitting', 'queued', 'running', 'approval_wait', 'clarify_wait', 'stop_requested', 'completed', 'failed', 'cancelled', 'unknown'])
+const PROFILE_JOB_TERMINAL = new Set(['completed', 'failed', 'cancelled'])
+const PROFILE_JOB_FENCES = 'model-router.profile-job-fences.v1'
+export function createExecutionFence(read = currentExecutionScope, readGateway = () => host.state?.gateway?.get?.()) {
+  let generation = 0, closed = false, last = JSON.stringify([executionScopeKey(read()), readGateway()])
+  const observe = () => { const next = JSON.stringify([executionScopeKey(read()), readGateway()]); if (next !== last) { generation++; last = next } }
+  return { observe, capture() { observe(); return { key: executionScopeKey(read()), generation } },
+    current(token) { observe(); return !closed && Boolean(token?.key) && token.key === executionScopeKey(read()) && token.generation === generation },
+    activate() { closed = false; generation++; observe() }, dispose() { closed = true; generation++ } }
+}
+function useExecutionFence() {
+  const ref = useRef(null)
+  if (!ref.current) ref.current = createExecutionFence()
+  useEffect(() => {
+    const fence = ref.current
+    fence.activate()
+    const atoms = ['focusedSessionOwner', 'focusedSessionId', 'connectionId', 'profile', 'activeSessionId', 'gateway'].map(key => host.state?.[key])
+    const disposers = atoms.filter(atom => typeof atom?.listen === 'function').map(atom => atom.listen(fence.observe))
+    fence.observe()
+    return () => { for (const dispose of disposers) dispose(); fence.dispose() }
+  }, [])
+  return ref.current
+}
+function fullPolicyScope(scope) { return executionScopeKey(scope) ? JSON.stringify([scope.connectionId, scope.profile]) : null }
+function fenceStore(storage) {
+  if (!storage || typeof storage.get !== 'function' || typeof storage.set !== 'function') return null
+  try {
+    const value = storage.get(PROFILE_JOB_FENCES, { schema: 1, entries: {} })
+    return value && value.schema === 1 && value.entries && !Array.isArray(value.entries) && typeof value.entries === 'object' && Object.keys(value.entries).length <= 64 ? deepClone(value) : null
+  } catch { return null }
+}
+export function profileJobFence(storage, key, value) {
+  const store = fenceStore(storage)
+  let parts
+  try { parts = JSON.parse(key) } catch { return { blocked: true, unavailable: true } }
+  if (!store || !Array.isArray(parts) || ![2, 3].includes(parts.length) || parts.some(item => !executionId(item)) || JSON.stringify(parts) !== key) return { blocked: true, unavailable: true }
+  if (value === undefined) return store.entries[key] || null
+  if (value === null) delete store.entries[key]
+  else {
+    if (Object.keys(store.entries).length >= 64 && !(key in store.entries)) throw new Error('profile_job_fence_capacity')
+    store.entries[key] = value
+  }
+  storage.set(PROFILE_JOB_FENCES, store)
+  const readback = fenceStore(storage)
+  if (!readback || JSON.stringify(readback.entries[key] || null) !== JSON.stringify(value || null)) throw new Error('profile_job_fence_unavailable')
+  return value
+}
+export function normalizeProfileJobs(reply, targetProfile, parentId) {
+  if (!reply || reply.schema !== 1 || reply.origin_profile !== targetProfile || reply.parent_session_id !== parentId || !Array.isArray(reply.jobs)) return null
+  const seen = new Set(), jobs = []
+  for (const value of reply.jobs.slice(0, 64)) {
+    if (!value || !executionId(value.id) || seen.has(value.id) || value.origin_profile !== targetProfile ||
+      !executionId(value.parent_session_id) || !EXECUTION_PROFILE.test(value.target_profile || '') || value.execution_mode !== 'gateway' || !PROFILE_JOB_STATES.has(value.status)) continue
+    seen.add(value.id)
+    const pending = value.pending_request
+    const prompt = pending && ['approval', 'clarify'].includes(pending.kind) && executionId(pending.prompt_id) && Number.isSafeInteger(pending.execution_generation) && pending.execution_generation >= 0
+      ? { kind: pending.kind, prompt_id: pending.prompt_id, execution_generation: pending.execution_generation,
+        text: typeof pending.text === 'string' && pending.text.length <= 8192 ? pending.text : '',
+        choices: Array.isArray(pending.choices) ? pending.choices.filter(choice => ['once', 'deny'].includes(choice)) : [] } : null
+    jobs.push({ id: value.id, origin_profile: targetProfile, parent_session_id: value.parent_session_id, target_profile: value.target_profile,
+      execution_mode: 'gateway', status: value.status, target_session_id: executionId(value.target_session_id) ? value.target_session_id : null,
+      admission_id: executionId(value.admission_id) ? value.admission_id : null,
+      target_profile_id: executionId(value.target_profile_id) ? value.target_profile_id : null,
+      target_instance_id: executionId(value.target_instance_id) ? value.target_instance_id : null,
+      target_authority_epoch: Number.isSafeInteger(value.target_authority_epoch) && value.target_authority_epoch >= 0 ? value.target_authority_epoch : null,
+      target_cwd: typeof value.target_cwd === 'string' && value.target_cwd.length > 0 && value.target_cwd.length <= 2048 && !/[\x00-\x1f\x7f]/.test(value.target_cwd) ? value.target_cwd : null,
+      execution_generation: Number.isSafeInteger(value.execution_generation) && value.execution_generation >= 0 ? value.execution_generation : null,
+      completion_delivery: 'explicit_result', result_available: value.result_available === true,
+      can_steer: value.can_steer === true, can_approve: false, can_deny: false, can_clarify: false,
+      reason_code: /^[a-z0-9_]{1,80}$/.test(value.reason_code || '') ? value.reason_code : null, pending_request: prompt,
+      observed: executionIdentity(value.observed), model: executionSafeText(value.model), provider: executionSafeText(value.provider) })
+  }
+  return jobs
+}
+export function profileJobExecutionRow(job) {
+  return { id: `gateway:${job.id}`, execution_mode: 'gateway', requested: { kind: 'profile', profile: job.target_profile, role: null },
+    observed: job.observed, status: job.status, task_index: null, model: job.model, provider: job.provider, job }
+}
+export async function profileJobsRequest(transport, scope, operation, payload = {}, isCurrent = () => true) {
+  const allowed = { describe: [], list: [], control: ['job_id', 'operation', 'text'], result: ['job_id'] }
+  if (!executionScopeKey(scope) || !Object.hasOwn(allowed, operation) || !payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).some(key => !allowed[operation].includes(key))) throw new Error('profile_job_invalid_request')
+  if (['control', 'result'].includes(operation) && !executionId(payload.job_id)) throw new Error('profile_job_invalid_job')
+  if (operation === 'control' && !['refresh', 'stop', 'steer'].includes(payload.operation)) throw new Error('profile_job_invalid_control')
+  if (operation === 'control') {
+    const fields = { refresh: [], stop: [], steer: ['text'] }[payload.operation]
+    if (Object.keys(payload).some(key => !['job_id', 'operation', ...fields].includes(key)) || fields.some(key => !Object.hasOwn(payload, key))) throw new Error('profile_job_invalid_control')
+    if (payload.operation === 'steer' && (typeof payload.text !== 'string' || !payload.text.trim() || payload.text.length > 16000)) throw new Error('profile_job_invalid_control')
+  }
+  if (!isCurrent()) throw new Error('profile_job_scope_changed')
+  const route = selectExecutionRoute(await transport.profileRoutes(), scope)
+  if (!route || !isCurrent()) throw new Error('profile_job_scope_changed')
+  const frozen = deepClone(payload)
+  let reply
+  try { reply = await transport.requestProfile(route, `plugin.model-router.profile_jobs.${operation}`, { session_id: scope.sessionId, ...frozen }) }
+  catch { const error = new Error('profile_job_outcome_unknown'); error.sent = true; throw error }
+  if (!isCurrent()) { const error = new Error('profile_job_scope_changed'); error.sent = true; throw error }
+  if (!reply || typeof reply !== 'object' || reply.schema !== 1) { const error = new Error('profile_job_outcome_unknown'); error.sent = true; throw error }
+  const origin = reply.origin_profile || reply.job?.origin_profile
+  if (origin !== route.targetProfile) { const error = new Error('profile_job_owner_mismatch'); error.sent = true; throw error }
+  if (reply.error || ['error', 'refused', 'unknown'].includes(reply.status)) {
+    const error = new Error('profile_job_request_refused'); error.noEffect = reply.no_effect === true; error.sent = !error.noEffect; throw error
+  }
+  if (['control', 'result'].includes(operation) && reply.job?.id !== frozen.job_id) { const error = new Error('profile_job_job_mismatch'); error.sent = true; throw error }
+  return reply
+}
+export async function readProfileJobs(transport, scope, isCurrent = () => true) {
+  const reply = await profileJobsRequest(transport, scope, 'describe', {}, isCurrent)
+  if (reply.schema !== 1 || !EXECUTION_PROFILE.test(reply.origin_profile || '') || !/^[a-f0-9]{64}$/.test(reply.revision || '') ||
+    reply.policy?.schema !== 1 || typeof reply.policy.enabled !== 'boolean' || !Array.isArray(reply.policy.targets) || !Array.isArray(reply.targets)) throw new Error('profile_job_capability_unavailable')
+  if (reply.policy.targets.some(name => typeof name !== 'string' || !EXECUTION_PROFILE.test(name)) || new Set(reply.policy.targets).size !== reply.policy.targets.length) throw new Error('profile_job_capability_unavailable')
+  if (reply.targets.length > 32 || reply.targets.some(item => !item || typeof item.profile !== 'string' || !EXECUTION_PROFILE.test(item.profile) || typeof item.available !== 'boolean' || (item.available && (typeof item.cwd !== 'string' || !item.cwd || item.cwd.length > 2048))) || new Set(reply.targets.map(item => item.profile)).size !== reply.targets.length) throw new Error('profile_job_capability_unavailable')
+  const targets = reply.targets.slice(0, 32).filter(item => item && EXECUTION_PROFILE.test(item.profile || '')).map(item => ({ profile: item.profile,
+    cwd: typeof item.cwd === 'string' && item.cwd.length <= 2048 ? item.cwd : null, available: item.available === true }))
+  return { schema: 1, scope_key: executionScopeKey(scope), origin_profile: reply.origin_profile, supported: reply.supported === true,
+    authority_blocked: reply.reason_code === 'operator_authority_unavailable',
+    operator_cli_supported: reply.grant_management?.transport === 'host_cli' && reply.grant_management?.rpc_writable === false,
+    policy: { schema: 1, enabled: reply.policy.enabled, targets: [...reply.policy.targets] }, revision: reply.revision, targets, completion_delivery: 'explicit_result' }
+}
+function nativeRouteKey(route) { return route ? JSON.stringify([route.connectionId, route.mode, route.profile, route.targetProfile]) : null }
+function nativeJobKey(job) {
+  return JSON.stringify([job.id, job.origin_profile, job.parent_session_id, job.target_profile, job.target_session_id,
+    job.target_profile_id, job.target_instance_id, job.target_authority_epoch, job.target_cwd, job.admission_id])
+}
+export function nativeJobViewSupported(transport, job) {
+  return ['profileRoutes', 'requestProfile', 'retainProfile', 'openSession'].every(name => typeof transport?.[name] === 'function') &&
+    executionId(job?.id) && executionId(job?.target_session_id) && executionId(job?.target_profile_id) && executionId(job?.target_instance_id) &&
+    Number.isSafeInteger(job?.target_authority_epoch) && job.target_authority_epoch >= 0 &&
+    typeof job?.target_cwd === 'string' && job.target_cwd.length > 0 && job.target_cwd.length <= 2048 && !/[\x00-\x1f\x7f]/.test(job.target_cwd)
+}
+export async function openProfileJobNative(transport, scope, selectedJob, isCurrent = () => true) {
+  let release
+  try {
+    if (!executionScopeKey(scope) || !nativeJobViewSupported(transport, selectedJob) || !isCurrent()) throw new Error('unavailable')
+    // Copy only allowlisted identity fields; never retain raw target info or prompts.
+    const selectedKey = nativeJobKey(selectedJob), jobId = selectedJob.id, targetProfile = selectedJob.target_profile
+    const routes = await transport.profileRoutes()
+    if (!isCurrent()) throw new Error('scope_changed')
+    const source = selectExecutionRoute(routes, scope)
+    if (!source) throw new Error('source_unavailable')
+    const sourceKey = nativeRouteKey(source)
+    const findTarget = rows => {
+      if (!Array.isArray(rows) || nativeRouteKey(selectExecutionRoute(rows, scope)) !== sourceKey) throw new Error('source_changed')
+      const found = rows.filter(row => row && row.connectionId === source.connectionId && row.mode === source.mode &&
+        row.targetProfile === targetProfile && executionId(row.profile))
+      if (found.length !== 1) throw new Error('target_ambiguous')
+      return { ...found[0] }
+    }
+    const route = findTarget(routes), routeKey = nativeRouteKey(route)
+    const check = async () => {
+      if (!isCurrent()) throw new Error('scope_changed')
+      const currentRoutes = await transport.profileRoutes()
+      if (!isCurrent() || nativeRouteKey(findTarget(currentRoutes)) !== routeKey) throw new Error('route_changed')
+      const reply = await profileJobsRequest(transport, scope, 'list', {}, isCurrent)
+      if (!Array.isArray(reply.jobs) || reply.jobs.filter(row => row?.id === jobId).length !== 1) throw new Error('job_ambiguous')
+      const job = normalizeProfileJobs(reply, source.targetProfile, scope.sessionId)?.find(row => row.id === jobId)
+      if (!job || nativeJobKey(job) !== selectedKey || !nativeJobViewSupported(transport, job) || !isCurrent()) throw new Error('job_changed')
+      // The source RPC itself awaited I/O: recheck the registry AFTER it too.
+      const afterRoutes = await transport.profileRoutes()
+      if (!isCurrent() || nativeRouteKey(findTarget(afterRoutes)) !== routeKey) throw new Error('route_changed')
+      return job
+    }
+    let job = await check()
+    release = await transport.retainProfile(route, { spawnPriority: 'foreground' })
+    if (typeof release !== 'function') throw new Error('lease_unavailable')
+    job = await check()
+    const runtime = await transport.requestProfile(route, 'runtime.describe', {})
+    job = await check()
+    if (!runtime || runtime.profile_id !== job.target_profile_id || runtime.instance_id !== job.target_instance_id ||
+      !Number.isSafeInteger(runtime.authority_epoch) || runtime.authority_epoch !== job.target_authority_epoch) throw new Error('runtime_changed')
+    const info = await transport.requestProfile(route, 'session.info', { session_id: job.target_session_id })
+    job = await check()
+    // session.info is a flat native DTO without an SID echo. The exact request
+    // plus native profile/source/client/CWD checks is the binding; do not invent one.
+    if (!info || info.desktop_protocol !== 'hermes-gateway-v1' || info.profile_id !== job.target_profile_id ||
+      info.profile_name !== job.target_profile || info.source !== 'tool' || info.cwd !== job.target_cwd ||
+      info.client?.name !== 'model-router-profile-job') throw new Error('session_changed')
+    await transport.openSession(job.target_session_id, { route, awaitHydration: true, forceResume: true,
+      expectHistory: false, keepAllProfilesScope: true })
+    // openSession intentionally changes focus. There is no AbortSignal contract
+    // after that call starts; never roll back native navigation or replay a task.
+    return { opened: true, source_current: isCurrent() }
+  } catch { throw new Error('profile_job_native_view_unavailable') }
+  finally { if (typeof release === 'function') { try { await release() } catch { throw new Error('profile_job_native_view_unavailable') } } }
+}
+export function ProfileJobControls({ job, scope, storage, fence, refresh }) {
+  const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [steer, setSteer] = useState(''), [result, setResult] = useState(null)
+  const inFlight = useRef(false), fenceKey = JSON.stringify([scope.connectionId, scope.profile, job.id]), blocked = profileJobFence(storage, fenceKey)
+  const operate = async (operation, extra = {}) => {
+    if (inFlight.current) return
+    const token = fence.capture()
+    if (token.key !== executionScopeKey(scope) || !fence.current(token)) return
+    if (blocked && !['refresh', 'stop', 'result'].includes(operation)) { setMessage('이전 요청의 결과가 미확인입니다. 재전송하지 않습니다.'); return }
+    inFlight.current = true; setBusy(true); setMessage('')
+    const mutating = operation === 'steer'
+    try {
+      if (mutating) profileJobFence(storage, fenceKey, { blocked: true, generation: job.execution_generation, prompt_id: job.pending_request?.prompt_id || null, operation })
+      const reply = await profileJobsRequest(host, scope, operation === 'result' ? 'result' : 'control',
+        operation === 'result' ? { job_id: job.id } : { job_id: job.id, operation, ...extra }, () => fence.current(token))
+      if (operation === 'result') {
+        if (reply.job?.id !== job.id || (reply.result !== null && (typeof reply.result?.text !== 'string' || reply.result.text.length > 65536))) throw new Error('profile_job_result_unavailable')
+        setResult(reply.result?.text ?? null); setMessage(reply.result ? '저장된 결과를 회수했습니다. 부모 대화를 자동으로 재개한 것은 아닙니다.' : '아직 저장된 결과가 없습니다.')
+      } else {
+        if (mutating) profileJobFence(storage, fenceKey, null)
+        setMessage(operation === 'stop' ? '정확한 작업의 중지를 요청했습니다. 종료 여부는 상태로 확인하세요.' : '요청을 보냈습니다. 실제 반영은 작업 상태로 확인하세요.')
+      }
+      await refresh()
+    } catch (error) {
+      if (mutating && !error?.sent) { try { profileJobFence(storage, fenceKey, null) } catch {} }
+      if (fence.current(token)) setMessage(error?.noEffect ? '요청이 거절되어 해당 작업 변경은 수행되지 않았습니다. 현재 상태와 허용 범위를 확인하세요.' : '요청 결과를 확정할 수 없습니다. 다른 작업이나 새 프롬프트로 재시도하지 않습니다. 상태를 확인하세요.')
+    } finally { inFlight.current = false; if (fence.current(token)) setBusy(false) }
+  }
+  const openNative = async () => {
+    if (inFlight.current) return
+    const token = fence.capture()
+    if (token.key !== executionScopeKey(scope) || !fence.current(token)) return
+    inFlight.current = true; setBusy(true); setMessage('')
+    try { await openProfileJobNative(host, scope, job, () => fence.current(token)) }
+    catch { if (fence.current(token)) setMessage('대상 상태·연결·권한을 확인할 수 없어 화면 열기를 완료하지 못했습니다. 상태를 확인하세요. 작업은 다시 제출하지 않습니다.') }
+    finally { inFlight.current = false; if (fence.current(token)) setBusy(false) }
+  }
+  const pending = job.pending_request
+  return jsxs('div', { style: executionStyles.row, children: [
+    jsx(ExecutionRow, { row: profileJobExecutionRow(job), bare: true }),
+    jsxs('div', { style: styles.actions, children: [
+      jsx(Button, { size: 'sm', variant: 'ghost', disabled: busy, onClick: () => operate('refresh'), children: '상태 확인' }),
+      jsx(Button, { size: 'sm', variant: 'ghost', disabled: busy || !job.admission_id || PROFILE_JOB_TERMINAL.has(job.status), onClick: () => operate('stop'), children: '중지 요청' }),
+      jsx(Button, { size: 'sm', variant: 'ghost', disabled: busy || !job.result_available, onClick: () => operate('result'), children: '결과 보기' }),
+      jsx(Button, { size: 'sm', variant: 'secondary', disabled: busy || !nativeJobViewSupported(host, job), onClick: openNative, children: 'Hermes에서 대상 대화 열기' })
+    ] }),
+    job.status === 'running' ? jsxs('div', { style: styles.field, children: [jsx('label', { htmlFor: `job-steer-${job.id}`, children: '실행 중인 작업에 지시' }),
+      jsx(Input, { id: `job-steer-${job.id}`, value: steer, disabled: busy || Boolean(blocked) || !job.can_steer, maxLength: 16000, onChange: event => setSteer(event.target.value) }),
+      jsx(Button, { size: 'sm', variant: 'secondary', disabled: busy || Boolean(blocked) || !job.can_steer || !steer.trim(), onClick: () => operate('steer', { text: steer }), children: '이 작업에만 지시 보내기' })] }) : null,
+    pending ? jsxs('div', { style: styles.field, children: [jsx('p', { style: styles.hint, children: pending.kind === 'approval' ? '사용자 승인을 기다립니다. 대상 대화를 열어 전체 요청을 확인하세요.' : '사용자 답변을 기다립니다. 대상 대화를 열어 질문을 확인하세요.' }),
+      jsx('pre', { style: { ...styles.value, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }, children: pending.text || '요청 내용을 확인할 수 없습니다.' }),
+      jsx('p', { style: styles.hint, children: '여기는 읽기 전용 요약입니다. 승인·거절·답변은 기본 Hermes 화면에서만 보냅니다. 해당 계정의 권한과 현재 요청에 대한 검사를 그대로 따릅니다.' })
+    ] }) : null,
+    blocked ? jsx('p', { style: styles.hint, role: 'status', children: '미확인 요청이 있어 추가 지시·승인을 잠갔습니다. 상태와 결과를 확인하세요. 동일 작업을 새로 실행하지 않습니다.' }) : null,
+    message ? jsx('p', { style: styles.hint, role: 'status', children: message }) : null,
+    result !== null ? jsx('pre', { style: { ...styles.value, whiteSpace: 'pre-wrap' }, children: result }) : null
+  ] })
+}
+export function ProfileJobsPanel({ ctx, scope, executionData, refreshExecutions }) {
+  const key = executionScopeKey(scope)
+  const query = useQuery({ queryKey: ['model-router', 'profile-jobs-policy', key],
+    queryFn: () => readProfileJobs(host, scope, () => executionScopeKey(currentExecutionScope()) === key), enabled: Boolean(key), retry: false, staleTime: 5000 })
+  const data = query.data?.scope_key === key ? query.data : null
+  return jsxs('section', { style: styles.section, 'aria-label': '전체 프로필 작업', children: [
+    jsx('h3', { style: styles.heading, children: '전체 프로필 작업 · 별도 선택 기능' }),
+    jsx('p', { style: styles.hint, children: '허용한 프로필의 별도 작업 대화에서 실행합니다. 대상의 계정·모델·메모리·도구 정책을 따르며 모든 도구를 강제로 여는 기능은 아닙니다. 네이티브 위임 설정은 그대로입니다.' }),
+    jsx('p', { style: styles.hint, children: '승인·답변은 작업 카드의 「Hermes에서 대상 대화 열기」로 이동해 처리하세요. 완료 결과는 「결과 보기」로 회수하며 부모 대화를 자동으로 재개하지 않습니다.' }),
+    query.isPending ? jsx('p', { style: styles.hint, children: '지원 상태를 확인하고 있습니다…' }) : query.isError || !data ? jsx('p', { style: styles.hint, role: 'status', children: '이 출발 프로필의 설정을 읽을 수 없습니다. 연결과 플러그인 준비 상태를 확인하세요. 다른 실행 방식으로 대신 시작하지 않습니다.' }) :
+      jsxs('div', { style: styles.field, children: [
+        jsx('p', { style: styles.hint, children: `출발 프로필 ${data.origin_profile} · ${data.policy.enabled ? `${data.policy.targets.length}개 프로필 허용` : '전체 프로필 작업 꺼짐'}` }),
+        data.policy.targets.length ? jsx('p', { style: styles.hint, children: `허용 대상: ${data.policy.targets.join(', ')}` }) : null,
+        jsx(Button, { size: 'sm', variant: 'ghost', onClick: () => Promise.all([query.refetch(), refreshExecutions()]), children: '현재 허용 범위 새로고침' }),
+        data.operator_cli_supported ? jsxs('details', { children: [
+          jsx('summary', { style: executionStyles.summary, children: '운영자 설정 안내 · 이 화면은 읽기 전용' }),
+          jsx('p', { style: styles.hint, children: `연결 ${scope.connectionId}의 Hermes 호스트에서 운영자 터미널을 열고 출발 프로필 ${data.origin_profile}를 명시하세요. 원격 연결이라면 내 PC가 아니라 해당 서버에서 실행해야 합니다. 아래 예시는 그대로 실행하지 말고 실제 대상 이름과 검토 결과를 넣으세요.` }),
+          jsx('p', { style: styles.hint, children: '1. status 명령에 targets JSON을 전달해 대상 계정·도구·메모리·모델 비용과 현재 작업 폴더를 검토합니다. 결과의 operator_revision을 복사하세요.' }),
+          jsx('pre', { style: { ...styles.value, whiteSpace: 'pre-wrap' }, children: `hermes --profile ${data.origin_profile} model-router profile-jobs-status --body -` }),
+          jsx('pre', { style: { ...styles.value, whiteSpace: 'pre-wrap' }, children: '{"targets":["허용할_프로필명"]}' }),
+          jsx('p', { style: styles.hint, children: "JSON은 표준입력으로 전달합니다. PowerShell: 'JSON 원문' | 위_명령 / Git Bash: printf '%s' 'JSON 원문' | 위_명령. 실제 JSON에는 영문 프로필 이름과 revision을 사용하세요." }),
+          jsx('p', { style: styles.hint, children: '2. 같은 대상 목록과 방금 검토한 revision을 configure 명령에 전달합니다. 명령을 시작한 뒤 결과가 미확인이면 다시 쓰지 말고 기존 프로세스가 끝난 후 status로 확인하세요.' }),
+          jsx('pre', { style: { ...styles.value, whiteSpace: 'pre-wrap' }, children: `hermes --profile ${data.origin_profile} model-router profile-jobs-configure --body -` }),
+          jsx('pre', { style: { ...styles.value, whiteSpace: 'pre-wrap' }, children: JSON.stringify({ expected_operator_revision: '1단계에서_검토한_64자리_revision', enabled: true, targets: ['같은_대상_프로필명'], acknowledge_scope: true }, null, 2) }),
+          jsx('p', { style: styles.hint, children: '전체 철회는 targets: []를 먼저 status로 검토한 뒤 enabled: false, targets: []로 저장합니다. 허용 철회가 이미 실행 중인 작업을 자동 중지하지는 않으므로 작업 카드를 별도로 확인하세요.' }),
+          jsx('p', { style: styles.hint, children: 'CLI는 기존 운영자 OS 권한을 사용합니다. 이 안내나 체크값이 관리자 권한을 만들지는 않습니다. 승인·거절·답변은 이 플러그인에서 중계하지 않습니다.' })
+        ] }) : jsx('p', { style: styles.hint, role: 'status', children: '이 버전에서 운영자 CLI 지원을 확인할 수 없습니다. 이 화면에서 권한 저장·승인·답변을 대신 보내지 않습니다.' }),
+        jsxs('details', { children: [jsx('summary', { style: executionStyles.summary, children: '실행·연결 범위' }),
+          jsx('p', { style: styles.hint, children: '작업 실행은 이미 실행 중인 Gateway만 사용하며 시작·복구하지 않습니다. 대상 대화 열기는 Hermes의 기본 연결 정책을 따라 프로필 백엔드에 연결할 수 있지만 작업을 새로 제출하지 않습니다. 같은 작업 폴더의 전체 프로필 작업은 동시에 하나만 허용합니다.' })] })
+      ] })
+  ] })
+}
+
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.8.0',
+  version: '0.9.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
@@ -3428,6 +3888,14 @@ export default {
         render: page.render,
         data: { icon: page.icon }
       })
+    }
+    // These slots are read-only until the user explicitly operates a worker.
+    // Older SDKs keep settings usable without pretending to support a roster.
+    if (typeof host.state?.activeSessionId?.get === 'function' && typeof host.profileRoutes === 'function' && typeof host.requestProfile === 'function') {
+      ctx.registerMany([
+        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ExecutionPanel, { compact: true }) },
+        { id: 'execution-panel', area: 'panes', title: '실행 현황', data: { placement: 'bottom', height: '260px' }, render: () => jsx(ExecutionPanel, { ctx }) }
+      ])
     }
     ctx.registerMany([
       {

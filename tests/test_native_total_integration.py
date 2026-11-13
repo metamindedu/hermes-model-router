@@ -48,6 +48,8 @@ class OfflineChild:
 
     def __init__(self, **kwargs):
         self.session_id = "offline-child-" + uuid4().hex
+        self._session_db = None
+        self._persist_disabled = True
         self.model = kwargs["model"]
         self.provider = kwargs["provider"]
         self.base_url = kwargs["base_url"]

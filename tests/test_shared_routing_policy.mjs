@@ -78,7 +78,7 @@ test('native routing replaces launch fields while legacy read-only access remain
   assert.match(canonical, /Native routes \(Hermes >=0.22.5\)/)
   assert.match(canonical, /`model-router-profiles`/)
   assert.match(canonical, /legacy fresh-task-rerun consent never authorizes/)
-  assert.match(read('plugin.yaml'), /requires_hermes: ">=0.22.5"/)
+  assert.match(read('plugin.yaml'), /requires_hermes: ">=0.23.1"/)
   assert.doesNotMatch(desktop, /시간 초과 시 실행 프로세스를 정리합니다/)
   assert.match(desktop, /중단을 요청하지만, 실제로 멈추기까지 시간이 걸릴/)
   assert.doesNotMatch(canonical, /Routed jobs retain their existing process-tree cancellation/ )

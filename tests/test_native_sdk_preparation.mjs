@@ -27,7 +27,13 @@ function nativeTransport(topology, serve) {
   const { transformSync } = require('esbuild')
   const profile = readFileSync(path.join(core, 'apps/desktop/src/sdk/profile-request.ts'), 'utf8')
   const gateway = readFileSync(path.join(core, 'apps/desktop/src/store/gateway.ts'), 'utf8')
-  const code = [actualFunction(profile, 'requestPluginProfile'), actualFunction(gateway, 'requestGatewayForProfile'), actualFunction(gateway, 'requestGatewayForAgent')].join('\n')
+  const shared = readFileSync(path.join(core, 'apps/desktop/src/store/gateway-shared-route.ts'), 'utf8')
+  const riderStart = shared.indexOf('export function notePrimaryRider(')
+  assert.ok(riderStart >= 0, 'native primary-rider helper missing')
+  const riderEnd = shared.indexOf('\n}\n', riderStart)
+  assert.ok(riderEnd > riderStart)
+  const riderCode = shared.slice(riderStart, riderEnd + 3).replace(/^export /gm, '')
+  const code = ['const primaryRiders = new Map();', riderCode, actualFunction(profile, 'requestPluginProfile'), actualFunction(gateway, 'requestGatewayForProfile'), actualFunction(gateway, 'requestGatewayForAgent')].join('\n')
   const io = {
     window: { hermesDesktop: { getConnectionFor() {} } },
     registryBackendScopeKey: (connection, profile) => `${connection}::${profile}`,
@@ -40,7 +46,8 @@ function nativeTransport(topology, serve) {
     traceAgentRoute() {}, rearmSecondary() {}, async openSecondaryForRequest() {},
     createSecondary: (profile, connectionId) => ({ scope: `${connectionId}::${profile}`, retained: true, activeRequests: 0, gateway: { request: (method, params) => serve(method, params, profile) } }),
     drainPendingConnectionRedial: () => false,
-    relayRetained: () => false, foregroundPinned: () => false, disposeSecondary() {}
+    primaryIdentity: () => ({ connectionId: 'fixture-connection', gateway: 'fixture-primary' }),
+    relayRetained: () => false, pinnedOpen: () => false, foregroundPinned: () => false, disposeSecondary() {}
   }
   const js = transformSync(code, { loader: 'ts', format: 'cjs', target: 'es2022' }).code
   return new Function('io', `const {${Object.keys(io).join(',')}}=io;\n${js}\nreturn requestPluginProfile`)(io)

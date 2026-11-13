@@ -108,6 +108,14 @@ def plugin(monkeypatch):
     native_module.register_native_delegation = lambda ctx, home: state.setdefault('provider_homes', []).append(str(home))
     monkeypatch.setitem(sys.modules, native_module.__name__, native_module)
 
+    # This fixture isolates legacy root registration; the new adapters' real
+    # registration/authority/inertness is exercised by their own native tests.
+    for feature, registrar, key in [('execution_roster', 'register_execution_roster', 'roster_homes'),
+                                     ('profile_jobs', 'register_profile_jobs', 'profile_job_homes')]:
+        child = ModuleType(package.__name__ + '.' + feature)
+        setattr(child, registrar, lambda ctx, home, _key=key: state.setdefault(_key, []).append(str(home)))
+        monkeypatch.setitem(sys.modules, child.__name__, child)
+
     tools, skills = [], []
     ctx = SimpleNamespace(register_cli_command=lambda *args: state.update(cli=args), register_tool=lambda **kwargs: tools.append(kwargs), register_skill=lambda *args: skills.append(args), register_hook=lambda event, callback: state.setdefault('hooks', {}).update({event: callback}))
     return mod, ctx, state, tools, skills
@@ -119,6 +127,7 @@ def test_disabled_profile_keeps_legacy_reads_and_provider_registration(plugin):
     mod.register(ctx)
     assert skills == [] and len(tools) == 1 and tools[0]['check_fn']()
     assert state['provider_homes'] == [str(Path('C:/fake/profiles/claire'))]
+    assert state['roster_homes'] == state['profile_job_homes'] == state['provider_homes']
     assert json.loads(tools[0]['handler']({'action': 'config'}))['enabled'] is False
 
 

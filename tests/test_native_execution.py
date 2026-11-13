@@ -43,14 +43,14 @@ def test_real_native_child_completion_and_cooperative_stop(tmp_path, monkeypatch
         'agent': {'reasoning_effort': 'high'},
     }), encoding='utf-8')
     monkeypatch.setenv('HERMES_HOME', str(home))
-    monkeypatch.setattr('hermes_constants.get_default_hermes_root', lambda: home)
+    monkeypatch.setattr('hermes_constants.get_default_hermes_root', lambda **kwargs: home)
     monkeypatch.delenv('HERMES_PROFILE', raising=False)
     def forbidden(*args, **kwargs): raise AssertionError('HTTP is forbidden in offline native execution test')
     monkeypatch.setattr(httpx.Client, 'send', forbidden)
     monkeypatch.setattr(httpx.AsyncClient, 'send', forbidden)
     # The native resolver is retained except for credential acquisition: never
     # read user OAuth/key material to construct this offline child.
-    monkeypatch.setattr(dt, '_resolve_delegation_credentials', lambda route, parent: {
+    monkeypatch.setattr(dt, '_resolve_delegation_credentials', lambda route, parent, **kwargs: {
         'provider': 'openrouter', 'model': route['model'], 'base_url': 'http://127.0.0.1:9/v1',
         'api_key': 'offline-test-fixture', 'api_mode': 'chat_completions'})
     monkeypatch.setattr(dt, '_resolve_child_credential_pool', lambda *a, **kw: None)

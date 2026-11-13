@@ -1,6 +1,18 @@
 # Hermes Model Router
 
-Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. New work uses `delegate_task`; the plugin no longer starts a separate routed worker. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
+Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. Native work uses `delegate_task`; historical routed-process starts remain retired. A separate explicitly opt-in `profile_task` path attaches to Gateway-owned target sessions, not a private agent executor. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
+
+## Execution visibility and full-profile jobs (0.9.0)
+
+The workflow separates authority: original registered **host operator CLI** commands review/save full-profile grants; the plugin displays and manages scoped jobs; **Hermes에서 대상 대화 열기** hands approval/clarification to the exact native target conversation. Generic plugin RPC refuses grant writes and every approval/denial/clarification relay, even with caller operator/human flags. CLI is existing OS/operator authority, not human attestation or an OS sandbox. Installing or enabling the package never grants full-profile access or approves a job.
+
+The composer supplement and **실행 현황** pane distinguish model Heavy/Light, native profiles and separate Gateway-owned full-profile jobs. Requested identity and runtime-reported identity are different; unknown correlation stays unknown. Existing native controls/backends are unchanged.
+
+Full-profile jobs are independently OFF with no allowed targets until an operator uses `hermes --profile <origin> model-router profile-jobs-status` and `profile-jobs-configure` on the Gateway's actual host. The read-only **전체 프로필 작업 → 운영자 설정 안내** explains review, stable revision and explicit account/tool/memory/cost consent. Worker execution needs an existing compatible Gateway and normal `tool`-surface policy/local workspace; no owner is started or repaired. Native screen navigation may normally dial a profile backend, not submit another task. Model/context/tools come from the target; GUI-only tools and every integration are not guaranteed.
+
+`profile_task` supports start, exact status/stop/steer and explicit result collection. It cannot edit grants or answer approvals. Unknown submissions/controls are not replayed. Completion does **not** autonomously wake the parent: collect with **결과 보기** or `result`. Native routing and its grants/defaults stay separate. Existing sessions may need a supported new-session/tool boundary; source files alone do not install or activate this feature.
+
+See [execution ownership, opt-in scope, recovery and verification limits](docs/wiki/execution-jobs.md). Package installation, live registration, current-session tool availability and real target model/MCP/memory-provider execution are separate verification levels. Upgrading does not force a conversation reset or run a provider test.
 
 ## Profile role introductions (0.8.0)
 
@@ -20,7 +32,7 @@ Selecting a profile remains a separate explicit account/tool-use grant. Role pre
 
 ## Native delegation routing (0.7.0)
 
-Requires **Hermes >=0.22.5**. Three namespaced DelegationProvider backends reuse core spawning, concurrency, progress, cancellation and result delivery:
+The current package requires **Hermes >=0.23.1**. Three namespaced DelegationProvider backends reuse core spawning, concurrency, progress, cancellation and result delivery:
 
 | Saved `delegation.backend` | Per-task selector | Route |
 |---|---|---|

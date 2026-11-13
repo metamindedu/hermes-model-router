@@ -251,6 +251,8 @@ def test_real_delegate_task_child_builder_emits_fast_hooks_with_total_zero(nativ
 
         def __init__(self, **kwargs):
             self.session_id = "real-native-child-" + uuid4().hex
+            self._session_db = None
+            self._persist_disabled = True
             self.model = kwargs["model"]
             self.provider = kwargs["provider"]
             self.base_url = kwargs["base_url"]
