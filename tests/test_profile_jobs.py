@@ -228,6 +228,181 @@ def test_start_durable_before_every_effect_and_literal_profile_policy(env):
     assert 'PRIVATE_TASK_INPUT' not in state and 'PRIVATE_CONTEXT_INPUT' not in state
 
 
+def test_reservation_is_digest_only_and_has_zero_target_effects(env):
+    grant(env)
+    def forbidden_factory(**kwargs):
+        raise AssertionError('reservation attempted a target connection')
+    env.manager.client_factory = forbidden_factory
+    job, created = env.manager._reserve(args(), 'parent', 'parent')
+    assert created is True and job['activation_state'] == 'reserved'
+    assert job['status'] == 'preparing' and job['target_session_id'] is None
+    assert not env.gateway.calls and not env.manager.threads and not env.manager.clients
+    text = env.manager.journal.path.read_text(encoding='utf-8')
+    assert 'PRIVATE_TASK_INPUT' not in text and 'PRIVATE_CONTEXT_INPUT' not in text
+    again, created = env.manager._reserve(args(), 'parent', 'parent')
+    assert not created and again['id'] == job['id']
+    # Replaying old start must not bypass a future return controller's gate.
+    assert env.manager.start(args(), 'parent', 'parent')['id'] == job['id']
+    assert not env.manager.threads and not env.gateway.calls
+
+
+def test_reserved_activation_is_once_under_concurrency(env):
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        views = list(pool.map(lambda _: env.manager._activate(args(), 'parent', 'parent', job['id']), range(4)))
+    assert {v['id'] for v in views} == {job['id']}
+    record = wait(env, job['id'])
+    assert record['activation_state'] == 'consuming'
+    assert sum(method == 'session.create' for method, _ in env.gateway.calls) == 1
+    assert sum(method == 'prompt.submit' for method, _ in env.gateway.calls) == 1
+
+
+@pytest.mark.parametrize('changed', [{'goal': 'different'}, {'context': 'different'}, {'request_id': 'another'}])
+def test_reserved_activation_refuses_changed_payload_before_target(env, changed):
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    with pytest.raises(JobError, match='request_id_conflict'):
+        env.manager._activate(args(**changed), 'parent', 'parent', job['id'])
+    assert not env.gateway.calls and not env.manager.threads
+
+
+def test_reserved_activation_requires_owned_parent_alias_and_generation(env):
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    for parent, sid in [('foreign', 'foreign'), ('parent', 'unobserved-physical')]:
+        with pytest.raises(JobError, match='job_not_owned'):
+            env.manager._activate(args(), parent, sid, job['id'])
+    replacement = ProfileJobs(env.ctx, env.home, client_factory=env.gateway.factory, alive=lambda: True)
+    env.instances.append(replacement)
+    with pytest.raises(JobError, match='owner_unavailable'):
+        replacement._activate(args(), 'parent', 'parent', job['id'])
+    assert not env.gateway.calls
+
+
+def test_reserved_activation_rechecks_revocation_before_target(env):
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    policy = env.manager.policy
+    policy.configure({'expected_revision': policy.describe()['revision'], 'enabled': False,
+        'targets': [], 'acknowledge_scope': True})
+    with pytest.raises(PermissionError, match='grant_denied'):
+        env.manager._activate(args(), 'parent', 'parent', job['id'])
+    assert env.manager.journal.read()['jobs'][job['id']]['activation_state'] == 'reserved'
+    assert not env.gateway.calls and not env.manager.threads
+
+
+def test_reserved_stop_cancels_locally_and_frees_capacity(env):
+    grant(env)
+    jobs = [env.manager._reserve(args(request='reserve-' + str(i)), 'parent', 'parent')[0] for i in range(4)]
+    with pytest.raises(JobError, match='job_capacity'):
+        env.manager._reserve(args(request='beyond-capacity'), 'parent', 'parent')
+    stopped = env.manager.control('parent', {'operation': 'stop', 'job_id': jobs[0]['id']})
+    assert stopped['status'] == 'cancelled' and stopped['reason_code'] == 'cancelled_before_activation'
+    with pytest.raises(JobError, match='job_not_activatable'):
+        env.manager._activate(args(request='reserve-0'), 'parent', 'parent', jobs[0]['id'])
+    replacement, created = env.manager._reserve(args(request='replacement'), 'parent', 'parent')
+    assert created and replacement['id'] not in {j['id'] for j in jobs}
+    assert not env.gateway.calls and not env.manager.threads
+
+
+def test_legacy_job_is_readable_but_never_reactivated(env):
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    env.manager.journal.transaction(lambda jobs: jobs[job['id']].pop('activation_state'))
+    assert 'activation_state' not in env.manager.journal.read()['jobs'][job['id']]
+    assert env.manager.start(args(), 'parent', 'parent')['id'] == job['id']
+    with pytest.raises(JobError, match='activation_not_reserved'):
+        env.manager._activate(args(), 'parent', 'parent', job['id'])
+    assert not env.gateway.calls and not env.manager.threads
+
+
+@pytest.mark.parametrize('state', [None, True, 'started', [], {}])
+def test_activation_state_malformed_is_not_a_legacy_grant(env, state):
+    from model_router.execution_state import StateError
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    before = env.manager.journal.path.read_bytes()
+    with pytest.raises(StateError, match='journal_unavailable'):
+        env.manager.journal.transaction(lambda jobs: jobs[job['id']].update(activation_state=state))
+    assert env.manager.journal.path.read_bytes() == before
+    assert not env.gateway.calls
+
+
+@pytest.mark.parametrize('field,value', [('target_session_id', 'unadmitted-session'), ('admission_id', 'unadmitted-input'),
+    ('execution_generation', 1), ('gateway_profile_id', 'unadmitted-profile'), ('instance_id', 'unadmitted-owner')])
+def test_reserved_job_cannot_claim_target_receipt_before_activation(env, field, value):
+    from model_router.execution_state import StateError
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    before = env.manager.journal.path.read_bytes()
+    with pytest.raises(StateError, match='journal_unavailable'):
+        env.manager.journal.transaction(lambda jobs: jobs[job['id']].update({field: value}))
+    assert env.manager.journal.path.read_bytes() == before and not env.gateway.calls
+
+
+def test_reserved_job_uses_only_verified_compaction_alias(env):
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    env.manager.compacted(old_session_id='foreign', session_id='forged-alias')
+    assert 'forged-alias' not in env.manager.journal.read()['jobs'][job['id']]['parent_aliases']
+    env.manager.compacted(old_session_id='parent', session_id='compressed-parent')
+    row = env.manager.journal.read()['jobs'][job['id']]
+    assert row['parent_session_id'] == 'parent' and 'compressed-parent' in row['parent_aliases']
+    env.manager._activate(args(), 'parent', 'compressed-parent', job['id'])
+    wait(env, job['id'])
+    assert sum(method == 'prompt.submit' for method, _ in env.gateway.calls) == 1
+
+
+@pytest.mark.parametrize('failure_at', ['construction', 'start'])
+def test_failed_activation_worker_is_consumed_without_replay(env, monkeypatch, failure_at):
+    import model_router.profile_jobs as subject
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    calls = []
+    class FailedThread:
+        def __init__(self, **kwargs):
+            calls.append('construction')
+            if failure_at == 'construction':
+                raise RuntimeError('fixture worker unavailable')
+        def start(self):
+            calls.append('start')
+            raise RuntimeError('fixture worker unavailable')
+        def is_alive(self):
+            return False
+        def join(self, **kwargs):
+            pass
+    monkeypatch.setattr(subject, 'threading', SimpleNamespace(Thread=FailedThread, RLock=threading.RLock))
+    with pytest.raises(JobError, match='observer_unavailable'):
+        env.manager._activate(args(), 'parent', 'parent', job['id'])
+    record = env.manager.journal.read()['jobs'][job['id']]
+    assert record['activation_state'] == 'consuming' and record['status'] == 'failed'
+    before = list(calls)
+    assert env.manager.start(args(), 'parent', 'parent')['status'] == 'failed'
+    assert env.manager._activate(args(), 'parent', 'parent', job['id'])['status'] == 'failed'
+    assert calls == before and not env.gateway.calls
+
+
+def test_grant_revision_change_requires_new_preparation(env):
+    grant(env)
+    job, _ = env.manager._reserve(args(), 'parent', 'parent')
+    # A different effective revision without changing target/cwd is still stale.
+    def change(jobs):
+        jobs[job['id']]['grant_revision'] = '0' * 64
+    env.manager.journal.transaction(change)
+    with pytest.raises(JobError, match='grant_stale'):
+        env.manager._activate(args(), 'parent', 'parent', job['id'])
+    assert not env.gateway.calls and not env.manager.threads
+
+
+def test_normal_tool_still_refuses_absent_native_surface(env, monkeypatch):
+    grant(env)
+    monkeypatch.setattr('hermes_cli.plugin_session.session_surface', lambda: '')
+    result = json.loads(env.manager.tool(args(), session_id='parent', conversation_id='parent'))
+    assert result['status'] == 'refused' and result['error'] == 'session_context_unavailable'
+    assert not env.manager.journal.path.exists() and not env.gateway.calls and not env.manager.threads
+
+
 def test_same_request_concurrent_starts_submit_once_and_mismatch_refuses(env):
     grant(env)
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -619,6 +794,22 @@ def test_job_manager_over_real_websocket_with_synthetic_owner(env, monkeypatch):
         env.gateway.finish(record['target_session_id'], 'actual fixture wire result')
         wait(env, j['id'], lambda r: r['status'] == 'completed')
         assert env.manager.result('parent', j['id'])['result']['text'] == 'actual fixture wire result'
+        # Exercise the read-only return capsule after the actual protocol client
+        # committed the wire receipt. This is not parent-wake/model-loop proof.
+        from model_router.profile_return import ProfileResultReader, encode_capsule
+        record = env.manager.journal.read()['jobs'][j['id']]
+        observer = env.manager.threads[j['id']]
+        observer.join(timeout=3)
+        assert not observer.is_alive()
+        before_calls = copy.deepcopy(env.gateway.calls)
+        before_journal = env.manager.journal.path.read_bytes()
+        capsule = ProfileResultReader(env.home, 'default').inspect(j['id'], 'parent',
+            request_digest=record['request_id'], payload_digest=record['payload_digest'])
+        assert capsule['outcome'] == 'completed' and capsule['result_available'] is True
+        assert 'actual fixture wire result' not in encode_capsule(capsule)
+        assert 'PRIVATE_REASONING' not in encode_capsule(capsule)
+        assert env.manager.journal.path.read_bytes() == before_journal
+        assert env.gateway.calls == before_calls
         assert sum(m == 'prompt.submit' for m, _ in env.gateway.calls) == 1
         assert sum(m == 'session.steer' for m, _ in env.gateway.calls) == 1
     finally:

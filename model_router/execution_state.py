@@ -23,7 +23,7 @@ FIELDS = frozenset({'id', 'origin_profile', 'parent_session_id', 'parent_aliases
     'request_id', 'payload_digest', 'grant_revision', 'create_id', 'submission_id', 'target_session_id',
     'admission_id', 'execution_generation', 'gateway_profile_id', 'instance_id', 'authority_epoch',
     'observer_owner', 'status', 'reason_code', 'created_at', 'updated_at', 'result', 'pending_request',
-    'operation_unknown', 'pending_operation', 'completion_delivery', 'cancel_requested'})
+    'operation_unknown', 'pending_operation', 'completion_delivery', 'cancel_requested', 'activation_state', 'return_id'})
 
 _LOCK_GUARD = threading.Lock()
 _LOCAL_LOCKS = weakref.WeakValueDictionary()
@@ -129,7 +129,7 @@ class JobJournal:
                     or not identifier(job.get('parent_session_id')) or not isinstance(job.get('parent_aliases'), list)
                     or not 1 <= len(job['parent_aliases']) <= 64 or any(not identifier(sid) for sid in job['parent_aliases'])
                     or job['parent_session_id'] not in job['parent_aliases'] or not isinstance(job.get('status'), str) or job['status'] not in STATES
-                    or job.get('completion_delivery') != 'explicit_result'
+                    or job.get('completion_delivery') not in ('explicit_result', 'native_process')
                     or not isinstance(job.get('target_profile'), str) or job['target_profile'] == 'keep' or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', job['target_profile'])
                     or not isinstance(job.get('cwd'), str) or not Path(job['cwd']).is_absolute()
                     or not identifier(job.get('request_id'), 128)
@@ -151,6 +151,21 @@ class JobJournal:
                     or not isinstance(pending['text'], str) or len(pending['text']) > 8192
                     or not isinstance(pending['choices'], list) or any(c not in ('once', 'deny') for c in pending['choices'])):
                 raise StateError('journal_unavailable')
+            if ('return_id' in job and (not isinstance(job['return_id'], str)
+                    or re.fullmatch(r'[a-f0-9]{32}', job['return_id']) is None)):
+                raise StateError('journal_unavailable')
+            if (job['completion_delivery'] == 'native_process') != ('return_id' in job):
+                raise StateError('journal_unavailable')
+            # Absence is a readable legacy record, never a new activation grant.
+            if 'activation_state' in job:
+                activation = job['activation_state']
+                if not isinstance(activation, str) or activation not in ('reserved', 'consuming'):
+                    raise StateError('journal_unavailable')
+                if activation == 'reserved' and (job['status'] not in ('preparing', 'cancelled', 'failed', 'unknown')
+                        or any(job.get(k) is not None for k in ('target_session_id', 'admission_id', 'execution_generation',
+                                                              'gateway_profile_id', 'instance_id'))
+                        or job['pending_operation'] is not None or job['result'] is not None or job['pending_request'] is not None):
+                    raise StateError('journal_unavailable')
             result = job.get('result')
             if result is not None and (not isinstance(result, dict) or set(result) != {'text', 'truncated'}
                     or not isinstance(result['text'], str) or len(result['text']) > 16384 or type(result['truncated']) is not bool):

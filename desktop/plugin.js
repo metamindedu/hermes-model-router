@@ -3437,37 +3437,418 @@ export function executionLabel(identity) {
 function executionSafeText(value, limit = 256) {
   return typeof value === 'string' && value.length <= limit && value === value.trim() && !/[\x00-\x1f\x7f]/.test(value) ? value : null
 }
+const NATIVE_TERMINAL = new Set(['completed', 'error', 'failed', 'interrupted', 'cancelled', 'timeout'])
+const NATIVE_STATUS = new Set(['requested', 'dispatched', 'queued', 'running', ...NATIVE_TERMINAL, 'unknown'])
+const nativeStatus = value => NATIVE_STATUS.has(value) ? value : 'unknown'
+const executionCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null
+const executionSeconds = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+function executionTool(value) {
+  return typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/.test(value) ? value : null
+}
+function executionActivity(input = {}, runtime = null) {
+  return {
+    child_session_id: executionId(runtime?.child_session_id) ? runtime.child_session_id : executionId(input.child_session_id) ? input.child_session_id : null,
+    started_at: executionSeconds(runtime?.started_at) ?? executionSeconds(input.started_at),
+    activity_at: executionSeconds(input.activity_at),
+    last_tool: executionTool(runtime?.last_tool) || executionTool(input.last_tool),
+    tool_count: executionCount(runtime?.tool_count) ?? executionCount(input.tool_count),
+    api_call_count: executionCount(input.api_call_count),
+    duration_seconds: executionSeconds(input.duration_seconds)
+  }
+}
+function executionNativeCall(input) {
+  if (!executionId(input.delegation_id)) return null
+  if (Object.prototype.hasOwnProperty.call(input, 'async_unit_id') &&
+    (!executionId(input.async_unit_id) || input.async_unit_id !== input.delegation_id)) return null
+  const value = Object.prototype.hasOwnProperty.call(input, 'native_call_delegation_id')
+    ? input.native_call_delegation_id : input.delegation_id
+  // Legacy one-unit rows used the same ID for both. Never infer a split call
+  // by stripping suffixes; new backends supply the explicit native call ID.
+  return executionId(value) ? value : null
+}
 export function mergeExecutionRows(snapshot, live, targetProfile) {
   if (!snapshot || snapshot.schema !== 1 || snapshot.origin_profile !== targetProfile || !Array.isArray(snapshot.rows)) return []
-  const seen = new Set(), rows = []
-  const native = Array.isArray(live?.subagents) ? live.subagents : []
+  const seen = new Set(), rows = [], correlatedLive = new Set()
+  const nativeAvailable = Array.isArray(live?.subagents)
+  const native = nativeAvailable ? live.subagents.slice(0, 512) : []
   for (const input of snapshot.rows.slice(0, 128)) {
     if (!input || !executionId(input.id) || seen.has(input.id) || input.execution_mode !== 'native' ||
       !Number.isInteger(input.task_index) || input.task_index < 0 || !executionId(input.conversation_id) || !executionId(input.parent_session_id)) continue
     seen.add(input.id)
     const observed = executionIdentity(input.observed), requested = executionIdentity(input.requested)
+    const callId = executionNativeCall(input)
+    const declaredUnit = Object.prototype.hasOwnProperty.call(input, 'async_unit_id') ? input.async_unit_id : input.delegation_id
+    const unitId = executionId(declaredUnit) && declaredUnit === input.delegation_id ? declaredUnit : null
     const matches = executionId(input.subagent_id) ? native.filter(row => row?.subagent_id === input.subagent_id &&
-      executionId(row.delegation_id) && row.delegation_id === input.delegation_id) : []
+      callId && row.delegation_id === callId) : []
+    // The authenticated parent roster plus BOTH native IDs bind the execution.
+    // Its stored child session may legitimately rotate during compaction.
     const runtime = matches.length === 1 ? matches[0] : null
-    rows.push({ id: input.id, execution_mode: 'native', requested, observed,
-      status: runtime?.status === 'running' ? 'running' : executionSafeText(input.status, 40) || 'unknown',
+    if (runtime) correlatedLive.add(runtime)
+    const recorded = nativeStatus(input.status)
+    const terminal = NATIVE_TERMINAL.has(recorded)
+    const observationGap = !terminal && nativeAvailable && !runtime && executionId(input.subagent_id) &&
+      (recorded === 'dispatched' || recorded === 'running' || recorded === 'queued')
+    // Terminal hook evidence is sticky; roster disappearance is never success.
+    const status = terminal ? recorded : runtime && nativeStatus(runtime.status) !== 'unknown' ? nativeStatus(runtime.status) : observationGap ? 'unknown' : recorded
+    rows.push({ id: input.id, execution_mode: 'native', requested, observed, status,
+      last_status: observationGap ? recorded : null, observation_gap: Boolean(observationGap),
       subagent_id: executionId(input.subagent_id) ? input.subagent_id : null,
       delegation_id: executionId(input.delegation_id) ? input.delegation_id : null,
+      async_unit_id: unitId, native_call_delegation_id: callId,
       conversation_id: input.conversation_id, parent_session_id: input.parent_session_id, task_index: input.task_index,
-      model: executionSafeText(runtime?.model) || executionSafeText(input.observed?.model),
-      provider: executionSafeText(input.observed?.provider), backend: executionSafeText(input.observed?.backend, 64),
-      updated_at: typeof input.updated_at === 'number' && Number.isFinite(input.updated_at) ? input.updated_at : null })
+      model: executionSafeText(!terminal && runtime?.model) || executionSafeText(input.model) || executionSafeText(input.observed?.model),
+      provider: executionSafeText(input.provider) || executionSafeText(input.observed?.provider), backend: executionSafeText(input.observed?.backend, 64),
+      ...executionActivity(input, terminal ? null : runtime),
+      updated_at: executionSeconds(input.updated_at) })
   }
   // An uncorrelated native child stays unknown. Never match by goal/model/order.
+  const liveSeen = new Set()
   for (const item of native.slice(0, 128)) {
-    if (!executionId(item?.subagent_id) || rows.some(row => row.subagent_id === item.subagent_id && row.delegation_id === item.delegation_id)) continue
-    rows.push({ id: `live:${item.subagent_id}`, execution_mode: 'native', requested: executionUnknown(), observed: executionUnknown(),
-      status: item.status === 'running' ? 'running' : 'unknown', subagent_id: item.subagent_id,
-      delegation_id: executionId(item.delegation_id) ? item.delegation_id : null, task_index: null,
-      model: executionSafeText(item.model), provider: null, backend: null })
+    if (!executionId(item?.subagent_id) || correlatedLive.has(item)) continue
+    const delegation = executionId(item.delegation_id) ? item.delegation_id : null
+    const id = `live:${delegation || 'unbound'}:${item.subagent_id}`
+    if (liveSeen.has(id)) continue
+    liveSeen.add(id)
+    rows.push({ id, execution_mode: 'native', requested: executionUnknown(), observed: executionUnknown(),
+      status: nativeStatus(item.status), subagent_id: item.subagent_id, delegation_id: delegation, task_index: null,
+      model: executionSafeText(item.model), provider: null, backend: null, ...executionActivity({}, item) })
   }
   return rows.slice(0, 128)
 }
+// Public-event projection only. No RPC, subscription, storage or backend dial is
+// performed here. Wiring it to the released SDK is a separately verified gate.
+const EXECUTION_REPLAY_TYPES = new Set(['subagent.spawn_requested', 'subagent.start', 'subagent.progress', 'subagent.tool', 'subagent.thinking', 'subagent.complete'])
+const executionReplayId = value => typeof value === 'string' && !value.includes('..') && /^[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}$/.test(value)
+const executionOutcome = value => value === 'failed' ? 'error' : value
+const executionReplayBinding = value => JSON.stringify([value.native_call_delegation_id, value.subagent_id, value.task_index])
+export function projectExecutionReplay(reply, scope, cursor = {}, receivedAt = null, parentAliases = []) {
+  const key = executionScopeKey(scope)
+  const invalid = () => ({ scope_key: key, valid: false, events: [], coverage_gap: true, needs_recovery: true, reason: 'invalid_replay' })
+  if (!key || !executionReplayId(scope.sessionId) || !reply || !Array.isArray(reply.events) || reply.events.length > 4096 ||
+      !executionReplayId(reply.replay_epoch) || (reply.epoch !== undefined && reply.epoch !== reply.replay_epoch) ||
+      executionCount(reply.latest_seq) === null || reply.last_sequence !== reply.latest_seq ||
+      reply.count !== reply.events.length || typeof reply.truncated !== 'boolean' || typeof reply.snapshot_required !== 'boolean') return invalid()
+  const epoch = reply.replay_epoch, latest = reply.latest_seq
+  if ((Object.hasOwn(cursor, 'last_sequence') && executionCount(cursor.last_sequence) === null) ||
+      (cursor.replay_epoch != null && !executionReplayId(cursor.replay_epoch)) ||
+      (cursor.scope_key != null && cursor.scope_key !== key) ||
+      (cursor.replay_epoch === epoch && executionCount(cursor.latest_seq) !== null && latest < cursor.latest_seq)) return invalid()
+  const previous = executionCount(cursor.last_sequence) ?? 0
+  if (cursor.replay_epoch !== epoch && !reply.snapshot_required) return invalid()
+  if (cursor.replay_epoch !== epoch || reply.snapshot_required || reply.truncated) {
+    if (reply.events.length) return invalid()
+    return { scope_key: key, valid: true, events: [], replay_epoch: epoch, last_sequence: 0, latest_seq: latest,
+      coverage_gap: cursor.replay_epoch != null, needs_recovery: true,
+      reason: cursor.replay_epoch == null ? 'bootstrap_required' : cursor.replay_epoch !== epoch ? 'epoch_changed' : 'replay_gap' }
+  }
+  if (previous > latest || reply.events.length !== latest - previous) return invalid()
+  // Sort references transiently; neither the raw reply nor any raw frame escapes
+  // into the returned cache projection (including uninteresting event types).
+  const ordered = reply.events.slice().sort((a, b) => a?.seq - b?.seq)
+  const parents = new Set([scope.sessionId, ...(Array.isArray(parentAliases) ? parentAliases.slice(0, 256).filter(executionReplayId) : [])])
+  const events = []
+  for (let index = 0; index < ordered.length; index++) {
+    const frame = ordered[index]
+    if (!frame || !parents.has(frame.session_id) || frame.replay_epoch !== epoch || frame.seq !== previous + index + 1) return invalid()
+    if (!EXECUTION_REPLAY_TYPES.has(frame.type)) continue
+    const value = frame.payload
+    if (!value || !executionReplayId(value.delegation_id) || !executionReplayId(value.subagent_id) ||
+        !Number.isSafeInteger(value.task_index) || value.task_index < 0) continue
+    const terminal = frame.type === 'subagent.complete'
+    if (terminal && !NATIVE_TERMINAL.has(value.status)) continue
+    events.push({ native_call_delegation_id: value.delegation_id, subagent_id: value.subagent_id, task_index: value.task_index,
+      type: frame.type, status: terminal ? value.status : frame.type === 'subagent.spawn_requested' ? 'queued' : 'running',
+      reported_child_session_id: executionReplayId(value.child_session_id) ? value.child_session_id : null,
+      tool_count: executionCount(value.tool_count), api_call_count: executionCount(value.api_calls),
+      duration_seconds: executionSeconds(value.duration_seconds), last_tool: executionTool(value.tool_name),
+      replay_epoch: epoch, sequence: frame.seq, received_at: executionSeconds(receivedAt) })
+  }
+  return { scope_key: key, valid: true, events, replay_epoch: epoch, last_sequence: latest, latest_seq: latest,
+    coverage_gap: false, needs_recovery: false, reason: null }
+}
+export function createExecutionReplayStore() {
+  const scopes = new Map(), retention = new Map()
+  let revision = 0
+  const obtain = scope => {
+    const key = executionScopeKey(scope)
+    if (!key) return null
+    let entry = scopes.get(key)
+    if (!entry) entry = { key, revision: ++revision, replay_epoch: null, last_sequence: 0, latest_seq: 0, coverage_gap: false, needs_recovery: true, reason: 'bootstrap_required', records: new Map() }
+    scopes.delete(key); scopes.set(key, entry)
+    while (scopes.size > 16) {
+      const [oldKey, oldEntry] = scopes.entries().next().value
+      for (const binding of oldEntry.records.keys()) retention.delete(JSON.stringify([oldKey, binding]))
+      scopes.delete(oldKey)
+    }
+    return entry
+  }
+  const cursor = entry => ({ scope_key: entry.key, revision: entry.revision, replay_epoch: entry.replay_epoch, last_sequence: entry.last_sequence, latest_seq: entry.latest_seq })
+  return {
+    cursor(scope) { const entry = obtain(scope); return entry ? cursor(entry) : null },
+    clear() { scopes.clear(); retention.clear(); revision++ },
+    recoverFrom(scope, token, sequence) {
+      const entry = scopes.get(executionScopeKey(scope))
+      if (!entry || !token || JSON.stringify(token) !== JSON.stringify(cursor(entry)) ||
+          !entry.needs_recovery || executionCount(sequence) === null || sequence > entry.latest_seq) return false
+      entry.last_sequence = sequence; entry.coverage_gap = true; entry.revision = ++revision
+      return true
+    },
+    forget(scope) {
+      const key = executionScopeKey(scope), entry = scopes.get(key)
+      if (entry) for (const binding of entry.records.keys()) retention.delete(JSON.stringify([key, binding]))
+      scopes.delete(key)
+    },
+    accept(scope, token, reply, receivedAt = null, parentAliases = []) {
+      const key = executionScopeKey(scope), entry = scopes.get(key)
+      if (!entry || !token || JSON.stringify(token) !== JSON.stringify(cursor(entry))) return { accepted: false, reason: 'stale_replay' }
+      const result = projectExecutionReplay(reply, scope, token, receivedAt, parentAliases)
+      if (!result.valid) {
+        entry.coverage_gap = true; entry.needs_recovery = true; entry.reason = result.reason
+        for (const [binding, value] of entry.records) if (!NATIVE_TERMINAL.has(value.status)) {
+          entry.records.delete(binding); retention.delete(JSON.stringify([key, binding]))
+        }
+        entry.revision = ++revision; return { accepted: false, reason: result.reason }
+      }
+      const epochChanged = entry.replay_epoch !== result.replay_epoch
+      entry.replay_epoch = result.replay_epoch; entry.last_sequence = result.last_sequence; entry.latest_seq = result.latest_seq
+      entry.coverage_gap ||= result.coverage_gap
+      entry.needs_recovery = result.needs_recovery; entry.reason = result.reason
+      if (epochChanged || result.needs_recovery) {
+        // Keep explicitly observed terminal facts, but old nonterminal frames
+        // are not evidence that a child is still running in a fresh stream.
+        for (const [binding, value] of entry.records) if (!NATIVE_TERMINAL.has(value.status)) {
+          entry.records.delete(binding); retention.delete(JSON.stringify([key, binding]))
+        }
+      }
+      for (const event of result.events) {
+        const binding = executionReplayBinding(event), old = entry.records.get(binding)
+        const terminal = NATIVE_TERMINAL.has(event.status), settled = NATIVE_TERMINAL.has(old?.status)
+        if (settled && !terminal) continue
+        const conflict = Boolean(old?.terminal_conflict || settled && terminal && executionOutcome(old.status) !== executionOutcome(event.status))
+        const next = { ...event, terminal_conflict: conflict,
+          tool_count: event.tool_count ?? old?.tool_count ?? null,
+          api_call_count: event.api_call_count ?? old?.api_call_count ?? null,
+          duration_seconds: event.duration_seconds ?? old?.duration_seconds ?? null,
+          last_tool: event.last_tool ?? old?.last_tool ?? null }
+        entry.records.set(binding, next)
+        const retentionKey = JSON.stringify([key, binding])
+        retention.delete(retentionKey); retention.set(retentionKey, { key, binding })
+        while (retention.size > 512) {
+          const [oldKey, oldest] = retention.entries().next().value
+          const owner = scopes.get(oldest.key)
+          if (owner) { owner.records.delete(oldest.binding); owner.coverage_gap = true }
+          retention.delete(oldKey)
+        }
+      }
+      entry.revision = ++revision
+      return { accepted: true, needs_recovery: result.needs_recovery, reason: result.reason, cursor: cursor(entry) }
+    },
+    snapshot(scope) {
+      const entry = scopes.get(executionScopeKey(scope))
+      return entry ? { scope_key: entry.key, replay_epoch: entry.replay_epoch, last_sequence: entry.last_sequence,
+        coverage_gap: entry.coverage_gap, needs_recovery: entry.needs_recovery, reason: entry.reason, records: [...entry.records.values()].map(value => ({ ...value })) } : null
+    },
+    counts() { return { scopes: scopes.size, records: retention.size } }
+  }
+}
+export function overlayExecutionReplay(rows, projection, scope) {
+  if (!Array.isArray(rows)) return []
+  if (!projection || projection.scope_key !== executionScopeKey(scope) || !Array.isArray(projection.records)) return rows
+  return rows.map(row => {
+    if (row.execution_mode !== 'native' || !executionId(row.subagent_id) || !Number.isSafeInteger(row.task_index) || row.task_index < 0) return row
+    const call = executionNativeCall(row)
+    if (!call) return row
+    const matches = projection.records.filter(value => value.native_call_delegation_id === call && value.subagent_id === row.subagent_id && value.task_index === row.task_index)
+    if (matches.length !== 1) return row
+    const event = matches[0], terminal = NATIVE_TERMINAL.has(event.status), settled = NATIVE_TERMINAL.has(row.status)
+    const conflict = event.terminal_conflict || terminal && settled && executionOutcome(event.status) !== executionOutcome(row.status)
+    if (conflict) return { ...row, status: 'unknown', observation_gap: true, terminal_conflict: true, status_evidence: 'conflicting_native_terminal' }
+    if (settled && !terminal) return row
+    if (!terminal && row.observation_gap) return { ...row, event_received_at: event.received_at, last_tool: event.last_tool ?? row.last_tool }
+    return { ...row, status: event.status, observation_gap: false, last_status: null,
+      status_evidence: 'public_session_event', replay_coverage_gap: projection.coverage_gap === true,
+      tool_count: event.tool_count ?? row.tool_count, api_call_count: event.api_call_count ?? row.api_call_count,
+      duration_seconds: event.duration_seconds ?? row.duration_seconds, last_tool: event.last_tool ?? row.last_tool,
+      event_received_at: event.received_at, reported_child_session_id: event.reported_child_session_id }
+  })
+}
+
+// Approved ordinary read semantics, existing active canonical socket only.
+// No SDK route inventory/resolver/ensure/retain/connect calls are used here.
+export function createActiveExecutionObserver(transport, sdk = {}) {
+  const store = createExecutionReplayStore(), pending = new Map(), subscriptions = []
+  let cacheId = null
+  try { cacheId = globalThis.crypto?.randomUUID?.() || null } catch {}
+  const queryClient = sdk.queryClient
+  const revisionAtom = typeof sdk.atom === 'function' ? sdk.atom(0) : { get: () => 0 }
+  const stateKeys = ['focusedSessionOwner', 'focusedSessionId', 'connectionId', 'profile', 'gateway']
+  const atoms = stateKeys.map(name => transport?.state?.[name])
+  const supported = typeof transport?.getGateway === 'function' && typeof sdk.gatewayActivationEpoch === 'function' &&
+    executionReplayId(cacheId) && typeof queryClient?.cancelQueries === 'function' && typeof queryClient?.removeQueries === 'function' &&
+    typeof revisionAtom.set === 'function' && atoms.every(atom => typeof atom?.get === 'function' && typeof atom.listen === 'function')
+  let disposed = false, cacheHealthy = true, generation = 0, previous = null, gateway = null, removeGatewayState = null
+  const retireQueries = all => {
+    if (!supported) return
+    const predicate = query => {
+      const key = query.queryKey
+      return Array.isArray(key) && key.length === 5 && key[0] === PLUGIN_ID && key[2] === cacheId &&
+        ['execution-active', 'profile-jobs-policy-active'].includes(key[1]) && (all || key[4] !== generation)
+    }
+    const failed = () => { cacheHealthy = false; generation++; revisionAtom.set(generation) }
+    try {
+      Promise.resolve(queryClient.cancelQueries({ predicate }, { silent: true })).catch(failed)
+      queryClient.removeQueries({ predicate })
+    } catch { failed() }
+  }
+  const readState = () => {
+    if (!supported || disposed) return null
+    try {
+      const scope = executionScopeFromState(transport.state)
+      const activeConnection = transport.state.connectionId.get(), activeProfile = transport.state.profile.get()
+      const hostState = transport.state.gateway.get(), epoch = sdk.gatewayActivationEpoch(), instance = transport.getGateway()
+      return { scope, activeConnection, activeProfile, hostState, epoch, instance,
+        signature: JSON.stringify([executionScopeKey(scope), activeConnection, activeProfile, hostState, epoch, instance?.connectionState, instance?.sessionWire]) }
+    } catch { return null }
+  }
+  const invalidate = (reset = false) => {
+    generation++
+    for (const item of pending.values()) item.abort.abort()
+    pending.clear()
+    if (reset) store.clear()
+    retireQueries(disposed)
+    if (typeof revisionAtom.set === 'function') revisionAtom.set(generation)
+  }
+  const observe = () => {
+    const next = readState(), instance = next?.instance || null
+    if (next?.signature === previous?.signature && instance === gateway) return
+    const transportChanged = gateway !== instance || next?.epoch !== previous?.epoch || next?.hostState !== previous?.hostState ||
+      instance?.connectionState !== previous?.connectionState
+    previous = next ? { ...next, connectionState: instance?.connectionState } : null
+    if (gateway !== instance) {
+      if (typeof removeGatewayState === 'function') removeGatewayState()
+      gateway = instance; removeGatewayState = null
+      if (typeof gateway?.onState === 'function') {
+        let registering = true
+        removeGatewayState = gateway.onState(() => { if (!registering) invalidate(true) })
+        registering = false
+      }
+    }
+    invalidate(transportChanged)
+  }
+  if (supported) {
+    for (const atom of atoms) subscriptions.push(atom.listen(observe))
+    observe()
+  }
+  const capture = scope => {
+    observe()
+    const current = readState(), key = executionScopeKey(scope), instance = current?.instance
+    if (!cacheHealthy || !current || !key || key !== executionScopeKey(current.scope) ||
+        current.activeConnection !== scope.connectionId || current.activeProfile !== scope.profile || current.hostState !== 'open' ||
+        !Number.isSafeInteger(current.epoch) || current.epoch < 0 || instance?.connectionState !== 'open' ||
+        instance?.sessionWire !== 'canonical' || typeof instance.request !== 'function' || typeof instance.onState !== 'function') throw new Error('passive_origin_unavailable')
+    // Public registry contract: LOCAL_CONNECTION_ID='local'; local registry
+    // targetProfile===profile, independent of legacy remote aliases. Unknown
+    // remote/SSH mappings are unsupported, never guessed or discovered here.
+    if (scope.connectionId !== 'local' || !EXECUTION_PROFILE.test(scope.profile)) throw new Error('passive_backend_mapping_unavailable')
+    return { key, scope: { ...scope }, instance, epoch: current.epoch, generation, backendProfile: scope.profile }
+  }
+  const current = token => {
+    try {
+      const next = capture(token.scope)
+      return next.key === token.key && next.instance === token.instance && next.epoch === token.epoch && next.generation === token.generation
+    } catch { return false }
+  }
+  const adapter = (token, abort) => {
+    // Internal compatibility shape for existing pure normalizers, NOT a newly
+    // invented native route or a capability sent to host.requestProfile.
+    const descriptor = { connectionId: token.scope.connectionId, mode: 'local', profile: token.scope.profile, targetProfile: token.backendProfile }
+    return {
+      profileRoutes: async () => { if (!current(token)) throw new Error('execution_scope_changed'); return [{ ...descriptor }] },
+      requestProfile: (route, method, params) => {
+        if (!current(token) || abort.signal.aborted) throw new Error('execution_scope_changed')
+        const allowed = new Set(['plugin.model-router.execution.list', 'subagent.list', 'plugin.model-router.profile_jobs.list', 'plugin.model-router.profile_jobs.describe', 'session.events.since'])
+        if (!allowed.has(method) || nativeRouteKey(route) !== nativeRouteKey(descriptor) || !params || params.session_id !== token.scope.sessionId ||
+            Object.keys(params).some(name => !['session_id', 'profile', 'replay_epoch', 'last_sequence'].includes(name)) ||
+            ('profile' in params && params.profile !== token.backendProfile)) throw new Error('passive_read_refused')
+        return token.instance.request(method, { ...params, profile: token.backendProfile }, 10000, abort.signal)
+      }
+    }
+  }
+  const replay = async (token, client, abort, parentAliases) => {
+    const windows = [512, 64, 8, 1]
+    let recovery = 0
+    for (let attempt = 0; attempt < 6; attempt++) {
+      if (!current(token) || abort.signal.aborted) throw new Error('execution_scope_changed')
+      const cursor = store.cursor(token.scope)
+      const params = { session_id: token.scope.sessionId, last_sequence: cursor.last_sequence }
+      if (cursor.replay_epoch !== null) params.replay_epoch = cursor.replay_epoch
+      let raw
+      try { raw = await client.requestProfile({ connectionId: token.scope.connectionId, mode: 'local', profile: token.scope.profile, targetProfile: token.backendProfile }, 'session.events.since', params) }
+      catch { if (!current(token)) throw new Error('execution_scope_changed'); const known = store.snapshot(token.scope); return { ...known, records: (known?.records || []).filter(value => NATIVE_TERMINAL.has(value.status)), coverage_gap: true, unavailable: true } }
+      if (!current(token) || abort.signal.aborted) throw new Error('execution_scope_changed')
+      const result = store.accept(token.scope, cursor, raw, Date.now() / 1000, parentAliases)
+      raw = null
+      if (!result.accepted || !result.needs_recovery) return store.snapshot(token.scope)
+      if (result.reason === 'bootstrap_required' || result.reason === 'epoch_changed') continue
+      const latest = store.cursor(token.scope)
+      if (recovery >= windows.length) return store.snapshot(token.scope)
+      store.recoverFrom(token.scope, latest, Math.max(0, latest.latest_seq - windows[recovery++]))
+    }
+    return store.snapshot(token.scope)
+  }
+  const run = (operation, scope) => {
+    let token
+    try { token = capture(scope) } catch { return Promise.reject(new Error('passive_origin_unavailable')) }
+    const key = JSON.stringify([operation, token.key, token.generation]), existing = pending.get(key)
+    if (existing) return existing.promise
+    const item = { abort: new AbortController(), promise: null }
+    pending.set(key, item)
+    item.promise = (async () => {
+      const client = adapter(token, item.abort), valid = () => current(token) && !item.abort.signal.aborted
+      if (operation === 'policy') {
+        const result = await readProfileJobs(client, token.scope, valid)
+        if (!valid()) throw new Error('execution_scope_changed')
+        return { ...result, observation_generation: token.generation, observation_lifetime: cacheId, observation_epoch: token.epoch }
+      }
+      const result = await readExecutionSnapshot(client, token.scope, valid)
+      if (!valid()) throw new Error('execution_scope_changed')
+      // Only this authorized origin roster supplies parent aliases. Child
+      // locators, tap payloads and guessed ID suffixes are never parent proof.
+      const parents = [...new Set(result.rows.filter(row => row.execution_mode === 'native')
+        .flatMap(row => [row.conversation_id, row.parent_session_id]).filter(executionReplayId))]
+      const projection = await replay(token, client, item.abort, parents)
+      if (!valid()) throw new Error('execution_scope_changed')
+      return { ...result, rows: overlayExecutionReplay(result.rows, projection, token.scope),
+        observation_generation: token.generation, observation_lifetime: cacheId, observation_epoch: token.epoch,
+        replay_available: !projection?.unavailable && Boolean(projection?.replay_epoch),
+        replay_coverage_gap: projection?.coverage_gap === true || projection?.needs_recovery === true }
+    })().finally(() => { if (pending.get(key) === item) pending.delete(key) })
+    return item.promise
+  }
+  return {
+    revisionAtom, cacheId,
+    accepts(scope, data) {
+      try {
+        const token = capture(scope)
+        return data?.scope_key === token.key && data?.observation_lifetime === cacheId &&
+          data?.observation_generation === token.generation && data?.observation_epoch === token.epoch
+      } catch { return false }
+    },
+    eligible(scope) { try { capture(scope); return true } catch { return false } },
+    generation() { observe(); return generation },
+    current(scope, value) { try { return capture(scope).generation === value } catch { return false } },
+    read(scope) { return run('snapshot', scope) },
+    policy(scope) { return run('policy', scope) },
+    dispose() {
+      if (disposed) return
+      disposed = true; invalidate(true)
+      if (typeof removeGatewayState === 'function') removeGatewayState()
+      for (const off of subscriptions) if (typeof off === 'function') off()
+    }
+  }
+}
+
 export async function readExecutionSnapshot(transport, scope, isCurrent = () => true) {
   const key = executionScopeKey(scope)
   if (!key || typeof transport?.profileRoutes !== 'function' || typeof transport?.requestProfile !== 'function') throw new Error('execution_unavailable')
@@ -3503,7 +3884,7 @@ export function executionScopeFromState(state) {
   return { connectionId: state?.connectionId?.get?.(), profile: state?.profile?.get?.(), sessionId: state?.activeSessionId?.get?.() }
 }
 function currentExecutionScope() { return executionScopeFromState(host.state) }
-function useExecutionSnapshot() {
+function useExecutionSnapshot(observer) {
   const owner = useValue(host.state?.focusedSessionOwner || EXECUTION_EMPTY_ATOM)
   const focusedId = useValue(host.state?.focusedSessionId || EXECUTION_EMPTY_ATOM)
   const connectionId = useValue(host.state?.connectionId || EXECUTION_EMPTY_ATOM)
@@ -3513,19 +3894,29 @@ function useExecutionSnapshot() {
   const scope = host.state?.focusedSessionOwner && host.state?.focusedSessionId
     ? { connectionId: owner?.connectionId, profile: owner?.profile, sessionId: focusedId } : { connectionId, profile, sessionId }
   const key = executionScopeKey(scope)
-  const query = useQuery({ queryKey: ['model-router', 'execution', key, gateway],
-    queryFn: () => readExecutionSnapshot(host, scope, () => executionScopeKey(currentExecutionScope()) === key),
-    enabled: Boolean(key && gateway !== 'closed' && gateway !== 'disconnected' && gateway !== 'idle'),
-    retry: false, staleTime: 2000, refetchInterval: 5000 })
+  const observationGeneration = useValue(observer?.revisionAtom || EXECUTION_EMPTY_ATOM)
+  const eligible = Boolean(key && observer?.eligible(scope))
+  const query = useQuery({ queryKey: ['model-router', 'execution-active', observer?.cacheId, key, observationGeneration],
+    queryFn: () => observer.read(scope),
+    enabled: eligible,
+    retry: false, staleTime: 2000, gcTime: 0, refetchInterval: 5000 })
   useEffect(() => {
-    if (!key || typeof host.onEvent !== 'function') return
+    if (!eligible || typeof host.onEvent !== 'function') return
     // Events are invalidation hints only: the tap does not attest their owner.
     // Re-read the exact authenticated profile/session, never adopt event rows.
-    const invalidate = () => { if (executionScopeKey(currentExecutionScope()) === key) Promise.resolve(query.refetch()).catch(() => {}) }
-    const disposers = ['plugin.model-router.execution.changed', 'async_delegation', 'subagent_complete'].map(type => host.onEvent(type, invalidate))
+    let lastEventRead = -Infinity
+    const invalidate = () => {
+      const now = Date.now()
+      if (!observer.current(scope, observationGeneration) || now - lastEventRead < 2000) return
+      lastEventRead = now
+      Promise.resolve(query.refetch()).catch(() => {})
+    }
+    const disposers = ['plugin.model-router.execution.changed', 'async_delegation', 'subagent.spawn_requested',
+      'subagent.start', 'subagent.progress', 'subagent.tool', 'subagent.complete'].map(type => host.onEvent(type, invalidate))
     return () => { for (const dispose of disposers) if (typeof dispose === 'function') dispose() }
-  }, [key, gateway, query.refetch])
-  const data = query.data?.scope_key === key ? query.data : null
+  }, [key, gateway, eligible, observationGeneration, query.refetch])
+  const data = !eligible && key ? { scope_key: key, available: false, reason: 'passive_origin_unavailable' } :
+    observer?.accepts(scope, query.data) ? query.data : null
   return { scope, key, query, data }
 }
 const executionStyles = {
@@ -3539,34 +3930,73 @@ const executionStyles = {
   compact: { minWidth: 0, width: '100%', maxHeight: 'min(45vh, 24rem)', overflowY: 'auto', boxSizing: 'border-box', padding: '0.45rem 0', color: 'var(--ui-text-secondary)' }
 }
 const EXECUTION_STATUS = { requested: '요청', dispatched: '위임 접수', preparing: '실행 준비', creating: '세션 생성 요청', submitting: '작업 제출 요청', queued: '대기', running: '실행 중', approval_wait: '승인 대기', clarify_wait: '답변 대기', stop_requested: '중지 요청', completed: '완료', succeeded: '완료', error: '오류', failed: '실패', interrupted: '중단', cancelled: '취소', timeout: '시간 제한', unknown: '상태 미확인' }
+function executionDuration(seconds) {
+  const value = executionSeconds(seconds)
+  if (value === null || value > Number.MAX_SAFE_INTEGER) return null
+  const whole = Math.floor(value), minutes = Math.floor(whole / 60)
+  return minutes ? `${minutes}분 ${whole % 60}초` : `${whole}초`
+}
+function executionActivityLabels(row) {
+  const labels = [], tools = executionCount(row.tool_count), calls = executionCount(row.api_call_count)
+  if (tools !== null) labels.push(`도구 ${tools}회`)
+  else if (row.execution_mode === 'native') labels.push('도구 횟수 미관찰')
+  if (calls !== null) labels.push(`모델 호출 ${calls}회`)
+  else if (row.execution_mode === 'native') labels.push('모델 호출 횟수 미관찰')
+  const tool = executionTool(row.last_tool)
+  if (tool) labels.push(`최근 도구: ${tool}`)
+  const duration = executionDuration(row.duration_seconds)
+  const started = executionSeconds(row.started_at), now = Date.now() / 1000
+  if (NATIVE_TERMINAL.has(row.status) && duration !== null) labels.push(`실행 시간: ${duration}`)
+  else if (row.status === 'running' && started !== null && started <= now) labels.push(`경과: ${executionDuration(now - started)}`)
+  const activity = executionSeconds(row.activity_at)
+  if (activity !== null) {
+    const date = new Date(activity * 1000)
+    if (Number.isFinite(date.getTime())) labels.push(`최근 활동: ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}`)
+  }
+  const received = executionSeconds(row.event_received_at)
+  if (received !== null) {
+    const date = new Date(received * 1000)
+    if (Number.isFinite(date.getTime())) labels.push(`신호 수신: ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}`)
+  }
+  return labels
+}
 export function ExecutionRow({ row, bare = false }) {
   const observed = row.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
   const identity = observed ? row.observed : row.requested
+  const activity = executionActivityLabels(row)
   return jsxs('article', { style: bare ? { ...executionStyles.row, border: 0, padding: 0 } : executionStyles.row, 'data-execution-row': row.id, children: [
     jsxs('div', { style: executionStyles.badges, children: [
       jsx('span', { style: executionStyles.badge, children: executionLabel(identity) }),
       jsx('span', { style: executionStyles.badge, children: row.execution_mode === 'gateway' ? '전체 프로필' : '네이티브' }),
-      jsx('span', { style: styles.hint, children: EXECUTION_STATUS[row.status] || '상태 미확인' })
+      jsx('span', { style: { ...styles.hint, color: row.status === 'running' ? 'var(--ui-accent)' : undefined }, role: 'status', 'data-execution-status': row.status, children: EXECUTION_STATUS[row.status] || '상태 미확인' })
     ] }),
-    jsx('p', { style: styles.actual, children: observed ? '실행 정보: 런타임 보고 · 개별 API 응답의 모델 검증과는 다릅니다.' : '요청한 실행 종류입니다. 실제 프로필·역할은 아직 확인되지 않았습니다.' }),
+    activity.length ? jsx('div', { style: { ...executionStyles.badges, fontSize: '0.78rem', color: 'var(--ui-text-secondary)' }, 'data-execution-activity': true,
+      children: activity.map((label, index) => jsx('span', { children: label }, index)) }) : null,
+    row.terminal_conflict ? jsx('p', { style: styles.hint, children: '서로 다른 종료 정보가 확인되어 상태를 확정하지 않습니다.' }) :
+      row.observation_gap ? jsx('p', { style: styles.hint, children: '현재 실행 목록에서 확인되지 않습니다. 완료로 판단하지 않으며, 최근 관찰 상태만 유지합니다.' }) : null,
+    jsx('p', { style: styles.actual, children: observed ? '실행 정보: 런타임 보고 · 개별 API 응답의 모델 검증과는 다릅니다.' : '역할은 요청 기준입니다. 실행 상태·활동 정보와 실제 역할 확인은 별개입니다.' }),
     row.model ? jsx('p', { style: styles.actual, children: `보고된 모델: ${row.model}${row.provider ? ` · ${row.provider}` : ''}` }) : null,
     jsxs('details', { style: executionStyles.details, children: [jsx('summary', { style: executionStyles.summary, children: '실행 식별 정보' }),
       jsx('div', { children: `요청: ${executionLabel(row.requested)}` }),
       jsx('div', { children: `실행: ${observed ? executionLabel(row.observed) : '미확인'}` }),
+      row.last_status ? jsx('div', { children: `최근 관찰 상태: ${EXECUTION_STATUS[row.last_status] || '상태 미확인'}` }) : null,
       row.backend ? jsx('div', { children: `방식: ${row.backend}` }) : null,
       row.subagent_id ? jsx('div', { children: `하위 작업: ${row.subagent_id}` }) : null,
       row.delegation_id ? jsx('div', { children: `위임: ${row.delegation_id}` }) : null,
+      row.child_session_id ? jsx('div', { children: `하위 작업 세션: ${row.child_session_id}` }) : null,
       row.job?.target_session_id ? jsx('div', { children: `작업 세션: ${row.job.target_session_id}` }) : null,
       row.job?.admission_id ? jsx('div', { children: `접수: ${row.job.admission_id}` }) : null
     ] })
   ] })
 }
-export function ExecutionPanel({ compact = false, ctx } = {}) {
-  const { scope, key, query, data } = useExecutionSnapshot()
+export function ExecutionPanel({ compact = false, ctx, observer } = {}) {
+  const { scope, key, query, data } = useExecutionSnapshot(observer)
   const fence = useExecutionFence()
   const [filter, setFilter] = useState('all')
   const rows = (data?.rows || []).filter(row => filter === 'all' || (row.observed?.evidence === 'runtime_reported' ? row.observed : row.requested)?.kind === filter)
-  const content = !key ? jsx('p', { style: styles.hint, children: '대화를 선택하면 해당 연결·프로필·대화의 실행 현황을 표시합니다.' }) : query.isPending && !data ? jsx('p', { style: styles.hint, children: '실행 정보를 확인하고 있습니다…' }) :
+  const content = !key ? jsx('p', { style: styles.hint, children: '대화를 선택하면 해당 연결·프로필·대화의 실행 현황을 표시합니다.' }) :
+    data?.reason === 'passive_origin_unavailable' ? jsx('p', { style: styles.hint, role: 'status', children: '현재 열린 연결과 포커스 대화가 일치하고 백엔드 프로필을 확인한 경우에만 조회합니다. 연결이 닫혔거나 원격 매핑이 미확인이면 다른 실행 환경을 시작하지 않고 조회를 보류합니다.' }) :
+    query.isPending && !data ? jsx('p', { style: styles.hint, children: '실행 정보를 확인하고 있습니다…' }) :
     query.isError || data?.available === false ? jsx('p', { style: styles.hint, role: 'status', children: '이 대화의 실행 정보를 읽을 수 없습니다. 연결과 해당 프로필의 플러그인 준비 상태를 확인하세요. 다른 프로필로 전환해 조회하지 않습니다.' }) :
       rows.length ? jsx('div', { style: executionStyles.list, children: rows.map(row => !compact && row.execution_mode === 'gateway'
         ? jsx(ProfileJobControls, { job: row.job, scope, storage: ctx?.storage, fence, refresh: () => query.refetch() }, `${key}:${row.id}`)
@@ -3584,8 +4014,9 @@ export function ExecutionPanel({ compact = false, ctx } = {}) {
       children: { all: '전체', model: '모델', profile: '프로필' }[value] }, value)) }),
     content,
     data?.limited ? jsx('p', { style: styles.hint, children: '최근 관찰 기록은 최대 128개까지 표시합니다.' }) : null,
+    data?.replay_coverage_gap ? jsx('p', { style: styles.hint, role: 'status', children: '일부 이벤트 기록을 복구하지 못했습니다. 확인된 종료 신호만 유지하며, 누락된 결과를 완료로 추정하지 않습니다.' }) : null,
     jsx('p', { style: styles.hint, children: '기존 서브에이전트 카드와 중지·지시 기능은 그대로 유지합니다. 이 패널은 실행 종류와 확인된 식별 정보를 보완합니다.' }),
-    key ? jsx(ProfileJobsPanel, { ctx, scope, executionData: data, refreshExecutions: () => query.refetch() }, key) : null
+    key ? jsx(ProfileJobsPanel, { ctx, scope, observer, executionData: data, refreshExecutions: () => query.refetch() }, key) : null
   ] })
 }
 
@@ -3830,15 +4261,18 @@ export function ProfileJobControls({ job, scope, storage, fence, refresh }) {
     result !== null ? jsx('pre', { style: { ...styles.value, whiteSpace: 'pre-wrap' }, children: result }) : null
   ] })
 }
-export function ProfileJobsPanel({ ctx, scope, executionData, refreshExecutions }) {
+export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshExecutions }) {
   const key = executionScopeKey(scope)
-  const query = useQuery({ queryKey: ['model-router', 'profile-jobs-policy', key],
-    queryFn: () => readProfileJobs(host, scope, () => executionScopeKey(currentExecutionScope()) === key), enabled: Boolean(key), retry: false, staleTime: 5000 })
-  const data = query.data?.scope_key === key ? query.data : null
+  const observationGeneration = useValue(observer?.revisionAtom || EXECUTION_EMPTY_ATOM)
+  const enabled = Boolean(key && observer?.eligible(scope))
+  const query = useQuery({ queryKey: ['model-router', 'profile-jobs-policy-active', observer?.cacheId, key, observationGeneration],
+    queryFn: () => observer.policy(scope), enabled, retry: false, staleTime: 5000, gcTime: 0 })
+  const data = enabled && observer.accepts(scope, query.data) ? query.data : null
   return jsxs('section', { style: styles.section, 'aria-label': '전체 프로필 작업', children: [
     jsx('h3', { style: styles.heading, children: '전체 프로필 작업 · 별도 선택 기능' }),
     jsx('p', { style: styles.hint, children: '허용한 프로필의 별도 작업 대화에서 실행합니다. 대상의 계정·모델·메모리·도구 정책을 따르며 모든 도구를 강제로 여는 기능은 아닙니다. 네이티브 위임 설정은 그대로입니다.' }),
     jsx('p', { style: styles.hint, children: '승인·답변은 작업 카드의 「Hermes에서 대상 대화 열기」로 이동해 처리하세요. 완료 결과는 「결과 보기」로 회수하며 부모 대화를 자동으로 재개하지 않습니다.' }),
+    !enabled ? jsx('p', { style: styles.hint, children: '이미 열린 원래 대화의 연결과 프로필을 확인한 뒤 지원 상태를 조회합니다. 이 패널이 연결을 시작하지는 않습니다.' }) :
     query.isPending ? jsx('p', { style: styles.hint, children: '지원 상태를 확인하고 있습니다…' }) : query.isError || !data ? jsx('p', { style: styles.hint, role: 'status', children: '이 출발 프로필의 설정을 읽을 수 없습니다. 연결과 플러그인 준비 상태를 확인하세요. 다른 실행 방식으로 대신 시작하지 않습니다.' }) :
       jsxs('div', { style: styles.field, children: [
         jsx('p', { style: styles.hint, children: `출발 프로필 ${data.origin_profile} · ${data.policy.enabled ? `${data.policy.targets.length}개 프로필 허용` : '전체 프로필 작업 꺼짐'}` }),
@@ -3866,11 +4300,13 @@ export function ProfileJobsPanel({ ctx, scope, executionData, refreshExecutions 
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.9.0',
+  version: '0.10.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
     if (typeof ctx.onDispose === 'function') ctx.onDispose(cancelProfilePreparation)
+    const executionObserver = typeof ctx.onDispose === 'function' ? createActiveExecutionObserver(host, DesktopSDK) : null
+    if (executionObserver) ctx.onDispose(() => executionObserver.dispose())
     const page = {
       id: 'settings',
       title: '모델 및 라우팅',
@@ -3891,10 +4327,10 @@ export default {
     }
     // These slots are read-only until the user explicitly operates a worker.
     // Older SDKs keep settings usable without pretending to support a roster.
-    if (typeof host.state?.activeSessionId?.get === 'function' && typeof host.profileRoutes === 'function' && typeof host.requestProfile === 'function') {
+    if (typeof host.state?.activeSessionId?.get === 'function') {
       ctx.registerMany([
-        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ExecutionPanel, { compact: true }) },
-        { id: 'execution-panel', area: 'panes', title: '실행 현황', data: { placement: 'bottom', height: '260px' }, render: () => jsx(ExecutionPanel, { ctx }) }
+        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ExecutionPanel, { compact: true, observer: executionObserver }) },
+        { id: 'execution-panel', area: 'panes', title: '실행 현황', data: { placement: 'bottom', height: '260px' }, render: () => jsx(ExecutionPanel, { ctx, observer: executionObserver }) }
       ])
     }
     ctx.registerMany([

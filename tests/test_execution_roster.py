@@ -46,6 +46,33 @@ def rows(r, sid='root'):
     return r.list({'session_id': sid}, session_id=sid)['rows']
 
 
+def test_normal_registration_never_opens_private_native_metadata(env, monkeypatch):
+    import builtins
+    r, _, home = env
+    opened = []
+    original_import = builtins.__import__
+    def deny_private_metadata(name, globals=None, locals=None, fromlist=(), level=0):
+        package = (globals or {}).get('__package__', '')
+        if name == 'model_router.execution_metadata' or (
+                name == 'execution_metadata' and level and package.startswith('model_router')):
+            opened.append(name)
+            raise AssertionError('The unadmitted metadata adapter must not be imported')
+        return original_import(name, globals, locals, fromlist, level)
+    monkeypatch.setattr(builtins, '__import__', deny_private_metadata)
+    (home / 'state.db').write_bytes(b'PRIVATE_UNREADABLE_SENTINEL')
+    args = {'tasks': [{'execution': 'profile', 'profile': 'target'}]}
+    pre(r, args)
+    r.start(parent_session_id='segment-1', child_session_id='original-child', child_subagent_id='sa-native')
+    post(r, {'status': 'dispatched', 'delegation_id': 'native-call', 'subagent_ids': ['sa-native']}, args)
+    r.stop(parent_session_id='segment-1', child_session_id='rotated-child', child_status='completed')
+    assert r._metadata_factory is None and rows(r)[0]['status'] == 'queued'
+    assert not opened
+    assert (home / 'state.db').read_bytes() == b'PRIVATE_UNREADABLE_SENTINEL'
+    assert not (home / 'state.db-shm').exists() and not (home / 'state.db-wal').exists()
+    r.stop(parent_session_id='segment-1', child_session_id='original-child', child_status='completed')
+    assert rows(r)[0]['status'] == 'completed' and not opened
+
+
 def test_requested_then_background_refusals_and_units(env):
     r, ctx, _ = env
     tasks = [{'goal': 'same', 'purpose': 'implementation'}, {'goal': 'same', 'profile': 'writer'},
@@ -64,6 +91,8 @@ def test_requested_then_background_refusals_and_units(env):
     got = rows(r)
     assert [x['subagent_id'] for x in got] == ['sa-0-ab', None, 'sa-2-cd']
     assert [x['delegation_id'] for x in got] == ['unit-a', None, 'unit-b']
+    assert [x.get('async_unit_id') for x in got] == ['unit-a', None, 'unit-b']
+    assert [x.get('native_call_delegation_id') for x in got] == ['whole', None, 'whole']
     assert [x['status'] for x in got] == ['dispatched', 'error', 'dispatched']
     assert set(ctx.rpc) == {'execution.list'}
     assert all(e[1:] == ('execution.changed', {'schema': 1}) for e in ctx.events)
@@ -197,3 +226,127 @@ def test_native_task_normalization(env):
     assert rows(r)[0]['requested']['kind'] == 'unknown'
     pre(r, {'tasks': json.dumps([{'goal': 'two', 'profile': 'writer'}])}, tool_call_id='c2')
     assert rows(r)[1]['requested']['profile'] == 'writer'
+
+
+def test_native_stop_before_dispatch_and_safe_activity(env):
+    r, ctx, _ = env
+    assert {'subagent_start', 'subagent_stop', 'post_compaction', 'pre_api_request',
+            'post_api_request'} <= set(ctx.hooks)
+    pre(r)
+    ctx.hooks['subagent_start'](parent_session_id='segment-1', child_session_id='child',
+                                child_subagent_id='short', child_goal='SECRET')
+    r.pre(tool_name='terminal', session_id='child', args={'command': 'SECRET'})
+    ctx.hooks['pre_api_request'](session_id='child', model='provider/model', provider='provider',
+                                 user_message='SECRET')
+    ctx.hooks['post_api_request'](session_id='child', response='SECRET')
+    ctx.hooks['subagent_stop'](parent_session_id='segment-1', child_session_id='child',
+                               child_status='completed', duration_ms=2500, child_summary='SECRET',
+                               tool_call_history=[{'args': 'SECRET'}])
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit'})
+    row = rows(r)[0]
+    assert (row['status'], row['child_session_id'], row['last_tool'], row['tool_count'],
+            row['api_call_count'], row['duration_seconds']) == ('completed', 'child', 'terminal', 1, 1, 2.5)
+    assert row['model'] == 'provider/model' and row['provider'] == 'provider'
+    assert row['observed']['evidence'] == 'unknown'
+    assert row['started_at'] <= row['activity_at']
+    assert 'SECRET' not in json.dumps(row)
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit'})
+    assert rows(r)[0]['status'] == 'completed'
+
+
+@pytest.mark.parametrize('status,expected', [('failed', 'error'), ('interrupted', 'interrupted')])
+def test_stop_after_dispatch_and_compactions(env, status, expected):
+    r, _, _ = env
+    pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit'})
+    r.compact(old_session_id='segment-1', session_id='segment-new')
+    r.compact(old_session_id='child', session_id='child-new')
+    r.pre(tool_name='search', session_id='child-new')
+    r.stop(parent_session_id='segment-new', child_session_id='child-new', child_status=status)
+    row = rows(r, 'segment-new')[0]
+    assert (row['status'], row['child_session_id'], row['last_tool']) == (expected, 'child-new', 'search')
+    r.stop(parent_session_id='segment-new', child_session_id='child-new', child_status='completed')
+    assert rows(r)[0]['status'] == expected
+    assert rows(r, 'unrelated') == []
+
+
+def test_ambiguous_recycled_short_and_foreign_home(env, monkeypatch):
+    r, _, home = env
+    pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='child-a', child_subagent_id='short')
+    r.start(parent_session_id='segment-1', child_session_id='child-b', child_subagent_id='short')
+    r.stop(parent_session_id='segment-1', child_session_id='child-a', child_status='completed')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit'})
+    assert rows(r)[0]['status'] == 'dispatched'
+    assert 'child_session_id' not in rows(r)[0]
+    monkeypatch.setattr(hermes_constants, 'get_hermes_home', lambda: home.parent / 'foreign')
+    r.stop(parent_session_id='segment-1', child_session_id='child-b', child_status='failed')
+    monkeypatch.setattr(hermes_constants, 'get_hermes_home', lambda: home)
+    assert r.children['child-b']['status'] == 'queued', 'foreign stop cannot settle the child'
+
+
+def test_parallel_lifecycle_interleaving(env):
+    r, _, _ = env
+    def one(i):
+        pre(r, tool_call_id=f'call-{i}')
+        r.start(parent_session_id='segment-1', child_session_id=f'child-{i}', child_subagent_id=f'short-{i}')
+        r.stop(parent_session_id='segment-1', child_session_id=f'child-{i}', child_status='completed')
+        post(r, {'status': 'dispatched', 'subagent_ids': [f'short-{i}'], 'delegation_id': f'unit-{i}'},
+             tool_call_id=f'call-{i}')
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(one, range(32)))
+    assert len(rows(r)) == 32
+    assert all(row['status'] == 'completed' for row in rows(r))
+
+
+def test_short_id_reuse_cannot_overwrite_previous_child(env):
+    r, _, _ = env
+    pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='first', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'first-unit'})
+    r.stop(parent_session_id='segment-1', child_session_id='first', child_status='completed')
+    pre(r, tool_call_id='next')
+    r.start(parent_session_id='segment-1', child_session_id='second', child_subagent_id='short')
+    r.stop(parent_session_id='segment-1', child_session_id='second', child_status='failed')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'second-unit'},
+         tool_call_id='next')
+    first, second = rows(r)
+    assert first['status'] == 'completed' and first['child_session_id'] == 'first'
+    assert second['status'] == 'dispatched' and 'child_session_id' not in second
+
+
+def test_construction_is_queued_until_actual_child_activity(env):
+    r, _, _ = env
+    pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit'})
+    assert rows(r)[0]['status'] == 'queued'
+    r.api_pre(session_id='child', model='fixture-model', provider='fixture')
+    assert rows(r)[0]['status'] == 'running'
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed')
+    r.api_pre(session_id='child', model='late-model', provider='fixture')
+    assert rows(r)[0]['status'] == 'completed'
+    assert rows(r)[0]['model'] == 'fixture-model'
+
+
+def test_activity_does_not_reconcile_all_finished_children(env, monkeypatch):
+    r, _, _ = env
+    pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit'})
+    # A filled bounded history must not multiply every hot-path update by all
+    # retired children. Count comparisons, rather than using a flaky wall clock.
+    for i in range(200):
+        r.children[f'retired-{i}'] = {'parent': 'retired-parent', 'session': f'retired-{i}',
+                                    'short': f'retired-short-{i}', 'status': 'completed'}
+    count = 0
+    original = r._same_session
+    def counted(*args):
+        nonlocal count
+        count += 1
+        return original(*args)
+    monkeypatch.setattr(r, '_same_session', counted)
+    r.api_pre(session_id='child', model='fixture-model', provider='fixture')
+    assert count < 2000
+    assert rows(r)[0]['api_call_count'] == 1

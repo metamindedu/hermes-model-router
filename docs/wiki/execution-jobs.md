@@ -1,6 +1,6 @@
-# Execution roster and full-profile jobs (0.9.0)
+# Execution roster and full-profile jobs (0.10.0)
 
-This documents the 0.9.0 implementation. Package installation, active registration and successful live target/provider execution require separate evidence; source tests alone establish none of them.
+This documents the 0.10.0 implementation. Package installation, active registration and successful live target/provider execution require separate evidence; source tests alone establish none of them.
 
 The approved workflow separates authority: the original registered **host operator CLI** administers grants; the plugin manages scoped jobs; approval/clarification decisions belong to the **native target conversation**. Generic session control, a checkbox or caller `human`/`operator` flags confer neither privileged authority. The plugin refuses all decision relay, including denial and internal-controller calls.
 
@@ -43,6 +43,7 @@ For full revocation, review `targets:[]`, then configure `enabled:false, targets
 Once independently granted and admitted into a capable session, `profile_task` exposes:
 
 - `status` without an ID: this parent conversation's jobs and currently allowed targets.
+- `prepare`: reserve exact request/payload/parent identity and a finite return lease, without target creation or submission. Returns the exact ordinary terminal descriptor and witness step; it grants no additional access.
 - `start`: exact target, a stable caller `request_id`, goal and optional bounded context.
 - `status` with `job_id`: explicit canonical receipt refresh, never launch/replay.
 - `stop`: exact admission cancellation, including queued-to-started transitions.
@@ -51,7 +52,15 @@ Once independently granted and admitted into a capable session, `profile_task` e
 
 Reusing a start request ID with the same payload returns the existing job. Changing the payload under that ID refuses. Creation/submission identities and a payload digest are stored before outbound effects. An unresolved ACK is **unknown**, never authorization to resubmit, switch models or run a replacement task.
 
-**Completion delivery is explicit collection.** Use the pane's **결과 보기** or the tool's `result`. There is no native subagent completion injection, autonomous parent wake, guaranteed parent consumption, or automatic resubmission to repair delivery. UI result display does not insert that result into a parent model turn.
+### Native automatic return or explicit collection
+
+For automatic return, the already-authorized native parent calls `prepare` with the intended start payload and `persist_on_release:false`, invokes normal `terminal` with the exact returned command/workdir/background/notify/persistence fields, then normal `process_manage(action=list)`. It calls `start` with the SAME request/payload and returned `return_id`. A running process alone is not readiness: the product verifies the actual parent-owned launch, public witness and protected helper handshake before target activation. Readiness/result deadlines are anchored before launch, not extended by retries or activation. Only an explicit pre-target `return_not_ready/no_effect:true` permits a bounded witness reread and same-payload retry. Never start a replacement job after acceptance or uncertainty.
+
+The helper waits for the exact bound source result and exits with a closed, bounded locator. Ordinary native process completion admits a different turn of the original surviving parent, which retrieves only that job using normal `result`. No copied prompt, user-supplied parent ID, private context patch or manual wake provides authority. The locator is not business-result prose or a successful review verdict. Normal summary continuity was verified with an actual auxiliary summary, committed compaction and summary adoption; physical SID did not rotate in that test, so alias-transfer coverage is not claimed.
+
+This extension currently supports tested Windows/local NTFS and bounded ASCII path components. Unsupported platform, filesystem/case policy, parent context or channel setup refuses instead of weakening the boundary. It is **parent-session-lifetime only**: durable `persist_on_release:true` is refused, and reset/new parent, process death, restart or reboot do not create a delivery/recovery guarantee. Actual `/new` isolates old-job authority from the new parent. Helper-only stop does not cancel the native business admission; use exact `profile_task stop` for that separate action. Unknown/expired helper outcomes are not evidence of business cancellation/completion. Original explicit result reads remain available to the authorized owner.
+
+Starts without `return_id` retain **explicit collection** through **결과 보기** or `result`. UI display itself does not insert a result into a parent model turn. Native `delegate_task` completion is a separate Core-owned route, unchanged by this feature.
 
 ## Control and recovery
 

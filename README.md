@@ -2,7 +2,7 @@
 
 Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. Native work uses `delegate_task`; historical routed-process starts remain retired. A separate explicitly opt-in `profile_task` path attaches to Gateway-owned target sessions, not a private agent executor. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
-## Execution visibility and full-profile jobs (0.9.0)
+## Native parent return and scoped execution visibility (0.10.0)
 
 The workflow separates authority: original registered **host operator CLI** commands review/save full-profile grants; the plugin displays and manages scoped jobs; **Hermes에서 대상 대화 열기** hands approval/clarification to the exact native target conversation. Generic plugin RPC refuses grant writes and every approval/denial/clarification relay, even with caller operator/human flags. CLI is existing OS/operator authority, not human attestation or an OS sandbox. Installing or enabling the package never grants full-profile access or approves a job.
 
@@ -10,7 +10,11 @@ The composer supplement and **실행 현황** pane distinguish model Heavy/Light
 
 Full-profile jobs are independently OFF with no allowed targets until an operator uses `hermes --profile <origin> model-router profile-jobs-status` and `profile-jobs-configure` on the Gateway's actual host. The read-only **전체 프로필 작업 → 운영자 설정 안내** explains review, stable revision and explicit account/tool/memory/cost consent. Worker execution needs an existing compatible Gateway and normal `tool`-surface policy/local workspace; no owner is started or repaired. Native screen navigation may normally dial a profile backend, not submit another task. Model/context/tools come from the target; GUI-only tools and every integration are not guaranteed.
 
-`profile_task` supports start, exact status/stop/steer and explicit result collection. It cannot edit grants or answer approvals. Unknown submissions/controls are not replayed. Completion does **not** autonomously wake the parent: collect with **결과 보기** or `result`. Native routing and its grants/defaults stay separate. Existing sessions may need a supported new-session/tool boundary; source files alone do not install or activate this feature.
+`profile_task` supports start, exact status/stop/steer and visible-result collection. An admitted parent can now request **native automatic return**: call `prepare`, launch the exact returned ordinary `terminal` descriptor, observe it through normal `process_manage(list)`, then `start` with the unchanged payload and returned `return_id`. Preparation reserves identity without starting target work. The real helper's native completion wakes the original parent; its bounded locator is data, and the parent retrieves that exact job with normal `result`. A start without a return ID retains explicit collection through **결과 보기** or `result`.
+
+Automatic return is bounded to the supported **Windows/local-NTFS/ASCII path and surviving parent-session lifetime**, with `persist_on_release:false`; durable true is refused. Actual summary continuity, new-parent isolation and helper-only cancellation have been exercised with real native CLI/Gateway execution and synthetic final model HTTP. Physical SID rotation, restart/reboot recovery, all host/isolation modes and real provider/account behavior are not certified. A new conversation does not inherit old-job authority, and stopping the helper does not cancel or complete business work. Only an explicit pre-target `return_not_ready/no_effect:true` allows a bounded ordinary witness reread and identical-payload retry; an accepted or uncertain target is never replayed to repair delivery.
+
+The tool cannot edit grants or answer approvals. Native routing, full-profile grants and cost consent remain separate and unchanged. Existing sessions may need a supported user-chosen tool boundary; installation never forces a reset or enables full-profile access. The unadmitted private-schema research adapter and its direct research tests are excluded from the release; normal visibility does not recover private native database records.
 
 See [execution ownership, opt-in scope, recovery and verification limits](docs/wiki/execution-jobs.md). Package installation, live registration, current-session tool availability and real target model/MCP/memory-provider execution are separate verification levels. Upgrading does not force a conversation reset or run a provider test.
 
@@ -213,7 +217,7 @@ hermes plugins validate . --json
 hermes plugins doctor . --ci
 ```
 
-Release dependencies are bounded (`PyYAML>=6,<7`). No credentials or local state should be committed. Install/update only through Hermes; catalog updates require a new reviewed SHA-pin PR. Licensed under MIT, copyright NewMetaW.
+Release dependencies are bounded (`PyYAML>=6,<7`, `websockets>=15,<17`). No credentials or local state should be committed. Install/update only through Hermes; catalog updates require a new reviewed SHA-pin PR. Inherited private-Core import compatibility warnings remain disclosed publication debt, not a claim of catalog clearance. Licensed under MIT, copyright NewMetaW.
 
 ## 한국어 안내
 

@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 _SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}\Z", re.ASCII)
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+/-]{0,127}\Z", re.ASCII)
@@ -62,8 +63,16 @@ def _observed(entry):
 
 def _status(value):
     return {'completed': 'completed', 'failed': 'error', 'error': 'error',
-            'refused': 'error', 'dispatched': 'dispatched', 'running': 'dispatched',
+            'refused': 'error', 'dispatched': 'dispatched', 'queued': 'queued', 'running': 'running',
             'interrupted': 'interrupted', 'cancelled': 'cancelled', 'timeout': 'timeout'}.get(value, 'unknown')
+
+
+_TERMINAL = {'completed', 'error', 'interrupted', 'cancelled', 'timeout'}
+
+
+def _set_status(row, status):
+    if row['status'] not in _TERMINAL and status != 'unknown':
+        row['status'] = status
 
 
 class ExecutionRoster:
@@ -73,8 +82,14 @@ class ExecutionRoster:
         self.home = Path(home).resolve(strict=False)
         self.origin_profile = _safe(profile_name_for_home(self.home))
         self.rows = {}
+        self.children = {}
+        self.aliases = {}
         self.lock = threading.RLock()
         self.rpc_supported = False
+        # Private native DB compatibility is not admitted by normal registration.
+        # Disposable prototype fixtures may inject a factory explicitly; there
+        # is no RPC/config switch or implicit fallback.
+        self._metadata_factory: Callable[[Path], Any] | None = None
 
     def _owner(self):
         from hermes_constants import get_hermes_home
@@ -89,8 +104,205 @@ class ExecutionRoster:
                 except Exception:
                     pass
 
+    def _same_session(self, a, b):
+        def canonical(s):
+            seen = set()
+            while s in self.aliases and s not in seen:
+                seen.add(s)
+                s = self.aliases[s]
+            return s
+        return bool(a and b and canonical(a) == canonical(b))
+
+    def _child(self, session):
+        matches = [c for c in self.children.values() if self._same_session(c['session'], session)]
+        if any(c.get('ambiguous') for c in matches):
+            return None
+        return matches[0] if len(matches) == 1 else None
+
+    def _reconcile(self, selected=None):
+        # Activity ticks touch one child; do not rescan every finished child on
+        # every tool/API call as the bounded history fills up.
+        for child in ([selected] if selected is not None else self.children.values()):
+            matches = [r for r in self.rows.values() if r['subagent_id'] == child['short']
+                       and r['delegation_id'] and self._same_session(r['parent_session_id'], child['parent'])]
+            siblings = [c for c in self.children.values() if c['short'] == child['short']
+                        and self._same_session(c['parent'], child['parent'])]
+            if len(matches) != 1 or len(siblings) != 1 or child.get('ambiguous'):
+                continue
+            row = matches[0]
+            if row.get('child_session_id') and not self._same_session(row['child_session_id'], child['session']):
+                continue
+            for field in ('child_session_id', 'started_at', 'activity_at', 'last_tool', 'tool_count',
+                          'api_call_count', 'duration_seconds', 'model', 'provider'):
+                if field in child:
+                    row[field] = child[field]
+            _set_status(row, child.get('status', 'dispatched'))
+            row['updated_at'] = time.time()
+
+    def start(self, parent_session_id=None, child_session_id=None, child_subagent_id=None, **kwargs):
+        try:
+            parent, session, short = map(_safe, (parent_session_id, child_session_id, child_subagent_id))
+            if not self._owner() or not all((parent, session, short)):
+                return None
+            with self.lock:
+                if session not in self.children:
+                    now = time.time()
+                    self.children[session] = {'parent': parent, 'session': session, 'short': short,
+                                              'child_session_id': session, 'started_at': now,
+                                              'activity_at': now, 'tool_count': None, 'api_call_count': None,
+                                              'status': 'queued'}
+                    while len(self.children) > 512:
+                        self.children.pop(next(iter(self.children)))
+                elif (self.children[session]['short'] != short or
+                      not self._same_session(self.children[session]['parent'], parent)):
+                    self.children[session]['ambiguous'] = True
+                self._reconcile()
+                self._notify_parent(parent)
+        except Exception:
+            pass
+        return None
+
+    def _notify_parent(self, parent):
+        for row in self.rows.values():
+            if self._same_session(row['parent_session_id'], parent):
+                self._event(row['conversation_id'], parent)
+                for alias in self.aliases:
+                    if self._same_session(alias, parent):
+                        self._event(row['conversation_id'], alias)
+                break
+
+    def _bind_stored_session(self, child, session):
+        """Use ONLY after the origin DB proves this child's compression chain."""
+        if not _safe(session):
+            return False
+        if not self._same_session(child['session'], session):
+            # Do not let a stored alias merge independent children or a parent
+            # conversation, even when malformed metadata names that same id.
+            if session in self.aliases or any(
+                    other is not child and self._same_session(other['session'], session)
+                    for other in self.children.values()):
+                return False
+            if any(self._same_session(session, x) for row in self.rows.values()
+                   for x in (row['parent_session_id'], row['conversation_id'])):
+                return False
+            self.aliases[session] = child['session']
+            while len(self.aliases) > 512:
+                self.aliases.pop(next(iter(self.aliases)))
+        child['child_session_id'] = session
+        return True
+
+    def _stored_child(self, parent, session):
+        if self._metadata_factory is None:
+            return None
+        candidates = [c for c in self.children.values()
+                      if not c.get('ambiguous') and self._same_session(c['parent'], parent)]
+        with self._metadata_factory(self.home) as metadata:
+            matches = [c for c in candidates
+                       if metadata.lineage(c['session'], session, c['parent'], c['short'])]
+        if len(matches) == 1 and self._bind_stored_session(matches[0], session):
+            return matches[0]
+        return None
+
+    def _refresh_stored_terminal(self, rows):
+        # Native grouped stop hooks wait for every sibling; native per-child
+        # cleanup records settle earlier. Read only exact already-bound rows.
+        if self._metadata_factory is None:
+            return
+        with self._metadata_factory(self.home) as metadata:
+            for row in rows:
+                if row['status'] in _TERMINAL or not row.get('delegation_id'):
+                    continue
+                child = self._child(row.get('child_session_id'))
+                if not child or not self._same_session(child['parent'], row['parent_session_id']):
+                    continue
+                terminal = metadata.terminal(short=child['short'], unit=row['delegation_id'],
+                    parent=child['parent'], original=child['session'], started_at=child['started_at'])
+                if terminal and self._bind_stored_session(child, terminal['session_id']):
+                    child['status'] = _status(terminal['status'])
+                    child['activity_at'] = terminal['stopped_at']
+                    self._reconcile(child)
+
+    def stop(self, parent_session_id=None, child_session_id=None, child_status=None, duration_ms=None, **kwargs):
+        try:
+            parent, session = map(_safe, (parent_session_id, child_session_id))
+            if not self._owner() or not parent or not session:
+                return None
+            with self.lock:
+                child = self._child(session) or self._stored_child(parent, session)
+                if child and self._same_session(child['parent'], parent):
+                    status = _status(child_status)
+                    if child.get('status') not in _TERMINAL and status in _TERMINAL:
+                        child['status'] = status
+                        if type(duration_ms) in (int, float) and 0 <= duration_ms < 1e12:
+                            child['duration_seconds'] = duration_ms / 1000
+                    child['activity_at'] = time.time()
+                    self._reconcile(child)
+                    self._notify_parent(parent)
+        except Exception:
+            pass
+        return None
+
+    def compact(self, session_id=None, old_session_id=None, **kwargs):
+        try:
+            new, old = map(_safe, (session_id, old_session_id))
+            if not self._owner() or not new or not old or new == old:
+                return None
+            with self.lock:
+                known = any(self._same_session(old, r['parent_session_id']) or
+                            self._same_session(old, r['conversation_id']) for r in self.rows.values())
+                known = known or self._child(old) is not None
+                collision = any(self._same_session(new, x) for x in self.aliases) or any(
+                    self._same_session(new, x) for c in self.children.values() for x in (c['session'], c['parent']))
+                collision = collision or any(self._same_session(new, x) for r in self.rows.values()
+                                             for x in (r['conversation_id'], r['parent_session_id']))
+                if known and not collision:
+                    self.aliases[new] = old
+                    while len(self.aliases) > 512:
+                        self.aliases.pop(next(iter(self.aliases)))
+                    child = self._child(new)
+                    if child:
+                        child['child_session_id'] = new
+                    self._reconcile()
+                    self._notify_parent(new if not child else child['parent'])
+        except Exception:
+            pass
+        return None
+
+    def _activity(self, session_id, tool_name=None, model=None, provider=None, api=False):
+        if not self._owner():
+            return
+        session = _safe(session_id)
+        with self.lock:
+            child = self._child(session) if session else None
+            if not child or child.get('status') in _TERMINAL:
+                return
+            _set_status(child, 'running')
+            child['activity_at'] = time.time()
+            if api:
+                child['api_call_count'] = (child.get('api_call_count') or 0) + 1
+                if isinstance(model, str) and '..' not in model and _MODEL.fullmatch(model):
+                    child['model'] = model
+                if _safe(provider):
+                    child['provider'] = provider
+            elif _safe(tool_name):
+                child['last_tool'] = tool_name
+                child['tool_count'] = (child.get('tool_count') or 0) + 1
+            self._reconcile(child)
+            self._notify_parent(child['parent'])
+
+    def api_pre(self, session_id=None, model=None, provider=None, **kwargs):
+        try:
+            self._activity(session_id, model=model, provider=provider, api=True)
+        except Exception:
+            pass
+        return None
+
+    def api_post(self, session_id=None, **kwargs):
+        return None
+
     def pre(self, tool_name='', args=None, session_id=None, conversation_id=None, tool_call_id=None, **kwargs):
         try:
+            self._activity(session_id, tool_name=tool_name)
             if not self._owner() or not self.origin_profile or tool_name != 'delegate_task' or not isinstance(args, dict):
                 return None
             if args.get('action') not in (None, '', 'spawn'):
@@ -118,6 +330,7 @@ class ExecutionRoster:
                     self.rows[key] = {'id': digest, 'execution_mode': 'native', 'requested': _requested(task),
                         'observed': _observed({}), 'conversation_id': root, 'parent_session_id': session,
                         'tool_call_id': call, 'task_index': i, 'subagent_id': None, 'delegation_id': None,
+                        'async_unit_id': None, 'native_call_delegation_id': None,
                         'status': 'requested', 'updated_at': time.time()}
                 while len(self.rows) > 512:
                     self.rows.pop(next(iter(self.rows)))
@@ -153,14 +366,15 @@ class ExecutionRoster:
                             # Current model-facing native lists omit the unit id.
                             # A recyclable short child id alone is not a binding.
                             matches = [r for r in self.rows.values() if sid and r['conversation_id'] == root
-                                       and delegation and r['delegation_id'] == delegation
+                                       and delegation and r.get('native_call_delegation_id', r['delegation_id']) == delegation
                                        and r['subagent_id'] == sid]
                             if len(matches) == 1:
-                                matches[0]['status'] = _status(entry.get('status'))
+                                _set_status(matches[0], _status(entry.get('status')))
                                 matches[0]['updated_at'] = time.time()
                                 changed = True
                 elif rows:
                     changed = self._apply(rows, result)
+                    self._reconcile()
             if changed:
                 self._event(root, session)
         except Exception:
@@ -179,8 +393,10 @@ class ExecutionRoster:
                 continue
             for entry, i in zip(entries, indices):
                 row = rows[i]
-                row['status'] = _status(entry.get('status'))
-                row['observed'] = _observed(entry)
+                _set_status(row, _status(entry.get('status')))
+                observed = _observed(entry)
+                if observed['evidence'] != 'unknown':
+                    row['observed'] = observed
                 row['updated_at'] = time.time()
                 changed = True
         if result.get('status') == 'dispatched':
@@ -198,7 +414,7 @@ class ExecutionRoster:
                 return changed
             accepted = sorted(set(rows) - r - inline_ids)
             for i in accepted:
-                rows[i]['status'] = 'dispatched'
+                _set_status(rows[i], 'dispatched')
                 rows[i]['updated_at'] = time.time()
                 changed = True
             # Core's subagent_ids includes inline-fallback children too; do not guess in that case.
@@ -235,11 +451,15 @@ class ExecutionRoster:
                     mapping = {}
             for i, uid in mapping.items():
                 rows[i]['delegation_id'] = uid
+                rows[i]['async_unit_id'] = uid
+                rows[i]['native_call_delegation_id'] = _safe(result.get('delegation_id'))
         elif 'results' in result:
             uid = _safe(result.get('delegation_id'))
             if uid:
                 for row in rows.values():
                     row['delegation_id'] = uid
+                    row['async_unit_id'] = uid
+                    row['native_call_delegation_id'] = uid
         return changed
 
     def list(self, params, *, session_id=None, **kwargs):
@@ -259,12 +479,14 @@ class ExecutionRoster:
                 return empty
             with self.lock:
                 roots = {r['conversation_id'] for r in self.rows.values()
-                         if sid in (r['conversation_id'], r['parent_session_id'])}
+                         if any(self._same_session(sid, x) for x in (r['conversation_id'], r['parent_session_id']))}
                 if len(roots) != 1:
                     return empty
                 root = roots.pop()
                 empty['conversation_id'] = root
-                empty['rows'] = copy.deepcopy([r for r in self.rows.values() if r['conversation_id'] == root][-128:])
+                selected = [r for r in self.rows.values() if r['conversation_id'] == root][-128:]
+                self._refresh_stored_terminal(selected)
+                empty['rows'] = copy.deepcopy(selected)
             return empty
         except Exception:
             return empty
@@ -274,6 +496,11 @@ def register_execution_roster(ctx, home):
     roster = ExecutionRoster(ctx, home)
     ctx.register_hook('pre_tool_call', roster.pre)
     ctx.register_hook('post_tool_call', roster.post)
+    ctx.register_hook('subagent_start', roster.start)
+    ctx.register_hook('subagent_stop', roster.stop)
+    ctx.register_hook('post_compaction', roster.compact)
+    ctx.register_hook('pre_api_request', roster.api_pre)
+    ctx.register_hook('post_api_request', roster.api_post)
     try:
         register = getattr(ctx, 'register_rpc', None)
         if callable(register):

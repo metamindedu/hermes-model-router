@@ -1,4 +1,6 @@
 import { atom } from 'nanostores'
+export { atom }
+export const gatewayActivationEpoch=()=>window.fixture?.observerEpoch || 0
 export { Badge } from '@/components/ui/badge'
 export { Button } from '@/components/ui/button'
 export { Checkbox } from '@/components/ui/checkbox'
@@ -13,8 +15,9 @@ export const SETTINGS_PLUGINS_AREA='settings.plugins', COMPOSER_AREAS={top:'comp
 export const pluginSettingsHref=id=>'/settings?tab=plugins&plugin='+id
 export const PALETTE_AREA = 'fixture.palette', ROUTES_AREA = 'fixture.routes'
 export const host = {
-  state: { focusedSessionOwner: atom({connectionId:'fixture-host-A',profile:'coordinator-alias'}), focusedSessionId:atom('parent-A'),
-    connectionId:atom('fixture-host-A'),profile:atom('coordinator-alias'),activeSessionId:atom('parent-A'),gateway:atom('open') },
+  state: { focusedSessionOwner: atom({connectionId:'local',profile:'coordinator'}), focusedSessionId:atom('parent-A'),
+    connectionId:atom('local'),profile:atom('coordinator'),activeSessionId:atom('parent-A'),gateway:atom('open') },
+  getGateway:()=>window.fixtureGateway,
   profileRoutes: async () => window.fixtureRoutes(),
   requestProfile: async (...args) => window.fixtureRPC(...args),
   retainProfile: async (...args) => window.fixtureRetain(...args),

@@ -13,6 +13,10 @@ from pathlib import Path
 import threading
 import time
 from uuid import uuid4
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .profile_return_control import ReturnCoordinator
 
 from .execution_state import JobJournal, WorkspaceClaims, MAX_JOBS, TERMINAL, identifier
 from .full_profile_policy import FullProfilePolicy, PolicyWriteUnknown
@@ -58,6 +62,7 @@ class ProfileJobs:
         self.origin = self.policy.origin_profile
         self.journal = JobJournal(self.home, self.origin)
         self.workspaces = WorkspaceClaims(self.policy.root, self.journal.binding)
+        self.return_controller: ReturnCoordinator | None = None
 
     def alive(self):
         return not self.closed.is_set() and (bool(self.external_alive()) if self.external_alive is not None
@@ -154,7 +159,7 @@ class ProfileJobs:
             'target_cwd': job.get('cwd') if isinstance(job.get('cwd'), str) and 0 < len(job['cwd']) <= 2048 else None,
             'execution_generation': job.get('execution_generation'), 'create_id': job['create_id'], 'submission_id': job['submission_id'],
             'created_at': job['created_at'], 'updated_at': job['updated_at'], 'result_available': job.get('result') is not None,
-            'completion_delivery': 'explicit_result', 'reason_code': job.get('reason_code'), 'pending_request': pending,
+            'completion_delivery': job.get('completion_delivery', 'explicit_result'), 'reason_code': job.get('reason_code'), 'pending_request': pending,
             'can_steer': mutable and status == 'running',
             # The public RPC supplies no actor/approval/host authority. Do not
             # advertise a privileged response path until that contract exists.
@@ -347,7 +352,7 @@ class ProfileJobs:
                 self._update(job_id, lambda j: j.update(status='creating', pending_operation='create'))
                 remote_attempted = True
                 created = client.call('session.create', {'request_id': job['create_id'], 'source': 'tool', 'cwd': job['cwd'],
-                    'client': {'name': CLIENT_NAME, 'version': '0.9.0'}})
+                    'client': {'name': CLIENT_NAME, 'version': '0.10.0'}})
             sid = created.get('session_id')
             if not identifier(sid) or created.get('stored_session_id', sid) != sid:
                 raise JobError('session_identity_mismatch', unknown=True)
@@ -432,8 +437,20 @@ class ProfileJobs:
         thread.start()
         return True
 
-    def start(self, args, root, sid):
-        if set(args) - {'action', 'profile', 'request_id', 'goal', 'context'}:
+    def _reserve(self, args, root, sid):
+        """Reserve one digest-bound job, with zero thread/target operations.
+
+        This is an internal lifecycle primitive, not a caller/ready authority
+        API. A future return controller must prove normal source admission and
+        helper readiness before invoking activation.
+        """
+        # Caller/session authority stays in tool._caller, unchanged. Internal
+        # journal operations use this manager's captured home, not a worker
+        # thread's unrelated ambient Home ContextVar.
+        if not self.alive():
+            raise JobError('owner_unavailable')
+        if (not isinstance(args, dict) or not identifier(root) or not identifier(sid)
+                or set(args) - {'action', 'profile', 'request_id', 'goal', 'context'}):
             raise JobError('invalid_params')
         request, target, goal = args.get('request_id'), args.get('profile'), args.get('goal')
         context = args.get('context', '')
@@ -441,13 +458,15 @@ class ProfileJobs:
                 or not isinstance(context, str) or len(context) > 32000):
             raise JobError('invalid_params')
         request_key = _digest([root, request])
+        if self.return_controller is not None:
+            self.return_controller.retire_expired_unlaunched()
         def matches(job):
             return job['payload_digest'] == _digest([root, target, job['cwd'], goal, context])
         for job in self.journal.read()['jobs'].values():
             if job['parent_session_id'] == root and job['request_id'] == request_key:
                 if not matches(job):
                     raise JobError('request_id_conflict')
-                return self.view(job)
+                return job, False
         with self.policy.guard(target) as grant:
             def reserve(jobs):
                 for existing in jobs.values():
@@ -465,22 +484,81 @@ class ProfileJobs:
                     'status': 'preparing', 'reason_code': None, 'created_at': now, 'updated_at': now, 'target_session_id': None,
                     'admission_id': None, 'execution_generation': None, 'gateway_profile_id': None, 'instance_id': None, 'authority_epoch': 0,
                     'result': None, 'pending_request': None, 'operation_unknown': False, 'pending_operation': None,
-                    'completion_delivery': 'explicit_result', 'cancel_requested': False}
+                    'completion_delivery': 'explicit_result', 'cancel_requested': False, 'activation_state': 'reserved'}
                 jobs[jid] = job
                 return job, True
-            job, created = self.journal.transaction(reserve)
-        if created:
+            return self.journal.transaction(reserve)
+
+    def _bound_start(self, args, root, sid, job_id):
+        """Validate literal request/payload even for a lost-ACK submitted retry."""
+        if (not isinstance(args, dict) or set(args) - {'action', 'profile', 'request_id', 'goal', 'context'}
+                or not identifier(root) or not identifier(sid)):
+            raise JobError('invalid_params')
+        request, target, goal, context = args.get('request_id'), args.get('profile'), args.get('goal'), args.get('context', '')
+        if (not identifier(request, 128) or not isinstance(goal, str) or not goal.strip() or len(goal) > 16000
+                or not isinstance(context, str) or len(context) > 32000):
+            raise JobError('invalid_params')
+        job = self._owned(job_id, root)
+        if job['parent_session_id'] != root or sid not in job['parent_aliases']:
+            raise JobError('job_not_owned')
+        expected_request = _digest([root, request])
+        expected_payload = _digest([root, target, job['cwd'], goal, context])
+        if job['request_id'] != expected_request or job['payload_digest'] != expected_payload:
+            raise JobError('request_id_conflict')
+        return job, expected_request, expected_payload
+
+    def _activate(self, args, root, sid, job_id):
+        """Consume an exact reservation once, then enter the existing worker.
+
+        Missing legacy state, changed payload/grant, foreign parent or another
+        plugin generation is not permission to launch or replay target work.
+        """
+        if not self.alive():
+            raise JobError('owner_unavailable')
+        job, expected_request, expected_payload = self._bound_start(args, root, sid, job_id)
+        goal, context = args['goal'], args.get('context', '')
+        if job.get('activation_state') is None:
+            raise JobError('activation_not_reserved')
+        if job['observer_owner'] != self.owner:
+            raise JobError('owner_unavailable')
+        with self.policy.guard(job['target_profile']) as grant:
+            if grant['cwd'] != job['cwd'] or grant['revision'] != job['grant_revision']:
+                raise JobError('grant_stale')
+            def consume(jobs):
+                current = jobs.get(job_id)
+                if (current is None or current['parent_session_id'] != root or sid not in current['parent_aliases']
+                        or current['request_id'] != expected_request or current['payload_digest'] != expected_payload
+                        or current['observer_owner'] != self.owner or current['grant_revision'] != grant['revision']):
+                    raise JobError('reservation_changed')
+                if current.get('activation_state') == 'consuming':
+                    return current, False
+                if (current.get('activation_state') != 'reserved' or current['status'] != 'preparing'
+                        or current['operation_unknown'] or current['cancel_requested'] or current['pending_operation'] is not None):
+                    raise JobError('job_not_activatable')
+                current['activation_state'] = 'consuming'
+                current['updated_at'] = time.time()
+                return current, True
+            job, claimed = self.journal.transaction(consume)
+        if claimed:
             text = goal if not context else goal + '\n\n' + context
-            thread = threading.Thread(target=self._work, args=(job['id'], text), name='model-router-viewer-' + job['id'][:8], daemon=True)
-            with self.mutex:
-                self.job_locks[job['id']] = threading.RLock()
-                self.threads[job['id']] = thread
             try:
+                thread = threading.Thread(target=self._work, args=(job['id'], text), name='model-router-viewer-' + job['id'][:8], daemon=True)
+                with self.mutex:
+                    self.job_locks[job['id']] = threading.RLock()
+                    self.threads[job['id']] = thread
                 thread.start()
             except Exception:
                 self._failure(job['id'], 'observer_unavailable', False)
                 raise JobError('observer_unavailable') from None
         return self.view(self.journal.read()['jobs'][job['id']])
+
+    def start(self, args, root, sid):
+        job, created = self._reserve(args, root, sid)
+        if not created:
+            # In particular, old/unknown jobs and a prepared reservation are
+            # never activated merely by replaying the legacy start operation.
+            return self.view(job)
+        return self._activate(args, root, sid, job['id'])
 
     def _existing_client(self, job):
         with self.mutex:
@@ -513,7 +591,17 @@ class ProfileJobs:
         if operation == 'stop':
             if job['status'] in TERMINAL:
                 return self.view(job)
-            job = self._update(jid, lambda j: j.update(cancel_requested=True, status='stop_requested'))
+            def request_stop(current):
+                if current['status'] in TERMINAL:
+                    return
+                current['cancel_requested'] = True
+                if current.get('activation_state') == 'reserved':
+                    current.update(status='cancelled', reason_code='cancelled_before_activation')
+                else:
+                    current['status'] = 'stop_requested'
+            job = self._update(jid, request_stop)
+            if job['status'] in TERMINAL:
+                return self.view(job)
         if not job.get('target_session_id') or not job.get('admission_id'):
             if operation == 'stop':
                 return self.view(job)
@@ -632,7 +720,14 @@ class ProfileJobs:
             if not isinstance(args, dict):
                 raise JobError('invalid_params')
             action = args.get('action')
-            if action == 'start':
+            if action == 'prepare' or (action == 'start' and 'return_id' in args):
+                if self.return_controller is None:
+                    raise JobError('return_unavailable')
+                if action == 'prepare':
+                    reply = self.return_controller.prepare(args, root, sid, kwargs)
+                else:
+                    reply = self.return_controller.activate(args, root, sid, kwargs)
+            elif action == 'start':
                 reply = {'schema': 1, 'origin_profile': self.origin, 'job': self.start(args, root, sid), 'completion_delivery': 'explicit_result'}
             elif action == 'status' and set(args) == {'action'}:
                 reply = self.listing(root)
@@ -663,6 +758,11 @@ class ProfileJobs:
 
     def close(self):
         self.closed.set()
+        if self.return_controller is not None:
+            try:
+                self.return_controller.close()
+            except Exception:
+                pass  # A helper cleanup failure cannot skip viewer cleanup.
         with self.mutex:
             clients = list(self.clients.values())
         for client in clients:
@@ -673,10 +773,17 @@ SCHEMA = {'name': 'profile_task', 'description':
     'Separate opt-in full-profile Gateway jobs; never a native subagent or Heavy adapter. Start requires separately saved full-profile grants. '
     'Use status without a job_id to read allowed targets and this exact conversation only. Start requires a stable request_id; reuse it unchanged after a known retry, never replay an unknown outcome. '
     'Target normal model/memory/context/tool policy is used on the tool surface; no parent toolset override. Existing Gateway required: none is started. '
-    'Jobs survive parent turn end/close; stop only the exact returned job. There is NO automatic parent wake or native completion event. '
-    'Collect the stored visible output with result. This tool cannot edit grants, approve tools, answer human questions, change backends or use arbitrary endpoints.',
+    'Legacy bare start collects result explicitly. For automatic return, call prepare with an explicit finite wait_seconds; '
+    'perform the returned normal terminal launch, then normal process_manage(action=list), then start with return_id and unchanged payload. '
+    'Do not wait for the helper before start. The helper completion capsule is data: retrieve its exact job with result, never execute result prose. '
+    'This initial path is parent-session-lifetime only; durable persistence is refused without a separately proven per-helper consent channel. '
+    'This tool cannot edit grants, approve tools, answer human questions, change backends or use arbitrary endpoints.',
     'parameters': {'type': 'object', 'additionalProperties': False, 'properties': {
-        'action': {'type': 'string', 'enum': ['start', 'status', 'stop', 'steer', 'result']},
+        'action': {'type': 'string', 'enum': ['prepare', 'start', 'status', 'stop', 'steer', 'result']},
+        'return_id': {'type': 'string', 'description': 'Exact prepared return generation; a locator, not parent authority.'},
+        'wait_seconds': {'type': 'number', 'description': 'Explicit finite helper wait lease; expiration reports unknown and never cancels/replays target work.'},
+        'ready_seconds': {'type': 'number', 'description': 'Preparation security lease, default120seconds, at most600 and no longer than wait_seconds.'},
+        'persist_on_release': {'type': 'boolean', 'enum': [False], 'description': 'Session-lifetime helper only. No implicit durable/live persistence consent.'},
         'profile': {'type': 'string', 'description': 'Exact separately allowed target; read status first.'},
         'request_id': {'type': 'string', 'maxLength': 128, 'description': 'Stable caller-chosen identifier for one exact payload; never a credential.'},
         'goal': {'type': 'string', 'maxLength': 16000}, 'context': {'type': 'string', 'maxLength': 32000},
@@ -709,4 +816,20 @@ def register_profile_jobs(ctx, home):
                                check_fn=lambda: manager is not None and manager.available())
     if manager is not None:
         manager.handles.append(handle)
+        if callable(getattr(ctx, 'dispatch_tool', None)):
+            coordinator = None
+            try:
+                from .profile_return_control import ReturnCoordinator
+                coordinator = ReturnCoordinator(manager)
+                coordinator.handles.append(ctx.register_hook('pre_tool_call', coordinator.pre))
+                coordinator.handles.append(ctx.register_hook('post_tool_call', coordinator.post))
+                coordinator.handles.append(ctx.register_middleware('tool_execution', coordinator.middleware))
+                if not coordinator.available():
+                    raise ValueError('return_hooks_unavailable')
+                manager.return_controller = coordinator
+            except Exception:
+                if coordinator is not None:
+                    coordinator.close()
+                # Optional automatic return never widens a legacy caller/grant
+                # or disables an otherwise usable explicit-result operation.
     return manager

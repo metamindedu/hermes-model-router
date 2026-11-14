@@ -17,6 +17,34 @@ import yaml
 
 PACKAGE = Path(__file__).resolve().parents[1]
 INCLUDE = ["plugin.yaml", "__init__.py", "model_router", "desktop", "dashboard", "skills", "compat", "lib", "cli.py", "README.md"]
+# This private-schema research prototype is not an admitted package component.
+# Keep it available for disposable research without copying it into a profile.
+_UNADMITTED_PACKAGE_FILES = frozenset({"model_router/execution_metadata.py"})
+
+
+def copy_package(dest):
+    """Copy owned distribution files only; not an installation/activation API."""
+    dest = Path(dest)
+    if not dest.is_dir() or any(dest.iterdir()):
+        raise RuntimeError("Package destination must be an empty directory")
+    cache_ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+
+    def unadmitted(path):
+        return path.relative_to(PACKAGE).as_posix().casefold() in _UNADMITTED_PACKAGE_FILES
+
+    def ignore(directory, names):
+        return cache_ignore(directory, names) | {
+            name for name in names if unadmitted(Path(directory) / name)
+        }
+
+    for item in INCLUDE:
+        origin = PACKAGE / item
+        if unadmitted(origin):
+            continue
+        if origin.is_dir():
+            shutil.copytree(origin, dest / item, ignore=ignore)
+        else:
+            shutil.copy2(origin, dest / item)
 
 
 def digest(path):
@@ -83,12 +111,7 @@ def main(argv=None):
             if dest.exists():
                 raise RuntimeError("Existing model-router install requires explicit update: " + name)
             dest.mkdir(parents=True)
-            for item in INCLUDE:
-                origin = PACKAGE / item
-                if origin.is_dir():
-                    shutil.copytree(origin, dest / item, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-                else:
-                    shutil.copy2(origin, dest / item)
+            copy_package(dest)
             enabled = list(data.get("plugins", {}).get("enabled", []))
             if "model-router" not in enabled:
                 setkey(name, home, "plugins.enabled", enabled + ["model-router"])
