@@ -81,6 +81,7 @@ def test_requested_then_background_refusals_and_units(env):
     initial = rows(r)
     assert [x['requested']['kind'] for x in initial] == ['model', 'profile', 'model']
     assert [x['requested']['role'] for x in initial] == ['light', None, 'heavy']
+    assert [x['requested']['slot'] for x in initial] == ['code-complex', None, 'verify-complex']
     assert all(x['status'] == 'requested' for x in initial)
     payload = {'status': 'dispatched', 'mode': 'background', 'count': 2, 'delegation_id': 'whole',
                'goals': ['same'] * 3, 'subagent_ids': ['sa-0-ab', 'sa-2-cd'],

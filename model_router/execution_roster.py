@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .slots import PURPOSE_SLOTS
+
 _SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}\Z", re.ASCII)
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+/-]{0,127}(?:\[[A-Za-z0-9._-]{1,32}\])?\Z", re.ASCII)
 _PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z", re.ASCII)
@@ -39,7 +41,8 @@ def _requested(task):
     elif execution in (None, 'profile') and profile and 'purpose' not in task:
         kind = 'profile'
     return {'kind': kind, 'role': _PURPOSES[purpose] if kind == 'model' and purpose else None,
-            'profile': profile if kind == 'profile' else None, 'purpose': purpose if kind == 'model' else None}
+            'profile': profile if kind == 'profile' else None, 'purpose': purpose if kind == 'model' else None,
+            'slot': PURPOSE_SLOTS[purpose] if kind == 'model' and purpose else None}
 
 
 def _observed(entry):

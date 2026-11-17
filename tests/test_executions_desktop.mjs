@@ -16,7 +16,7 @@ function load(overrides = {}) {
     useState: value => [value, () => {}], useRef: value => ({ current: value }), useEffect: effect => effects.push(effect),
     useQuery: options => { queryOptions = options; return query }, useValue: atom => atom.get(), ...overrides })
   const code = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '').replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '').replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-  const api = new Function(...Object.keys(params), code + '\nreturn {executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,pluginDefinition}')( ...Object.values(params))
+  const api = new Function(...Object.keys(params), code + '\nreturn {executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,pluginDefinition}')( ...Object.values(params))
   // Leaf rendering/invalidation fixture. Actual observer transport/fences are
   // exercised separately in test_active_execution_observer.mjs.
   const observer = { cacheId: 'leaf-fixture', revisionAtom: { get: () => 1 }, eligible: selected => Boolean(api.executionScopeKey(selected)),
@@ -55,14 +55,47 @@ test('route selection retains exact SDK descriptor and refuses absent/ambiguous 
   assert.equal(api.selectExecutionRoute([{ ...exact, connectionId: 'other' }], scope()), null)
   assert.equal(api.selectExecutionRoute([{ ...exact, targetProfile: '../wallace' }], scope()), null)
 })
+test('composer strip orders running work first and summarises counts with slot and model', () => {
+  const api = load(), now = Date.now() / 1000
+  const model = (id, status, extra = {}) => ({ ...row(id), requested: { kind: 'model', role: 'light', slot: 'code-simple', profile: null }, status, ...extra })
+  const rows = [model('old-done', 'completed', { updated_at: now - 300, duration_seconds: 42, model: 'gpt-6.1-terra', model_source: 'api' }),
+    model('failed', 'error', { updated_at: now - 100 }),
+    model('run-old', 'running', { started_at: now - 90, model: 'gpt-6.1-sol' }),
+    model('new-done', 'completed', { updated_at: now - 10, model: 'gpt-6-astra' }),
+    model('run-new', 'running', { started_at: now - 5 })]
+  assert.deepEqual(api.sortExecutionRows(rows).map(item => item.id), ['run-new', 'run-old', 'new-done', 'failed', 'old-done'])
+  const strip = api.ExecutionStrip({ rows })
+  const summary = text(strip.props.children[0])
+  assert.match(summary, /서브에이전트 · 실행 중 2 · 완료 2 · 오류 1/)
+  assert.match(summary, /코드 · 간단 · gpt-6\.1-sol · 1분 3\d초/)
+  assert.doesNotMatch(summary, /Heavy|Light|미확인|포커스 대화/)
+  const lines = strip.props.children[1].props.children.filter(Boolean)
+  assert.deepEqual(lines.map(item => item.props.row.id), ['run-new', 'run-old', 'new-done', 'failed', 'old-done'])
+  const line = text(api.ExecutionLine({ row: rows[0] }))
+  assert.match(line, /완료 코드 · 간단 gpt-6\.1-terra 42초/); assert.match(line, /API 호출 기준/); assert.match(line, /하위 작업 sa-0-native/)
+  assert.match(text(api.ExecutionLine({ row: rows[4] })), /모델 보고 전/)
+  // Only finished work: the latest one is the chip.
+  assert.match(text(api.ExecutionStrip({ rows: [rows[0], rows[3]] }).props.children[0]), /완료 2 .*코드 · 간단 · gpt-6-astra · 완료/)
+  assert.equal(api.ExecutionStrip({ rows: [] }), null)
+  // Gaps, conflicts and stops are never counted as completed.
+  const mixed = [rows[0], model('gap', 'unknown', { observation_gap: true }), model('stop', 'cancelled'), model('int', 'interrupted'), model('t', 'timeout')]
+  assert.match(text(api.ExecutionStrip({ rows: mixed }).props.children[0]), /서브에이전트 · 완료 1 · 오류 1 · 중단 2 · 미확인 1/)
+  const job = { id: 'j', target_profile: 'wallace', status: 'completed', created_at: now - 50, updated_at: now - 1 }
+  const gatewayRow = api.profileJobExecutionRow(job)
+  assert.deepEqual([gatewayRow.started_at, gatewayRow.updated_at], [now - 50, now - 1])
+  assert.equal(api.sortExecutionRows([rows[3], gatewayRow])[0].id, 'gateway:j', 'a newer finished gateway job sorts first')
+  assert.match(text(api.ExecutionStrip({ rows: [], unavailable: true })), /읽을 수 없습니다/)
+})
 test('model and profile badges do not promote requests into verified runtime identity', () => {
   const api = load()
   assert.equal(api.executionLabel({ kind: 'model', role: 'heavy' }), '모델 · Heavy')
   assert.equal(api.executionLabel({ kind: 'model', role: 'light' }), '모델 · Light')
+  assert.equal(api.executionLabel(api.executionIdentity({ kind: 'model', role: 'light', slot: 'code-simple' })), '모델 · 코드 · 간단')
+  assert.equal(api.executionIdentity({ kind: 'model', role: 'light', slot: '../x' }).slot, null)
   assert.equal(api.executionLabel({ kind: 'profile', profile: 'wallace' }), '프로필 · wallace')
   assert.equal(api.executionIdentity({ kind: 'model', role: 'heavy' }).evidence, 'unknown')
   assert.deepEqual(api.executionIdentity({ kind: 'profile', profile: 'wallace', role: 'heavy' }), unknown())
-  assert.deepEqual(api.executionIdentity({ kind: 'model', role: 'heavy', evidence: 'response_verified' }), { kind: 'model', role: 'heavy', profile: null, evidence: 'unknown' })
+  assert.deepEqual(api.executionIdentity({ kind: 'model', role: 'heavy', evidence: 'response_verified' }), { kind: 'model', role: 'heavy', profile: null, slot: null, evidence: 'unknown' })
 })
 test('split units correlate live call IDs without duplicate cards or suffix inference', () => {
   const api = load(), data = snapshot()
@@ -120,6 +153,38 @@ test('runtime identity and response verification remain distinct in actual row o
   const output = text(api.ExecutionRow({ row: actual }))
   assert.match(output, /런타임 보고/); assert.match(output, /개별 API 응답/); assert.match(output, /네이티브/)
   assert.doesNotMatch(output, /검증 완료|전체 프로필/)
+  const modelRow = { ...requested, requested: { kind: 'model', role: 'light', slot: 'code-simple', profile: null }, model: 'gpt-6.1-terra', provider: 'openai-codex', model_source: 'api' }
+  const reported = text(api.ExecutionRow({ row: modelRow }))
+  assert.match(reported, /모델 · 코드 · 간단/); assert.match(reported, /실행: gpt-6\.1-terra · openai-codex \(API 호출 기준\)/)
+  assert.doesNotMatch(reported, /실행: 미확인/)
+  assert.match(text(api.ExecutionRow({ row: { ...modelRow, model: null, provider: null } })), /아직 API 호출 보고 없음/)
+})
+test('model and provider stay one pair from one source; the roster model is never labelled as an API report', () => {
+  const api = load(), live = status => ({ subagents: [{ subagent_id: 'sa-0-native', delegation_id: 'deleg-native', status, model: 'primary-model' }] })
+  const data = snapshot(); data.rows[0] = { ...data.rows[0], status: 'running', model: 'spare-model', provider: 'spare-provider' }
+  const [hooked] = api.mergeExecutionRows(data, live('running'), 'claire')
+  assert.deepEqual([hooked.model, hooked.provider, hooked.model_source], ['spare-model', 'spare-provider', 'api'])
+  const queued = snapshot(); queued.rows[0] = { ...queued.rows[0], status: 'queued' }
+  const [rosterOnly] = api.mergeExecutionRows(queued, live('queued'), 'claire')
+  assert.deepEqual([rosterOnly.model, rosterOnly.provider, rosterOnly.model_source], ['primary-model', null, 'roster'])
+  const output = text(api.ExecutionLine({ row: rosterOnly }))
+  assert.match(output, /primary-model \(시작 시 배정/); assert.doesNotMatch(output, /API 호출 기준/)
+  const routed = snapshot(); routed.rows[0] = { ...routed.rows[0], observed: { kind: 'model', role: 'light', model: 'route-model', provider: 'route-provider', evidence: 'runtime_reported' } }
+  assert.deepEqual(api.mergeExecutionRows(routed, live('running'), 'claire').map(item => [item.model, item.provider, item.model_source])[0], ['route-model', 'route-provider', 'route'])
+})
+test('full-profile job controls and the profile-job guide stay reachable from the composer strip', () => {
+  const api = load(), job = { id: 'job-1', target_profile: 'wallace', status: 'running' }
+  const rows = [{ id: 'gateway:job-1', execution_mode: 'gateway', requested: { kind: 'profile', profile: 'wallace', role: null }, observed: unknown(), status: 'running', job }, row()]
+  const panel = []
+  const closed = api.ExecutionStrip({ rows, jobsPanel: () => { panel.push(1); return null } })
+  assert.ok(!closed.props.children[1].props.children.some(item => /전체 프로필 작업/.test(item?.props?.label || '')), 'a closed strip does not mount the guide')
+  const strip = api.ExecutionStrip({ rows, defaultOpen: true, jobControls: item => ({ type: 'Controls', props: { job: item.job } }), jobsPanel: () => { panel.push(1); return null } })
+  const items = strip.props.children[1].props.children
+  const gateway = items.find(item => item.props?.row?.id === 'gateway:job-1'), native = items.find(item => item.props?.row?.id === 'call:0')
+  assert.equal(gateway.props.controls.props.job, job); assert.equal(native.props.controls, null)
+  assert.ok(text(api.ExecutionLine({ row: rows[0], controls: { type: 'Controls', props: { children: 'JOB-CONTROLS' } } })).includes('JOB-CONTROLS'))
+  assert.ok(items.some(item => /전체 프로필 작업/.test(item.props?.label || '')))
+  assert.equal(panel.length, 0, 'the guide is not mounted (and issues no reads) until opened')
 })
 test('read-only roster uses public scoped RPCs and never create/activate/resume/cli/private data', async () => {
   const api = load(), calls = []
@@ -148,12 +213,12 @@ test('a foreign backend snapshot is unavailable rather than silently queried els
   const reply = await api.readExecutionSnapshot({ profileRoutes: async () => [route()], requestProfile: async (r, method) => { calls.push(r); return { ...snapshot(), origin_profile: 'wallace' } } }, scope())
   assert.equal(reply.available, false); assert.deepEqual(reply.rows, []); assert.equal(calls.length, 3)
 })
-test('registration contributes compact composer and panel only on a supported SDK, without reads/writes', () => {
+test('registration contributes the compact composer and no layout pane, without reads/writes', () => {
   const api = load(), contributions = [], settings = []
   api.pluginDefinition.register({ registerMany: rows => contributions.push(...rows), registerSettingsPage: page => settings.push(page) })
   assert.equal(contributions.find(item => item.id === 'execution-composer').area, 'composer.top')
-  assert.equal(contributions.find(item => item.id === 'execution-panel').area, 'panes')
-  assert.equal(contributions.find(item => item.id === 'execution-panel').data.placement, 'bottom')
+  // Closing a plugin's only pane disables the whole plugin in the host.
+  assert.deepEqual(contributions.filter(item => item.area === 'panes'), [])
   assert.equal(settings.length, 1); assert.deepEqual(api.reads, [])
 })
 test('compact and panel share a cache key, bounded query polling and lifecycle-owned invalidation', async () => {

@@ -3795,7 +3795,8 @@ function executionUnknown() { return { kind: 'unknown', role: null, profile: nul
 export function executionIdentity(value) {
   if (!value || typeof value !== 'object') return executionUnknown()
   if (value.kind === 'model' && ['heavy', 'light'].includes(value.role) && value.profile == null) {
-    return { kind: 'model', role: value.role, profile: null, evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
+    const slot = TASK_SLOTS.some(item => item.id === value.slot) ? value.slot : null
+    return { kind: 'model', role: value.role, profile: null, slot, evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
   }
   if (value.kind === 'profile' && typeof value.profile === 'string' && EXECUTION_PROFILE.test(value.profile) && value.role == null) {
     return { kind: 'profile', role: null, profile: value.profile, evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
@@ -3804,7 +3805,8 @@ export function executionIdentity(value) {
 }
 export function executionLabel(identity) {
   const known = executionIdentity(identity)
-  return known.kind === 'model' ? `모델 · ${known.role === 'heavy' ? 'Heavy' : 'Light'}` : known.kind === 'profile' ? `프로필 · ${known.profile}` : '실행 종류 미확인'
+  const slot = known.kind === 'model' && TASK_SLOTS.find(item => item.id === known.slot)
+  return known.kind === 'model' ? `모델 · ${slot ? slot.label : known.role === 'heavy' ? 'Heavy' : 'Light'}` : known.kind === 'profile' ? `프로필 · ${known.profile}` : '실행 종류 미확인'
 }
 function executionSafeText(value, limit = 256) {
   return typeof value === 'string' && value.length <= limit && value === value.trim() && !/[\x00-\x1f\x7f]/.test(value) ? value : null
@@ -3838,6 +3840,19 @@ function executionNativeCall(input) {
   // by stripping suffixes; new backends supply the explicit native call ID.
   return executionId(value) ? value : null
 }
+function executionModelPair(input, runtime) {
+  const api = executionSafeText(input.model)
+  if (api) return { model: api, provider: executionSafeText(input.provider), model_source: 'api' }
+  const route = executionSafeText(input.observed?.model)
+  if (route) return { model: route, provider: executionSafeText(input.observed?.provider), model_source: 'route' }
+  const roster = executionSafeText(runtime?.model)
+  return roster ? { model: roster, provider: null, model_source: 'roster' } : { model: null, provider: null, model_source: null }
+}
+const EXECUTION_MODEL_SOURCE = { api: 'API 호출 기준', route: '런타임 보고', roster: '시작 시 배정 · 예비 모델 전환 미반영' }
+function executionModelText(row) {
+  if (!row.model) return null
+  return `${row.model}${row.provider ? ` · ${row.provider}` : ''} (${EXECUTION_MODEL_SOURCE[row.model_source] || '보고된 모델'})`
+}
 export function mergeExecutionRows(snapshot, live, targetProfile) {
   if (!snapshot || snapshot.schema !== 1 || snapshot.origin_profile !== targetProfile || !Array.isArray(snapshot.rows)) return []
   const seen = new Set(), rows = [], correlatedLive = new Set()
@@ -3869,8 +3884,9 @@ export function mergeExecutionRows(snapshot, live, targetProfile) {
       delegation_id: executionId(input.delegation_id) ? input.delegation_id : null,
       async_unit_id: unitId, native_call_delegation_id: callId,
       conversation_id: input.conversation_id, parent_session_id: input.parent_session_id, task_index: input.task_index,
-      model: executionSafeText(!terminal && runtime?.model) || executionSafeText(input.model) || executionSafeText(input.observed?.model),
-      provider: executionSafeText(input.provider) || executionSafeText(input.observed?.provider), backend: executionSafeText(input.observed?.backend, 64),
+      // Keep model and provider as one pair from one source: the child's API-call hooks, then the
+      // route report, then the native roster's start-time assignment (which never sees a spare switch).
+      ...executionModelPair(input, terminal ? null : runtime), backend: executionSafeText(input.observed?.backend, 64),
       ...executionActivity(input, terminal ? null : runtime),
       updated_at: executionSeconds(input.updated_at) })
   }
@@ -3884,7 +3900,7 @@ export function mergeExecutionRows(snapshot, live, targetProfile) {
     liveSeen.add(id)
     rows.push({ id, execution_mode: 'native', requested: executionUnknown(), observed: executionUnknown(),
       status: nativeStatus(item.status), subagent_id: item.subagent_id, delegation_id: delegation, task_index: null,
-      model: executionSafeText(item.model), provider: null, backend: null, ...executionActivity({}, item) })
+      ...executionModelPair({}, item), backend: null, ...executionActivity({}, item) })
   }
   return rows.slice(0, 128)
 }
@@ -4334,7 +4350,10 @@ function executionActivityLabels(row) {
 }
 export function ExecutionRow({ row, bare = false }) {
   const observed = row.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
-  const identity = observed ? row.observed : row.requested
+  // A route label names the tier only; the requested slot stays the more specific name.
+  const identity = observed ? (row.observed.kind === 'model' && row.requested?.kind === 'model' ? { ...row.observed, slot: row.requested.slot } : row.observed) : row.requested
+  // The model the child's own API requests reported (runtime report, also when a spare model took over).
+  const runtimeModel = row.model ? `${row.model}${row.provider ? ` · ${row.provider}` : ''}` : null
   const activity = executionActivityLabels(row)
   return jsxs('article', { style: bare ? { ...executionStyles.row, border: 0, padding: 0 } : executionStyles.row, 'data-execution-row': row.id, children: [
     jsxs('div', { style: executionStyles.badges, children: [
@@ -4347,10 +4366,10 @@ export function ExecutionRow({ row, bare = false }) {
     row.terminal_conflict ? jsx('p', { style: styles.hint, children: '서로 다른 종료 정보가 확인되어 상태를 확정하지 않습니다.' }) :
       row.observation_gap ? jsx('p', { style: styles.hint, children: '현재 실행 목록에서 확인되지 않습니다. 완료로 판단하지 않으며, 최근 관찰 상태만 유지합니다.' }) : null,
     jsx('p', { style: styles.actual, children: observed ? '실행 정보: 런타임 보고 · 개별 API 응답의 모델 검증과는 다릅니다.' : '역할은 요청 기준입니다. 실행 상태·활동 정보와 실제 역할 확인은 별개입니다.' }),
-    row.model ? jsx('p', { style: styles.actual, children: `보고된 모델: ${row.model}${row.provider ? ` · ${row.provider}` : ''}` }) : null,
+    runtimeModel ? jsx('p', { style: styles.actual, children: `실행 모델: ${runtimeModel}` }) : null,
     jsxs('details', { style: executionStyles.details, children: [jsx('summary', { style: executionStyles.summary, children: '실행 식별 정보' }),
       jsx('div', { children: `요청: ${executionLabel(row.requested)}` }),
-      jsx('div', { children: `실행: ${observed ? executionLabel(row.observed) : '미확인'}` }),
+      jsx('div', { children: `실행: ${observed ? executionLabel(identity) + (runtimeModel ? ` · ${runtimeModel}` : '') : executionModelText(row) || '아직 API 호출 보고 없음'}` }),
       row.last_status ? jsx('div', { children: `최근 관찰 상태: ${EXECUTION_STATUS[row.last_status] || '상태 미확인'}` }) : null,
       row.backend ? jsx('div', { children: `방식: ${row.backend}` }) : null,
       row.subagent_id ? jsx('div', { children: `하위 작업: ${row.subagent_id}` }) : null,
@@ -4358,6 +4377,117 @@ export function ExecutionRow({ row, bare = false }) {
       row.child_session_id ? jsx('div', { children: `하위 작업 세션: ${row.child_session_id}` }) : null,
       row.job?.target_session_id ? jsx('div', { children: `작업 세션: ${row.job.target_session_id}` }) : null,
       row.job?.admission_id ? jsx('div', { children: `접수: ${row.job.admission_id}` }) : null
+    ] })
+  ] })
+}
+const EXECUTION_ACTIVE = new Set(['requested', 'dispatched', 'preparing', 'creating', 'submitting', 'queued', 'running', 'approval_wait', 'clarify_wait', 'stop_requested'])
+const EXECUTION_FAILED = new Set(['error', 'failed', 'timeout'])
+const EXECUTION_DONE = new Set(['completed', 'succeeded'])
+const EXECUTION_STOPPED = new Set(['interrupted', 'cancelled'])
+function executionStartedAt(row) { return executionSeconds(row.started_at) ?? executionSeconds(row.updated_at) ?? 0 }
+// Running work first (newest first), then finished work by most recent change.
+export function sortExecutionRows(rows) {
+  return (Array.isArray(rows) ? rows : []).map((row, index) => ({ row, index })).sort((a, b) => {
+    const activeA = EXECUTION_ACTIVE.has(a.row.status), activeB = EXECUTION_ACTIVE.has(b.row.status)
+    if (activeA !== activeB) return activeA ? -1 : 1
+    const timeA = activeA ? executionStartedAt(a.row) : executionSeconds(a.row.updated_at) ?? 0
+    const timeB = activeB ? executionStartedAt(b.row) : executionSeconds(b.row.updated_at) ?? 0
+    return timeB - timeA || b.index - a.index
+  }).map(item => item.row)
+}
+function executionShortLabel(row) {
+  const observed = row.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
+  const identity = executionIdentity(observed ? (row.observed.kind === 'model' && row.requested?.kind === 'model' ? { ...row.observed, slot: row.requested.slot } : row.observed) : row.requested)
+  if (identity.kind === 'profile') return `프로필 · ${identity.profile}`
+  if (identity.kind === 'model') return TASK_SLOTS.find(item => item.id === identity.slot)?.label || (identity.role === 'heavy' ? 'Heavy' : 'Light')
+  return row.execution_mode === 'gateway' ? '전체 프로필' : '종류 미확인'
+}
+function executionTime(row) {
+  if (EXECUTION_ACTIVE.has(row.status)) {
+    const started = executionSeconds(row.started_at), now = Date.now() / 1000
+    return started !== null && started <= now ? executionDuration(now - started) : null
+  }
+  return executionDuration(row.duration_seconds)
+}
+function executionStatusColor(status) {
+  return status === 'running' ? 'var(--ui-accent)' : EXECUTION_FAILED.has(status) ? 'var(--ui-red, var(--ui-text-primary))' : 'var(--ui-text-tertiary)'
+}
+const stripStyles = {
+  root: { minWidth: 0, width: '100%', boxSizing: 'border-box', padding: '0.3rem 0', color: 'var(--ui-text-secondary)', fontSize: '0.78rem', lineHeight: 1.45 },
+  summary: { cursor: 'pointer', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.3rem 0.6rem', minWidth: 0, listStyle: 'revert' },
+  counts: { color: 'var(--ui-text-primary)', fontWeight: 500, whiteSpace: 'nowrap' },
+  chip: { display: 'inline-flex', alignItems: 'center', gap: '0.35rem', minWidth: 0, maxWidth: '100%', padding: '0.05rem 0.45rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '999px', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
+  list: { display: 'flex', flexDirection: 'column', marginTop: '0.35rem', maxHeight: 'min(40vh, 20rem)', overflowY: 'auto', borderTop: '1px solid var(--ui-stroke-tertiary)' },
+  item: { minWidth: 0, borderBottom: '1px solid var(--ui-stroke-tertiary)' },
+  line: { cursor: 'pointer', display: 'grid', gridTemplateColumns: '4.6rem minmax(0, 1fr) auto', alignItems: 'baseline', columnGap: '0.6rem', padding: '0.3rem 0.15rem', listStyle: 'none' },
+  name: { minWidth: 0, display: 'flex', flexWrap: 'wrap', gap: '0 0.5rem', alignItems: 'baseline' },
+  model: { color: 'var(--ui-text-tertiary)', overflowWrap: 'anywhere' },
+  meta: { color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap', textAlign: 'end' },
+  body: { padding: '0.1rem 0.15rem 0.5rem 5.2rem', color: 'var(--ui-text-tertiary)', overflowWrap: 'anywhere', display: 'flex', flexDirection: 'column', gap: '0.1rem' }
+}
+function executionChip(row) {
+  const time = executionTime(row)
+  return jsxs('span', { style: stripStyles.chip, 'data-execution-chip': row.id, children: [
+    jsx('span', { 'aria-hidden': true, style: { color: executionStatusColor(row.status) }, children: '●' }),
+    [executionShortLabel(row), row.model, EXECUTION_ACTIVE.has(row.status) ? time : `${EXECUTION_STATUS[row.status] || '상태 미확인'}${time ? ` ${time}` : ''}`].filter(Boolean).join(' · ')
+  ] }, row.id)
+}
+export function ExecutionLine({ row, controls = null }) {
+  const time = executionTime(row), tools = executionCount(row.tool_count)
+  // Time and tool count are already on the line itself.
+  const activity = executionActivityLabels(row).filter(label => !/횟수 미관찰$|^도구 \d+회$|^경과:|^실행 시간:/.test(label))
+  const ids = [row.subagent_id && `하위 작업 ${row.subagent_id}`, row.delegation_id && `위임 ${row.delegation_id}`,
+    row.child_session_id && `세션 ${row.child_session_id}`, row.job?.target_session_id && `작업 세션 ${row.job.target_session_id}`].filter(Boolean)
+  return jsxs('details', { style: stripStyles.item, 'data-execution-row': row.id, children: [
+    jsxs('summary', { style: stripStyles.line, children: [
+      jsx('span', { role: 'status', 'data-execution-status': row.status, style: { color: executionStatusColor(row.status), whiteSpace: 'nowrap' }, children: EXECUTION_STATUS[row.status] || '상태 미확인' }),
+      jsxs('span', { style: stripStyles.name, children: [
+        jsx('span', { style: { color: 'var(--ui-text-primary)' }, children: executionShortLabel(row) }),
+        jsx('span', { style: stripStyles.model, children: row.model || (EXECUTION_ACTIVE.has(row.status) ? '모델 보고 전' : '모델 보고 없음') })
+      ] }),
+      jsx('span', { style: stripStyles.meta, children: [time, tools !== null ? `도구 ${tools}회` : null].filter(Boolean).join(' · ') })
+    ] }),
+    jsxs('div', { style: stripStyles.body, children: [
+      row.observation_gap ? jsx('div', { children: '현재 실행 목록에서 확인되지 않습니다. 완료로 판단하지 않습니다.' }) : null,
+      row.terminal_conflict ? jsx('div', { children: '서로 다른 종료 정보가 있어 상태를 확정하지 않습니다.' }) : null,
+      jsx('div', { children: `요청: ${executionLabel(row.requested)}${row.execution_mode === 'gateway' ? ' · 전체 프로필 작업' : ''}` }),
+      jsx('div', { children: `실행: ${executionModelText(row) || '아직 API 호출 보고 없음'}` }),
+      activity.length ? jsx('div', { children: activity.join(' · ') }) : null,
+      ids.length ? jsx('div', { children: ids.join(' · ') }) : null,
+      controls
+    ] })
+  ] })
+}
+// Mounts its content only while open, so a closed section issues no reads.
+function LazySection({ label, render }) {
+  const [open, setOpen] = useState(false)
+  return jsxs('details', { style: { padding: '0.35rem 0.15rem' }, onToggle: event => setOpen(Boolean(event.currentTarget?.open)), children: [
+    jsx('summary', { style: { cursor: 'pointer' }, children: label }), open ? render() : null] })
+}
+export function ExecutionStrip({ rows, unavailable, jobControls = null, jobsPanel = null, defaultOpen = false }) {
+  const sorted = sortExecutionRows(rows)
+  const active = sorted.filter(row => EXECUTION_ACTIVE.has(row.status))
+  const count = set => sorted.filter(row => set.has(row.status)).length
+  const completed = count(EXECUTION_DONE), failed = count(EXECUTION_FAILED), stopped = count(EXECUTION_STOPPED)
+  // Anything else (observation gap, conflicting terminal evidence, unknown) is never counted as done.
+  const unknown = sorted.length - active.length - completed - failed - stopped
+  const [open, setOpen] = useState(defaultOpen)
+  if (unavailable) return jsx('p', { style: { ...stripStyles.root, color: 'var(--ui-text-tertiary)' }, role: 'status', 'data-model-router-execution': 'compact', children: '서브에이전트 실행 정보를 읽을 수 없습니다.' })
+  if (!sorted.length) return null
+  const counts = [active.length ? `실행 중 ${active.length}` : null, completed ? `완료 ${completed}` : null, failed ? `오류 ${failed}` : null,
+    stopped ? `중단 ${stopped}` : null, unknown ? `미확인 ${unknown}` : null].filter(Boolean)
+  const chips = active.length ? active.slice(0, 2) : sorted.slice(0, 1)
+  return jsxs('details', { style: stripStyles.root, 'data-model-router-execution': 'compact', open,
+    onToggle: event => setOpen(Boolean(event.currentTarget?.open)), children: [
+    jsxs('summary', { style: stripStyles.summary, children: [
+      jsx('span', { style: stripStyles.counts, children: `서브에이전트 · ${counts.join(' · ')}` }),
+      ...chips.map(executionChip),
+      active.length > 2 ? jsx('span', { children: `외 ${active.length - 2}개` }) : null
+    ] }),
+    jsxs('div', { style: stripStyles.list, children: [
+      ...sorted.map(row => jsx(ExecutionLine, { row, controls: row.execution_mode === 'gateway' && row.job && jobControls ? jobControls(row) : null }, row.id)),
+      // A hidden guide must not keep its policy query alive: mount it only while the strip is open.
+      open && jobsPanel ? jsx(LazySection, { label: '전체 프로필 작업 · 허용 범위와 운영자 안내', render: jobsPanel }, 'profile-jobs') : null
     ] })
   ] })
 }
@@ -4373,11 +4503,12 @@ export function ExecutionPanel({ compact = false, ctx, observer } = {}) {
       rows.length ? jsx('div', { style: executionStyles.list, children: rows.map(row => !compact && row.execution_mode === 'gateway'
         ? jsx(ProfileJobControls, { job: row.job, scope, storage: ctx?.storage, fence, refresh: () => query.refetch() }, `${key}:${row.id}`)
         : jsx(ExecutionRow, { row }, row.id)) }) : jsx('p', { style: styles.hint, children: '확인된 실행 기록이 없습니다. 플러그인 로드 이전 작업은 종류가 확인되지 않을 수 있습니다.' })
-  if (compact) return jsxs('details', { style: executionStyles.compact, 'data-model-router-execution': 'compact', children: [
-    jsxs('summary', { style: executionStyles.summary, children: ['포커스 대화 · 실행 현황', data?.rows?.length ? ` · ${data.rows.length}개` : '',
-      ...(data?.rows || []).slice(0, 3).map(row => jsx('span', { style: { ...executionStyles.badge, marginInlineStart: '0.4rem' }, children: executionLabel(row.observed?.evidence === 'runtime_reported' ? row.observed : row.requested) }, row.id))] }),
-    content
-  ] })
+  // The composer strip stays out of the way: nothing while there is nothing to show.
+  if (compact) return !key || data?.reason === 'passive_origin_unavailable' || (query.isPending && !data) ? null :
+    jsx(ExecutionStrip, { rows: data?.rows || [], unavailable: query.isError || data?.available === false,
+      // Gateway profile-job controls lived in the removed pane; they now open from the job's own line.
+      jobControls: row => jsx(ProfileJobControls, { job: row.job, scope, storage: ctx?.storage, fence, refresh: () => query.refetch() }, `${key}:${row.id}`),
+      jobsPanel: () => jsx(ProfileJobsPanel, { ctx, scope, observer, executionData: data, refreshExecutions: () => query.refetch() }, key) })
   return jsxs('section', { style: executionStyles.panel, 'data-model-router-execution': 'panel', 'aria-label': '모델 라우터 실행 현황', children: [
     jsxs('header', { style: styles.sectionHeading, children: [jsx('h2', { style: styles.heading, children: '실행 현황' }),
       jsx(Button, { size: 'sm', variant: 'ghost', disabled: !key || query.isFetching, onClick: () => query.refetch(), children: '새로고침' })] }),
@@ -4462,13 +4593,15 @@ export function normalizeProfileJobs(reply, targetProfile, parentId) {
       completion_delivery: 'explicit_result', result_available: value.result_available === true,
       can_steer: value.can_steer === true, can_approve: false, can_deny: false, can_clarify: false,
       reason_code: /^[a-z0-9_]{1,80}$/.test(value.reason_code || '') ? value.reason_code : null, pending_request: prompt,
-      observed: executionIdentity(value.observed), model: executionSafeText(value.model), provider: executionSafeText(value.provider) })
+      observed: executionIdentity(value.observed), model: executionSafeText(value.model), provider: executionSafeText(value.provider),
+      created_at: executionSeconds(value.created_at), updated_at: executionSeconds(value.updated_at) })
   }
   return jobs
 }
 export function profileJobExecutionRow(job) {
   return { id: `gateway:${job.id}`, execution_mode: 'gateway', requested: { kind: 'profile', profile: job.target_profile, role: null },
-    observed: job.observed, status: job.status, task_index: null, model: job.model, provider: job.provider, job }
+    observed: job.observed, status: job.status, task_index: null, model: job.model, provider: job.provider, model_source: job.model ? 'route' : null,
+    started_at: job.created_at ?? null, updated_at: job.updated_at ?? null, job }
 }
 export async function profileJobsRequest(transport, scope, operation, payload = {}, isCurrent = () => true) {
   const allowed = { describe: [], list: [], control: ['job_id', 'operation', 'text'], result: ['job_id'] }
@@ -4672,7 +4805,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.11.0',
+  version: '0.11.1',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
@@ -4701,8 +4834,8 @@ export default {
     // Older SDKs keep settings usable without pretending to support a roster.
     if (typeof host.state?.activeSessionId?.get === 'function') {
       ctx.registerMany([
-        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ExecutionPanel, { compact: true, observer: executionObserver }) },
-        { id: 'execution-panel', area: 'panes', title: '실행 현황', data: { placement: 'bottom', height: '260px' }, render: () => jsx(ExecutionPanel, { ctx, observer: executionObserver }) }
+        // No layout pane: the host disables a single-pane plugin as a whole when that pane is closed.
+        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ExecutionPanel, { compact: true, ctx, observer: executionObserver }) }
       ])
     }
     ctx.registerMany([

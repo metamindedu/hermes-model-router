@@ -52,13 +52,13 @@ async function harness(){
   let closed=false
   const close=async()=>{if(closed)return;closed=true;await React.act(async()=>{for(const fn of disposers)fn();root.unmount()})}
   f.cleanups.push(close)
-  await React.act(async()=>root.render(jsx(QueryClientProvider,{client,children:jsxs(React.Fragment,{children:[contributions.find(value=>value.id==='execution-composer').render(),contributions.find(value=>value.id==='execution-panel').render()]})})))
+  await React.act(async()=>root.render(jsx(QueryClientProvider,{client,children:jsxs(React.Fragment,{children:[contributions.find(value=>value.id==='execution-composer').render(),]})})))
   return {close}
  }
  f.settle=async(parent,count=f.rows)=>{
   for(let i=0;i<100;i++){
    await f.tick()
-   if(f.queries('execution-active').some(query=>query.state.data?.scope_key===JSON.stringify(['local','observer',parent])&&query.state.data?.rows?.length===count)&&f.queries('profile-jobs-policy-active').some(query=>query.state.status==='success'&&query.state.data?.scope_key===JSON.stringify(['local','observer',parent])))return
+   if(f.queries('execution-active').some(query=>query.state.data?.scope_key===JSON.stringify(['local','observer',parent])&&query.state.data?.rows?.length===count))return
   }
   throw Error('actual consumers did not settle')
  }
@@ -80,7 +80,8 @@ test('real consumers retire obsolete DTOs on churn and disposal without clearing
   }
   assert.equal(f.queries('execution-active').reduce((count,query)=>count+query.state.data.rows.length,0),32)
   const retained={snapshots:f.queries('execution-active').length,policies:f.queries('profile-jobs-policy-active').length,rows:32}
-  assert.equal(f.visible(),64);assert.doesNotMatch(JSON.stringify(f.client.getQueryCache().getAll().map(query=>query.state.data)),/PRIVATE_CONSUMER_CANARY/)
+  // Only the composer strip remains (no layout pane), and it issues no profile-job policy reads.
+  assert.equal(f.visible(),32);assert.equal(retained.policies,0);assert.doesNotMatch(JSON.stringify(f.client.getQueryCache().getAll().map(query=>query.state.data)),/PRIVATE_CONSUMER_CANARY/)
   await instance.close();await f.tick()
   assert.equal(f.queries('execution-active').length,0);assert.equal(f.queries('profile-jobs-policy-active').length,0)
   assert.equal(f.listeners(),0);assert.equal(f.forbidden,0)
