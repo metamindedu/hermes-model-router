@@ -31,7 +31,8 @@ ROUTING_SKILL_IDS = frozenset({SKILL_NAME, "model-router:" + SKILL_NAME})
 
 PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 PROVIDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
-MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
+# A model ID may end in one bracketed variant tag, as Hermes catalogs declare (`claude-opus-5[1m]`).
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]{1,32}\])?\Z")
 EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 MODEL_ROLES = ("main", "delegation", "compression", "title")
 MODEL_KEYS = {

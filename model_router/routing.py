@@ -30,7 +30,7 @@ WORKER_PATH = Path(__file__).with_name("job_worker.py")
 TEMPLATE_CACHE_PATH = PLUGIN_ROOT / "lib" / "template-cache.json"
 PROFILE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 PROVIDER_TOKEN = PROFILE_TOKEN
-MODEL_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
+MODEL_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]{1,32}\])?\Z")
 ROUTING_PURPOSES = {
     "implementation": ("LIGHTWEIGHT", "implementation", "none"),
     "mechanical": ("LIGHTWEIGHT", "mechanical", "mechanical"),

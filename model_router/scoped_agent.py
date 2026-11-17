@@ -31,7 +31,7 @@ MAX_ERROR_CHARS = 600
 PROFILE_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 PARENT_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 PROVIDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}(?:\[[A-Za-z0-9._-]{1,32}\])?\Z")
 REASONING = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 REQUEST_FIELDS_V1 = frozenset({
     "schema", "attempt_id", "job_id", "profile", "home", "cwd", "source", "task_id",

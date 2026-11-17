@@ -12,6 +12,16 @@ const model = { provider: 'fixture', model: 'example', reasoning: 'high' }
 const slots = Object.fromEntries(ids.map(id => [id, { follow: 'main', custom: null }]))
 const routing = { enabled: true, heavy: { follow: 'main', custom: null }, light: { follow: 'delegation', custom: null }, fallback: { enabled: false, heavy: null, light: null } }
 
+test('a spare model ID may end in one bracketed variant tag, nothing looser', () => {
+  const start = source.indexOf('const nativePolicyEntryError')
+  const end = source.slice(start).search(/\r?\n}\r?\n/)
+  const body = source.slice(start, start + end) + '\n}'
+  const check = new Function(`${body}; return nativePolicyEntryError`)()
+  const policy = model => ({ mode: 'custom', chain: [{ provider: 'claude-subscription', model }] })
+  for (const model of ['claude-opus-5-5[1m]', 'vendor/model:tag[beta.2]', 'plain-model']) assert.equal(check(policy(model)), '', model)
+  for (const model of ['[1m]', 'model[]', 'model[1m]x', 'model[1m][2m]', 'model[1 m]', 'model]', 'model[1m']) assert.match(check(policy(model)), /제공자와 모델 ID/, model)
+})
+
 test('status is read in pages, joined only when every page describes the same state', async () => {
   const { readPagedStatus, STATUS_CHANGED_MESSAGE, STATUS_PAGE_LIMIT } = api
   const names = ['default', 'a', 'b', 'c', 'd']

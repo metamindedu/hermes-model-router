@@ -27,7 +27,7 @@ KEYS = (KEY_BACKEND, KEY_POLICY, KEY_PROFILES, KEY_AUTO_POLICY)
 ROLES = ("heavy", "light")
 _PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 _PROVIDER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
+_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]{1,32}\])?\Z")
 
 
 def _literal(value: Any, pattern: re.Pattern, label: str) -> str:

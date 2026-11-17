@@ -1977,7 +1977,7 @@ const nativePolicyEntryError = policy => {
     (policy.mode === 'off' && policy.chain.length) || (policy.mode === 'custom' && (!policy.chain.length || policy.chain.length > 5))) return '예비 모델 목록을 확인하세요.'
   const seen = new Set()
   for (const route of policy.chain) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(route.provider || '') || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(route.model || '')) return '예비 모델의 제공자와 모델 ID를 정확히 입력하세요.'
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(route.provider || '') || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]{1,32}\])?$/.test(route.model || '')) return '예비 모델의 제공자와 모델 ID를 정확히 입력하세요.'
     const key = `${route.provider.toLowerCase()}\0${route.model.toLowerCase()}`
     if (seen.has(key)) return '같은 예비 경로를 중복해서 넣을 수 없습니다.'
     seen.add(key)

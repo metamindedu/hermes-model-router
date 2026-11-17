@@ -20,7 +20,7 @@ except ModuleNotFoundError as exc:
 
 _PROFILE = re.compile(r'[a-z0-9][a-z0-9_-]{0,63}\Z')
 _PROVIDER = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*\Z')
-_MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]*\Z')
+_MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]{1,32}\])?\Z')
 AUTO_ROUTING_SUPPORTED = True
 ROLE_INTRO_INHERITANCE_SCHEMA = 1
 from .slots import BUILTIN_SLOTS, PURPOSE_ROLES, PURPOSE_SLOTS, SLOT_TIERS
