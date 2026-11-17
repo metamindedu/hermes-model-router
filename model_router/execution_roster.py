@@ -18,7 +18,7 @@ _SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}\Z", re.ASCII)
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+/-]{0,127}\Z", re.ASCII)
 _PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z", re.ASCII)
 _PURPOSES = {'implementation': 'light', 'mechanical': 'light', 'preliminary-review': 'light',
-             'plan': 'heavy', 'semantic-final': 'heavy', 'independent-review': 'heavy'}
+             'plan': 'heavy', 'semantic-final': 'heavy', 'independent-review': 'heavy', 'computer-use': 'light'}
 _BACKENDS = {'model-router', 'model-router-auto', 'model-router-profiles'}
 
 

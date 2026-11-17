@@ -93,7 +93,7 @@ function harness(initial = fixture()) {
   for (const match of source.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"][^'"]+['"]/g)) {
     for (const name of match[1].split(',').map(value => value.trim()).filter(Boolean)) imports[name] = name
   }
-  Object.assign(imports, { useState, useRef, useEffect, jsx, jsxs: jsx, host,
+  Object.assign(imports, { DesktopSDK: {}, useState, useRef, useEffect, jsx, jsxs: jsx, host,
     useValue: atom => atom.get(), useQuery: () => query })
   const executable = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
     .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
@@ -182,20 +182,18 @@ test('schema-1 legacy capability omission does not enable editing or bulk select
   }
   assert.equal(h.byId('timeout-target-claire').props.checked, false)
   assert.equal(h.byId('timeout-target-claire').props.disabled, true)
-  assert.match(text(h.tree()), /Light와 Heavy의 시간 제한을 따로 변경할 수 없습니다/)
+  assert.match(text(h.tree()), /짧은 작업과 긴 작업의 시간 제한을 따로 변경할 수 없습니다/)
 })
 
-test('routing defaults are explained while explicit opt-out controls stay inside closed advanced settings', () => {
+test('task routing can no longer be turned off here; profiles saved with it off are only offered a way back on', () => {
   const h = harness()
-  const advanced = h.byId('routing-activation-advanced')
-  assert.equal(advanced.type, 'details')
-  assert.notEqual(advanced.props.open, true)
-  const ids = [...walk(advanced)].map(node => node.props?.id)
-  assert.ok(ids.includes('routing-enabled'))
-  assert.ok(ids.includes('routing-profile-default'))
-  assert.match(text(h.tree()), /작업 분담이 기본으로 켜집니다/)
-  assert.match(text(h.tree()), /같은 모델/)
-  assert.equal(h.byId('routing-enabled').props.checked, true)
-  assert.equal(h.byId('routing-profile-default').props.checked, false)
+  for (const gone of ['routing-activation-advanced', 'routing-enabled', 'routing-profile-default']) assert.throws(() => h.byId(gone))
+  const notice = h.byId('routing-reenable')
+  assert.deepEqual([...walk(notice)].map(node => node.props?.id).filter(id => /^routing-reenable-(?!save)/.test(id || '')), ['routing-reenable-default', 'routing-reenable-other'])
+  assert.equal(h.byId('routing-reenable-default').props.checked, false)
+  assert.equal(h.byId('routing-reenable-save').props.disabled, true)
+  assert.match(text(notice), /이전에 꺼 두었거나 플러그인이 아직 준비되지 않은 프로필/)
+  assert.match(text(notice), /저장하지 않은 다른 편집이 있으면 그것부터 저장/)
+  assert.match(text(h.tree()), /작업 분담이 기본으로 켜지며/)
   assert.equal(h.calls.length, 0)
 })

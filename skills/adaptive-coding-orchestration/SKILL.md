@@ -40,17 +40,17 @@ Use the existing approved tool purposes without changing the plugin implementati
 
 ## Native routes (Hermes >=0.22.5)
 
-NEW work uses the real `delegate_task`, never `coding_route(action="start")`, a runner script, or a subprocess workaround. `coding_route(action="config")` reads effective Heavy/Light roles; it does NOT prove this session selected a native backend. The selected session tool schema must actually offer the fields below. If it does not, report that native backend selection and a supported session/tool rebuild are required; do not change settings, force a reload, or pretend wording selects Heavy.
+NEW work uses the real `delegate_task`, never `coding_route(action="start")`, a runner script, or a subprocess workaround. `coding_route(action="config")` reads the effective routes: a purpose runs on `config.slots[config.purpose_slots[purpose]]`, while `config.heavy` / `config.light` only describe slots the operator has never set and must not be compared with a reported route. It does NOT prove this session selected a native backend. The selected session tool schema must actually offer the fields below. If it does not, report that native backend selection and a supported session/tool rebuild are required; do not change settings, force a reload, or pretend wording selects Heavy.
 
 Three namespaced providers are available, with one active backend per session:
 
 | backend | per-task selector | behavior |
 |---|---|---|
-| `model-router` | required `purpose` | purpose selects operator-assigned Heavy/Light |
+| `model-router` | required `purpose` | purpose selects the operator-assigned model of its task slot |
 | `model-router-profiles` | allowlisted `profile`, or an explicit configured default | child runs with that profile's identity and policy |
 | `model-router-auto` | required `execution` and the matching `purpose` or `profile` selector | choose the current profile's purpose route OR an allowed profile per task |
 
-For the purpose backend, pass `tasks=[{"goal":"specific deliverable", "context":"complete bounded handoff", "purpose":"independent-review"}]`. Allowed Light purposes: `implementation`, `mechanical`, `preliminary-review`. Allowed Heavy purposes: `plan`, `semantic-final`, `independent-review`. This preserves fresh-context independent reviews; a purpose does not enforce a read-only OS sandbox. Read-only review remains a handoff/approval constraint.
+For the purpose backend, pass `tasks=[{"goal":"specific deliverable", "context":"complete bounded handoff", "purpose":"independent-review"}]`. Allowed Light purposes: `implementation`, `mechanical`, `preliminary-review`, `computer-use`. Allowed Heavy purposes: `plan`, `semantic-final`, `independent-review`. Heavy/Light here is the purpose's review class and runtime limit; the model is assigned per task slot: `plan` → design, `implementation` → complex code, `mechanical` → simple code, `preliminary-review` → simple verification, `semantic-final` / `independent-review` → complex verification, `computer-use` → operating a browser or desktop screen. Two slots may run on the same model or on different ones; never assume which from the purpose name. Use `computer-use` only for work whose substance is driving a screen (clicking, typing, reading rendered pages), not for code or review that merely mentions a browser; it grants no tool the parent lacks and is never a review. This preserves fresh-context independent reviews; a purpose does not enforce a read-only OS sandbox. Read-only review remains a handoff/approval constraint.
 
 For profile routing, `tasks=[{"goal":"specific deliverable", "context":"complete bounded handoff", "profile":"exact-allowlisted-name"}]`. Profile routing is NOT a Heavy adapter. A target name, description or persona is not model identity evidence or a substitute for required Heavy review. If Heavy review is required but this session only offers profile routing, leave the gate unmet unless exact actual route evidence establishes the configured Heavy identity. Do not switch backends silently.
 
@@ -74,7 +74,7 @@ Separate requested route, native runtime-reported `result.route`, response-obser
 
 ### Native fallback and total runtime
 
-Native purpose-route fallback is OFF by default (`fallback_providers: []`) to prevent inherited surprise costs. New per-role continuation policies require explicit selection/save and new exact-chain cost consent. Existing legacy fresh-task-rerun consent never authorizes continuing a native child. Never re-run a task in a different model after tools/partial results or on a missing result. Profile routes use the TARGET profile's own chain; an origin-side fallback cannot override it.
+Native purpose-route fallback is OFF by default (`fallback_providers: []`) to prevent inherited surprise costs. New per-slot continuation policies require explicit selection/save and new exact-chain cost consent. Existing legacy fresh-task-rerun consent never authorizes continuing a native child. Never re-run a task in a different model after tools/partial results or on a missing result. Profile routes use the TARGET profile's own chain; an origin-side fallback cannot override it.
 
 The three existing profile limits remain independent: ordinary/profile delegate total, Light total and Heavy total. Native purpose children use their exact role budget, not both ordinary and role timers. Defaults remain ordinary `0`, Light/Heavy `3600` seconds; actual settings may differ. UI units are minutes; native optional per-task `total_timeout_seconds` is seconds. Normally OMIT that override; use it only for a concrete user/external deadline. `0` disables only that task's plugin total; it does not disable request, iteration or native inactivity limits. Never invent a shorter cap for a small/read-only review.
 

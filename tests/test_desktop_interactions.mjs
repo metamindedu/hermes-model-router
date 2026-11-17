@@ -18,12 +18,21 @@ const routing = {
   light: { follow: 'delegation', custom: null },
   fallback: { enabled: false, heavy: null, light: null }
 }
+const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use']
+const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex'].includes(id) ? 'heavy' : 'light']))
+const offSlots = () => Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }]))
+// A never-saved slot is shown as what its tier resolves through: Heavy is custom here, Light follows delegation.
+const declarations = () => Object.fromEntries(slotIds.map(id => [id, slotTiers[id] === 'heavy'
+  ? { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') } : { follow: 'delegation', custom: null }]))
 const fixture = () => ({ revision: 7, current_profile: 'claire', recent_apply: null,
   readiness_context: { schema: 1, base_identity: 'd'.repeat(64), source_profile: 'claire', release: null },
+  slot_capabilities: { schema: 1, slots: slotIds, tiers: slotTiers, purposes: {}, follows: ['main', 'delegation', 'custom'], blocking_profiles: [] },
   profiles: ['default', 'claire', 'other'].map(name => ({ name, models: structuredClone(models),
     actual_models: structuredClone(models), routing: { ...structuredClone(routing), enabled: name === 'claire' }, drift: [],
+    slots: { schema: 1, capable: true, stored: [], declarations: declarations() },
     native_delegation: { schema: 1, supported: true, editable: true, backend: 'default', digest: 'a'.repeat(64),
       policy: { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } },
+      slot_policy: offSlots(), auto_slot_policy: offSlots(), policy_schema: 0, auto_policy_schema: 0, slot_policy_supported: true,
       profile_routes: { profiles: [], default: null }, role_intro_inheritance: { schema: 1, supported: true, code_identity: 'e'.repeat(64), activation: 'new_session_or_supported_rebuild' }, warnings: [] },
     role_intro: { schema: 1, state: 'available', default_description: `Role of ${name}`, default_source: 'profile_metadata', description_auto: false, digest: 'f'.repeat(64) } })) })
 function* walk(node) {
@@ -135,18 +144,14 @@ function setupStorage() {
   return { get(key, fallback = null) { return values.has(key) ? structuredClone(values.get(key)) : fallback }, set(key, value) { values.set(key, structuredClone(value)) } }
 }
 
-test('readiness-only refresh preserves dirty model/route drafts and manual or empty copy selections', async () => {
+test('readiness-only refresh preserves dirty model drafts and a manual target selection', async () => {
   const h = harness()
   h.input('model-main-model', 'keep-my-unsaved-model')
-  h.input('heavy-custom-model', 'keep-my-unsaved-heavy')
   h.click('model-target-none'); h.check('model-target-other', true)
-  h.click('routing-target-none')
   h.setStatusResponder(() => setupFixture())
   h.click('prepare-refresh'); await h.flush()
   assert.equal(h.byId('model-main-model').props.value, 'keep-my-unsaved-model')
-  assert.equal(h.byId('heavy-custom-model').props.value, 'keep-my-unsaved-heavy')
   assert.deepEqual(h.selected('model-target-'), ['other'])
-  assert.deepEqual(h.selected('routing-target-'), [])
   assert.deepEqual(h.selected('prepare-profile-'), [])
   assert.ok(h.byId('prepare-profile-future'))
   assert.deepEqual(h.calls.map(call => call.operation), ['status'])
@@ -170,7 +175,7 @@ test('real preparation controls make one explicit native install and preserve di
   const h = harness({ storage: setupStorage() }), snapshot = setupFixture(), nativeView = structuredClone(snapshot)
   h.setData(snapshot); h.render()
   h.input('model-main-model', 'unsaved-model-before-setup')
-  h.click('model-target-none'); h.check('model-target-other', true); h.click('routing-target-none')
+  h.click('model-target-none'); h.check('model-target-other', true)
   const route = { mode: 'local', primary: true, connectionId: 'local', profile: 'claire', targetProfile: 'claire' }
   const writes = [], nativeCalls = []
   h.host.profileRoutes = async () => { nativeCalls.push('profileRoutes'); return [route, { ...route, primary: undefined, profile: 'future', targetProfile: 'future' }] }
@@ -192,9 +197,9 @@ test('real preparation controls make one explicit native install and preserve di
   h.check('prepare-consent', true); h.click('prepare-run'); await h.flush(); await h.flush()
   assert.equal(writes.length, 1, `native calls: ${nativeCalls.join(', ')}; preparation view: ${text(h.byId('profile-preparation'))}`); assert.equal(writes[0].profile, 'future'); assert.equal(writes[0].force, false)
   assert.equal(h.byId('model-main-model').props.value, 'unsaved-model-before-setup')
-  assert.deepEqual(h.selected('model-target-'), ['other']); assert.deepEqual(h.selected('routing-target-'), [])
+  assert.deepEqual(h.selected('model-target-'), ['other'])
   assert.equal(h.calls.some(call => ['preview', 'apply'].includes(call.operation)), false)
-  assert.equal(h.byId('models-save').props.disabled, true)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
 })
 
 test('unmount during route lookup cancels before any native preparation RPC', async () => {
@@ -226,11 +231,11 @@ test('unmount stops the queue and a remounted page stays locked until owner-scop
   assert.equal(writes.length,1,'unmount must never queue the second target')
   assert.equal(storage.get('profile-preparation-safety-v1').pending.settled,true)
   const remounted=harness({storage});remounted.setData(nativeView);remounted.render()
-  assert.equal(remounted.byId('models-save').props.disabled,true,'a new page must not clear the mutation fence')
+  assert.equal(remounted.byId('model-main-model').props.disabled,true,'a new page must not clear the mutation fence')
   remounted.setRefetcher(async()=>({data:nativeView}))
   remounted.clickLabel('상태 새로고침');await remounted.flush()
   assert.equal(storage.get('profile-preparation-safety-v1').pending,null)
-  assert.equal(remounted.byId('models-save').props.disabled,false)
+  assert.equal(remounted.byId('model-main-model').props.disabled,false)
 })
 
 for (const phase of ['routes', 'initial-status', 'final-status']) {
@@ -268,158 +273,27 @@ for (const phase of ['routes', 'initial-status', 'final-status']) {
   })
 }
 
-test('editing Heavy with all profiles checked saves the exact bulk routing targets', async () => {
-  const h = harness()
-  h.check('routing-profile-default', true)
-  h.check('routing-profile-other', true)
-  h.input('heavy-custom-model', 'new-bulk-heavy')
-  h.click('global-save'); await h.flush()
-  const payload = h.calls.find(c => c.operation === 'preview').body
-  assert.deepEqual([...payload.routing_targets].sort(), ['claire', 'default', 'other'])
-  assert.equal(payload.routing.heavy.custom.model, 'new-bulk-heavy')
-})
-
-test('model-only save and enable-only save do not copy primary routing', async () => {
-  const h = harness()
-  h.check('routing-profile-other', true)
-  h.input('model-main-model', 'new-main-only')
-  h.click('global-save'); await h.flush()
-  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [])
-})
-
-test('routing copy targets are independent, explicit, and source is not implicit', async () => {
-  const h = harness()
-  h.click('routing-target-none')
-  h.check('routing-target-other', true)
-  assert.deepEqual(h.selected('routing-profile-'), ['claire'])
-  h.click('model-target-none')
-  h.click('global-save'); await h.flush()
-  const payload = h.calls.find(c => c.operation === 'preview').body
-  assert.deepEqual(payload.routing_targets, ['other'])
-  assert.deepEqual(payload.model_targets, [])
-  assert.deepEqual(payload.routing_profiles, ['claire'])
-})
-
-test('empty routing target blocks an edited route instead of falling back to source', async () => {
-  const h = harness()
-  h.click('routing-target-none')
-  h.input('heavy-custom-model', 'must-not-save-to-source')
-  h.click('global-save'); await h.flush()
-  assert.equal(h.calls.length, 0)
-  assert.equal(h.byId('global-save').props.disabled, false)
-})
-
-test('routing target selection persists but copy intent clears on source change and refresh', async () => {
-  const h = harness()
-  h.click('routing-target-none')
-  h.check('routing-target-other', true)
-  h.selectProfile('default')
-  assert.deepEqual(h.selected('routing-target-'), ['other'])
-  h.input('model-main-model', 'new-main')
-  h.click('global-save'); await h.flush()
-  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [])
-  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
-  h.click('routing-target-all')
-  h.click('global-save'); await h.flush()
-  assert.deepEqual([...h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets].sort(), ['claire', 'default', 'other'])
-  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
-  h.input('model-main-model', 'next-main')
-  h.click('global-save'); await h.flush()
-  assert.deepEqual(h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets, [])
-})
-
-test('reverting a primary edit cancels implicit copy and an empty unedited scope allows model-only save', async () => {
-  const h = harness()
-  h.input('heavy-custom-model', 'temporary-edit')
-  h.input('heavy-custom-model', 'independent-heavy')
-  h.click('routing-target-none')
-  h.input('model-main-model', 'model-only')
-  h.click('global-save'); await h.flush()
-  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [])
-})
-
-test('routing source-only target never widens when changing the loaded profile', async () => {
-  const h = harness()
-  h.click('routing-target-source')
-  assert.deepEqual(h.selected('routing-target-'), ['claire'])
-  h.selectProfile('other')
-  assert.deepEqual(h.selected('routing-target-'), ['claire'])
-  h.input('heavy-custom-model', 'other-route-copy')
-  h.click('global-save'); await h.flush()
-  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, ['claire'])
-})
-
-test('background status refresh cannot promote old routing copy intent to a newer revision', async () => {
-  const h = harness()
-  h.click('routing-target-all')
-  const staleSave = h.byId('global-save').props.onClick
-  const newer = structuredClone(h.data())
-  newer.revision++
-  newer.profiles.find(r => r.name === 'other').routing.heavy.custom.model = 'external-new-route'
-  h.setData(newer); h.render()
-  assert.equal(h.byId('global-save').props.disabled, true)
-  staleSave(); await h.flush()
-  assert.equal(h.calls.length, 0)
-  assert.deepEqual(h.selected('routing-target-'), ['claire', 'default', 'other'])
-  h.clickLabel('상태 새로고침'); await h.flush()
-  h.click('global-save'); await h.flush()
-  const payload = h.calls.find(c => c.operation === 'preview').body
-  assert.equal(payload.expected_revision, 8)
-  assert.deepEqual(payload.routing_targets, [])
-})
-
-test('background revision change blocks edited routing without discarding draft or rebasing it', async () => {
-  const h = harness()
-  h.input('heavy-custom-model', 'unsaved-old-edit')
-  h.setData({ ...structuredClone(h.data()), revision: 9 }); h.render()
-  assert.equal(h.byId('global-save').props.disabled, true)
-  assert.equal(h.byId('heavy-custom-model').props.value, 'unsaved-old-edit')
-  assert.equal(h.calls.length, 0)
-})
-
-test('status refresh during pending validation does not change captured targets/revision or duplicate apply', async () => {
-  const h = harness()
-  let release
-  h.setResponder(operation => operation === 'preview'
-    ? new Promise(resolve => { release = resolve }) : { status: 'applied', revision: 8 })
-  h.input('heavy-custom-model', 'captured-route')
-  h.click('global-save'); await h.flush()
-  const captured = structuredClone(h.calls[0].body)
-  h.setData({ ...structuredClone(h.data()), revision: 8 }); h.render()
-  release({ plan_id: 'captured-plan', changes: [] }); await h.flush()
-  assert.deepEqual(h.calls[0].body, captured)
-  assert.equal(captured.expected_revision, 7)
-  assert.deepEqual([...captured.routing_targets].sort(), ['claire', 'default', 'other'])
-  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
-})
-
-test('initial page selects every model target but preserves routing opt-in membership', () => {
-  const h = harness()
-  assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
-  assert.deepEqual(h.selected('routing-profile-'), ['claire'])
-  assert.equal(h.calls.length, 0)
-})
-
 test('preset click fills exact BAT models in draft only and does not alter custom routes', async () => {
   const h = harness()
   h.click('preset-non-openai')
   assert.equal(h.byId('model-main-model').props.value, 'mimo-v2.6-pro')
   assert.equal(h.byId('model-main-provider').props.value, 'xiaomi')
-  assert.equal(h.byId('model-main-reasoning').props.value, 'max')
+  assert.equal(h.selectValue('model-main-reasoning'), 'max')
   assert.equal(h.byId('model-title-model').props.value, 'deepseek-flash')
-  assert.equal(h.byId('model-title-reasoning').props.value, 'none')
+  assert.equal(h.selectValue('model-title-reasoning'), 'none')
   assert.equal(h.calls.length, 0)
   h.click('global-save'); await h.flush()
   const payload = h.calls.find(c => c.operation === 'preview').body
-  assert.deepEqual(payload.routing, routing)
+  assert.deepEqual(payload.routing, { ...routing, slots: declarations() })
   assert.deepEqual(payload.routing_profiles, ['claire'])
-  assert.deepEqual([...payload.model_targets].sort(), ['claire', 'default', 'other'])
+  assert.deepEqual(payload.model_targets, ['claire'])
+  assert.deepEqual(payload.routing_targets, [])
   assert.equal(payload.models.delegation.reasoning, 'max')
   assert.equal(payload.models.compression.reasoning, 'medium')
   h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
   h.click('preset-openai')
   for (const [role, fields] of Object.entries(models)) for (const [field, value] of Object.entries(fields))
-    assert.equal(h.byId(`model-${role}-${field}`).props.value, value)
+    assert.equal(field === 'reasoning' ? h.selectValue(`model-${role}-reasoning`) : h.byId(`model-${role}-${field}`).props.value, value)
   assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
 })
 
@@ -533,15 +407,14 @@ test('refresh failure with cached data does not unlock an ambiguous apply', asyn
   assert.equal(h.byId('preset-non-openai').props.disabled, true)
 })
 
-test('fresh connection/profile scope starts all-selected without leaking previous routing choices', () => {
+test('fresh connection/profile scope starts with its loaded profile only, without leaking previous choices', () => {
   const h = harness()
-  h.click('model-target-none')
+  h.click('model-target-all')
   h.state.connectionId.value = 'another-connection'
   h.state.profile.value = 'default'
   h.setData({ ...fixture(), current_profile: 'default' })
   h.render()
-  assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
-  assert.deepEqual(h.selected('routing-profile-'), ['claire'])
+  assert.deepEqual(h.selected('model-target-'), ['default'])
 })
 
 const autoFixture = () => {
@@ -561,20 +434,20 @@ test('automatic mode exposes both choices without writes and saves its own polic
   h.select('native-delegation-backend', 'model-router-auto')
   assert.deepEqual(h.calls, [])
   assert.match(text(h.byId('native-auto-explanation')), /기본 모델·추론 설정/)
-  assert.match(text(h.byId('native-auto-explanation')), /필수 Heavy 검수는 모델 경로/)
-  assert.equal(h.selectValue('native-heavy-fallback-mode'), 'off')
+  assert.match(text(h.byId('native-auto-explanation')), /필수 검수는 슬롯 모델/)
+  assert.equal(h.selectValue('slot-design-fallback-mode'), 'off')
   assert.throws(() => h.selectValue('native-profile-default'))
   h.check('native-profile-other', true)
   h.check('native-profile-access-consent', true)
-  h.select('native-heavy-fallback-mode', 'custom')
-  h.input('native-heavy-provider-0', 'new')
-  h.input('native-heavy-model-0', 'auto-spare')
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', 'new')
+  h.input('slot-design-spare-model-0', 'auto-spare')
   h.setResponder(operation => operation === 'delegation-preview' ? { plan_id: 'auto-plan', changes: [] } : { status: 'applied' })
-  h.click('native-delegation-save'); await h.flush()
+  h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
   const update = h.calls[0].body.updates[0]
   assert.equal(update.backend, 'model-router-auto')
-  assert.deepEqual(update.policy.heavy.chain, [{ provider: 'new', model: 'auto-spare' }])
+  assert.deepEqual(update.slot_policy.design.chain, [{ provider: 'new', model: 'auto-spare' }])
   assert.equal(update.allow_additional_cost, true)
   assert.equal(update.allow_profile_access, true)
   assert.deepEqual(update.profile_routes, { profiles: [{ name: 'other', description: '' }], default: null })
@@ -587,9 +460,9 @@ test('automatic bulk save preserves each hidden ordinary-profile default', async
   }
   const h = harness({ data })
   h.select('native-delegation-backend', 'model-router-auto')
-  h.click('native-target-all')
+  h.click('model-target-all')
   h.setResponder(operation => operation === 'delegation-preview' ? { plan_id: 'auto-plan', changes: [] } : { status: 'applied' })
-  h.click('native-delegation-save'); await h.flush()
+  h.click('model-section-save'); await h.flush()
   for (const update of h.calls[0].body.updates) {
     assert.equal(update.profile_routes.default, data.profiles.find(row => row.name === update.profile).native_delegation.profile_routes.default)
     assert.equal(update.allow_profile_access, false)
@@ -599,41 +472,48 @@ test('automatic bulk save preserves each hidden ordinary-profile default', async
 test('old backend capability cannot save automatic mode', () => {
   const h = harness()
   h.select('native-delegation-backend', 'model-router-auto')
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
-  assert.match(text(h.byId('native-delegation-settings')), /통합 선택을 지원하지 않습니다/)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  assert.match(text(h.byId('model-section-targets')), /claire: .*통합 선택을 지원하지 않습니다/)
   assert.deepEqual(h.calls, [])
 })
 
 test('automatic and model-only spare drafts stay independent when switching modes', () => {
   const h = harness({ data: autoFixture() })
   h.select('native-delegation-backend', 'model-router-auto')
-  h.select('native-heavy-fallback-mode', 'custom')
-  h.input('native-heavy-provider-0', 'auto-provider')
-  h.input('native-heavy-model-0', 'auto-model')
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', 'auto-provider')
+  h.input('slot-design-spare-model-0', 'auto-model')
   h.select('native-delegation-backend', 'model-router')
-  assert.equal(h.selectValue('native-heavy-fallback-mode'), 'off')
+  assert.equal(h.selectValue('slot-design-fallback-mode'), 'off')
   h.select('native-delegation-backend', 'model-router-auto')
-  assert.equal(h.byId('native-heavy-model-0').props.value, 'auto-model')
+  assert.equal(h.byId('slot-design-spare-model-0').props.value, 'auto-model')
   assert.deepEqual(h.calls, [])
 })
 
-test('native backend selection is draft-only; explicit save uses its own frozen scope', async () => {
+test('backend selection is draft-only; one save writes the method first and the model edit second', async () => {
   const h = harness()
   h.select('native-delegation-backend', 'model-router')
   assert.deepEqual(h.calls, [])
-  h.input('model-main-model', 'unrelated-unsaved-model')
-  h.setResponder(operation => operation === 'delegation-preview'
-    ? { plan_id: 'native-plan', changes: [{ profile: 'claire', field: 'delegation.backend' }], warnings: [] }
-    : { status: 'applied', revision: 7 })
-  h.click('native-delegation-save'); await h.flush()
-  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
+  h.input('model-main-model', 'edited-main-model')
+  h.setResponder(nativeReply)
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), CHAIN)
   const body = h.calls[0].body
   assert.deepEqual(Object.keys(body).sort(), ['expected_revision', 'updates'])
   assert.equal(body.updates.length, 1)
   assert.equal(body.updates[0].profile, 'claire')
   assert.equal(body.updates[0].backend, 'model-router')
-  assert.deepEqual(body.updates[0].policy.heavy, { mode: 'off', chain: [] })
-  assert.equal(JSON.stringify(body).includes('unrelated-unsaved-model'), false)
+  assert.equal(Object.hasOwn(body.updates[0], 'policy'), false)
+  assert.deepEqual(body.updates[0].slot_policy, offSlots())
+  assert.equal(JSON.stringify(body).includes('edited-main-model'), false)
+  // The store plan validated before the native apply is not the one applied afterwards.
+  assert.deepEqual(h.calls[1].body, h.calls[4].body)
+  assert.equal(h.calls[4].body.save_scope, 'models')
+  assert.equal(h.calls[4].body.models.main.model, 'edited-main-model')
+  assert.deepEqual(h.calls[4].body.model_targets, ['claire'])
+  assert.equal(h.calls[4].body.expected_revision, 7)
+  assert.deepEqual(h.calls[3].body, { plan_id: 'native-batch-plan' })
+  assert.deepEqual(h.calls[5].body, { plan_id: 'store-plan' })
 })
 
 test('profile execution grants start empty and do not follow model-copy targets', async () => {
@@ -648,23 +528,25 @@ test('profile execution grants start empty and do not follow model-copy targets'
   h.setResponder(operation => operation === 'delegation-preview'
     ? { plan_id: 'native-plan', changes: [{ profile: 'claire', field: 'delegation.backends.model-router-profiles' }], warnings: [] }
     : { status: 'applied', revision: 7 })
-  h.click('native-delegation-save'); await h.flush()
+  h.click('model-section-save'); await h.flush()
   const update = h.calls[0].body.updates[0]
   assert.deepEqual(update.profile_routes, { profiles: [{ name: 'other', description: 'Read-only evidence collection' }], default: 'other' })
   assert.equal(update.allow_profile_access, true)
   assert.equal(update.profile, 'claire')
 })
 
-test('native settings do not leak into model-only or whole-page saves', async () => {
-  for (const id of ['models-save', 'global-save']) {
-    const h = harness()
-    h.select('native-delegation-backend', 'model-router-profiles')
-    h.check('native-profile-other', true)
-    h.click(id); await h.flush()
-    assert.equal(h.calls[0].operation, 'preview')
-    assert.equal(JSON.stringify(h.calls[0].body).includes('model-router-profiles'), false)
-    assert.equal(Object.hasOwn(h.calls[0].body, 'updates'), false)
-  }
+test('the whole-page save never carries the delegation method; the model section save does', async () => {
+  const h = harness()
+  h.select('native-delegation-backend', 'model-router-profiles')
+  h.click('global-save'); await h.flush()
+  assert.equal(h.calls[0].operation, 'preview')
+  assert.equal(JSON.stringify(h.calls[0].body).includes('model-router-profiles'), false)
+  assert.equal(Object.hasOwn(h.calls[0].body, 'updates'), false)
+  const g = harness()
+  g.select('native-delegation-backend', 'model-router-profiles')
+  g.setResponder(nativeReply); g.click('model-section-save'); await g.flush()
+  assert.deepEqual(g.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
+  assert.equal(g.calls[0].body.updates[0].backend, 'model-router-profiles')
 })
 
 test('native save never retries an ambiguous write and shares the global save lock', async () => {
@@ -675,13 +557,13 @@ test('native save never retries an ambiguous write and shares the global save lo
     if (operation === 'apply') throw new Error('write outcome unknown')
     return new Promise(resolve => { resolvePlan = resolve })
   })
-  const staleSave = h.byId('native-delegation-save').props.onClick
-  h.click('native-delegation-save'); staleSave(); h.render()
+  const staleSave = h.byId('model-section-save').props.onClick
+  h.click('model-section-save'); staleSave(); h.render()
   assert.equal(h.calls.length, 1)
   assert.equal(h.byId('global-save').props.disabled, true)
   resolvePlan({ plan_id: 'native-plan', changes: [], warnings: [] }); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
 })
 
 test('changing origin profile while native preview is pending never applies a stale plan', async () => {
@@ -689,7 +571,7 @@ test('changing origin profile while native preview is pending never applies a st
   h.select('native-delegation-backend', 'model-router')
   let resolvePlan
   h.setResponder(() => new Promise(resolve => { resolvePlan = resolve }))
-  h.click('native-delegation-save')
+  h.click('model-section-save')
   h.state.connectionId.value = 'different-origin'; h.render()
   resolvePlan({ plan_id: 'stale-native-plan', changes: [], warnings: [] }); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview'])
@@ -698,11 +580,11 @@ test('changing origin profile while native preview is pending never applies a st
 test('native draft never adopts a newer query digest with an unchanged canonical revision', () => {
   const h = harness()
   h.select('native-delegation-backend', 'model-router')
-  const retained = h.byId('native-delegation-save').props.onClick
+  const retained = h.byId('model-section-save').props.onClick
   const newer = structuredClone(h.data())
   newer.profiles.find(row => row.name === 'claire').native_delegation.digest = 'b'.repeat(64)
   h.setData(newer); h.render()
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
   retained(); h.render()
   assert.deepEqual(h.calls, [], 'a retained handler must not dispatch against a changed native baseline')
 })
@@ -715,92 +597,107 @@ const nativeBatchFixture = () => {
   })
   return data
 }
-const nativeReply = operation => operation === 'delegation-preview'
-  ? { plan_id: 'native-batch-plan', changes: [], warnings: [] }
-  : { status: 'applied', revision: 7 }
+const nativeReply = operation => operation === 'delegation-preview' ? { plan_id: 'native-batch-plan', changes: [], warnings: [] }
+  : operation === 'preview' ? { plan_id: 'store-plan', changes: [], warnings: [] } : { status: 'applied', revision: 7 }
+// A hand-picked target list is copy intent for the whole section: the delegation method first, then the models.
+const CHAIN = ['delegation-preview', 'preview', 'status', 'apply', 'preview', 'apply']
 
-test('consumer native card separates configured primary models from optional spare switching', () => {
+test('each slot shows its own editable model next to its spare switching, following the unsaved draft', () => {
   const h = harness({ data: nativeBatchFixture() })
+  assert.throws(() => h.byId('slot-design-follow'), 'the default method has no slot cards')
+  assert.match(text(h.byId('native-default-explanation')), /작업 위임/)
   h.select('native-delegation-backend', 'model-router')
-  assert.equal(text(h.byId('native-heavy-primary-model')), 'independent-heavy')
-  assert.equal(text(h.byId('native-light-primary-model')), models.delegation.model)
-  assert.match(text(h.byId('native-heavy-fallback-explanation')), /기본 모델은 그대로 사용/)
+  assert.equal(h.selectValue('slot-design-follow'), 'custom')
+  assert.equal(h.byId('slot-design-model').props.value, 'independent-heavy')
+  assert.equal(h.selectValue('slot-code-complex-follow'), 'delegation')
+  assert.equal(text(h.byId('slot-code-complex-resolved')), models.delegation.model)
+  for (const id of slotIds) assert.equal(h.selectValue(`slot-${id}-fallback-mode`), 'off')
   const copy = text(h.byId('native-delegation-settings'))
   assert.match(copy, /다른 모델로 전환하지 않음/)
-  assert.doesNotMatch(copy, /delegate_task|purpose|백엔드|도구 재구성|revision|CAS|SOUL|자식 대화/)
-  h.input('model-delegation-model', 'unrelated-unsaved-light')
-  assert.equal(text(h.byId('native-light-primary-model')), models.delegation.model)
+  assert.match(copy, /간단한 작업은 메인 모델이 직접 처리/)
+  assert.doesNotMatch(copy, /Heavy|Light|delegate_task|purpose|백엔드|도구 재구성|revision|CAS|SOUL|자식 대화/)
+  h.input('model-delegation-model', 'unsaved-delegation-model')
+  assert.equal(text(h.byId('slot-code-complex-resolved')), 'unsaved-delegation-model')
+  assert.deepEqual(h.calls, [])
 })
 
-test('native targets start with the loaded profile and are independent of other target lists', () => {
+test('one target list starts with the loaded profile and widens only by an explicit choice', () => {
   const h = harness({ data: nativeBatchFixture() })
-  assert.deepEqual(h.selected('native-target-'), ['claire'])
-  h.click('model-target-none'); h.click('routing-target-none')
-  assert.deepEqual(h.selected('native-target-'), ['claire'])
-  h.click('native-target-all')
-  assert.deepEqual(h.selected('native-target-'), ['claire', 'default', 'other'])
-  assert.deepEqual(h.selected('model-target-'), [])
-  assert.deepEqual(h.selected('routing-target-'), [])
+  assert.deepEqual(h.selected('model-target-'), ['claire'])
+  assert.throws(() => h.byId('routing-target-all')); assert.throws(() => h.byId('native-target-all'))
+  h.click('model-target-all')
+  assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
+  h.click('model-target-source')
+  assert.deepEqual(h.selected('model-target-'), ['claire'])
   assert.deepEqual(h.calls, [])
 })
 
 test('native bulk save carries every target own frozen digest and no unrelated model/time payload', async () => {
   const h = harness({ data: nativeBatchFixture() })
   h.select('native-delegation-backend', 'model-router')
-  h.click('native-target-all')
-  h.select('native-heavy-fallback-mode', 'custom')
-  h.input('native-heavy-provider-0', 'spare-service')
-  h.input('native-heavy-model-0', 'spare/model')
-  h.input('model-main-model', 'keep-unsaved-main')
-  assert.match(text(h.byId('native-save-summary')), /default.*claire.*other/)
+  h.click('model-target-all')
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', 'spare-service')
+  h.input('slot-design-spare-model-0', 'spare/model')
+  h.input('model-main-model', 'bulk-main')
+  assert.match(text(h.byId('model-section-summary')), /default.*claire.*other/)
+  assert.match(text(h.byId('model-section-summary')), /예비 모델을 둔 슬롯 1개/)
   assert.match(text(h.byId('native-delegation-settings')), /추가 비용|비용이 늘/)
   h.setResponder(nativeReply)
-  h.click('native-delegation-save'); await h.flush()
-  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status', 'apply'])
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), CHAIN)
   const updates = h.calls[0].body.updates
   assert.deepEqual(updates.map(row => row.profile), ['default', 'claire', 'other'])
   assert.deepEqual(updates.map(row => row.expected_digest), ['a', 'b', 'c'].map(c => c.repeat(64)))
   for (const update of updates) {
-    assert.deepEqual(update.policy.heavy, { mode: 'custom', chain: [{ provider: 'spare-service', model: 'spare/model' }] })
+    assert.deepEqual(update.slot_policy.design, { mode: 'custom', chain: [{ provider: 'spare-service', model: 'spare/model' }] })
     assert.equal(update.allow_additional_cost, true)
     assert.equal(update.allow_profile_access, false)
   }
-  assert.equal(JSON.stringify(h.calls[0].body).includes('keep-unsaved-main'), false)
+  assert.equal(JSON.stringify(h.calls[0].body).includes('bulk-main'), false)
   assert.equal(Object.hasOwn(h.calls[0].body, 'timeout_updates'), false)
-  assert.equal(h.byId('model-main-model').props.value, 'keep-unsaved-main')
+  // Role models and the untouched slot declarations follow in one store plan for the same targets.
+  const store = h.calls[4].body
+  assert.equal(Object.hasOwn(store, 'save_scope'), false)
+  assert.equal(store.models.main.model, 'bulk-main')
+  assert.deepEqual(store.model_targets, ['default', 'claire', 'other'])
+  assert.deepEqual(store.routing_targets, ['default', 'claire', 'other'])
+  assert.deepEqual(store.routing.slots, declarations())
+  assert.deepEqual(store.routing.heavy, routing.heavy); assert.deepEqual(store.routing.light, routing.light)
+  assert.deepEqual(store.routing_profiles, ['default', 'claire', 'other'])
+  assert.equal(Object.hasOwn(store, 'timeout_updates'), false)
 })
 
 test('native empty/subset selection survives source changes and explicit status refresh without widening', async () => {
   const h = harness({ data: nativeBatchFixture() })
-  h.click('native-target-none')
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  h.click('model-target-none')
   h.selectProfile('default')
-  assert.deepEqual(h.selected('native-target-'), [])
-  h.check('native-target-other', true)
+  assert.deepEqual(h.selected('model-target-'), [])
+  h.check('model-target-other', true)
   h.selectProfile('claire')
-  assert.deepEqual(h.selected('native-target-'), ['other'])
+  assert.deepEqual(h.selected('model-target-'), ['other'])
   h.clickLabel('상태 새로고침'); await h.flush()
-  assert.deepEqual(h.selected('native-target-'), ['other'])
+  assert.deepEqual(h.selected('model-target-'), ['other'])
   const newData = structuredClone(h.data())
   newData.profiles.push({ ...structuredClone(newData.profiles[0]), name: 'new-profile' })
   h.setData(newData); h.render()
-  assert.deepEqual(h.selected('native-target-'), ['other'])
+  assert.deepEqual(h.selected('model-target-'), ['other'])
 })
 
 test('native source without manual targets follows the explicitly loaded profile only', () => {
   const h = harness({ data: nativeBatchFixture() })
   h.selectProfile('default')
-  assert.deepEqual(h.selected('native-target-'), ['default'])
+  assert.deepEqual(h.selected('model-target-'), ['default'])
   h.selectProfile('other')
-  assert.deepEqual(h.selected('native-target-'), ['other'])
+  assert.deepEqual(h.selected('model-target-'), ['other'])
 })
 
 test('native role save preserves each target hidden profile access rather than copying source allowlist', async () => {
   const data = nativeBatchFixture()
   data.profiles[2].native_delegation.profile_routes = { profiles: [{ name: 'default', description: 'retain account access' }], default: 'default' }
   const h = harness({ data })
-  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
-  h.setResponder(nativeReply); h.click('native-delegation-save'); await h.flush()
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   const other = h.calls[0].body.updates.find(row => row.profile === 'other')
   assert.deepEqual(other.profile_routes, data.profiles[2].native_delegation.profile_routes)
   assert.equal(other.allow_profile_access, false)
@@ -824,23 +721,23 @@ test('profile roles inherit native intro without making an input or copying it o
 test('untouched descriptions retain each save origin and explicit edit propagates only its row', async () => {
   const data = nativeBatchFixture()
   for (const [index, row] of data.profiles.entries()) row.native_delegation.profile_routes = { profiles: [{ name: 'other', description: `Own description ${index}` }], default: null }
-  const h = harness({ data }); h.select('native-delegation-backend', 'model-router-profiles'); h.click('native-target-all')
-  h.setResponder(nativeReply); h.click('native-delegation-save'); await h.flush()
+  const h = harness({ data }); h.select('native-delegation-backend', 'model-router-profiles'); h.click('model-target-all')
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   for (const update of h.calls[0].body.updates) assert.equal(update.profile_routes.profiles[0].description, data.profiles.find(row => row.name === update.profile).native_delegation.profile_routes.profiles[0].description)
-  const g = harness({ data }); g.select('native-delegation-backend', 'model-router-profiles'); g.click('native-target-all')
-  g.input('native-profile-description-other', 'Explicit new override'); g.setResponder(nativeReply); g.click('native-delegation-save'); await g.flush()
+  const g = harness({ data }); g.select('native-delegation-backend', 'model-router-profiles'); g.click('model-target-all')
+  g.input('native-profile-description-other', 'Explicit new override'); g.setResponder(nativeReply); g.click('model-section-save'); await g.flush()
   for (const update of g.calls[0].body.updates) assert.equal(update.profile_routes.profiles[0].description, 'Explicit new override')
 })
 
 test('legacy origin refuses new inheritance but permits old blank, removal or explicit override', async () => {
   const data = fixture(); delete data.profiles[1].native_delegation.role_intro_inheritance
   const h = harness({ data }); h.select('native-delegation-backend', 'model-router-profiles'); h.check('native-profile-other', true); h.check('native-profile-access-consent', true)
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
-  h.click('native-profile-role-custom-other'); h.input('native-profile-description-other', 'Manual role'); assert.equal(h.byId('native-delegation-save').props.disabled, false)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  h.click('native-profile-role-custom-other'); h.input('native-profile-description-other', 'Manual role'); assert.equal(h.byId('model-section-save').props.disabled, false)
   const existing = fixture(); delete existing.profiles[1].native_delegation.role_intro_inheritance
   existing.profiles[1].native_delegation.profile_routes = { profiles: [{ name: 'other', description: '' }], default: null }
-  const g = harness({ data: existing }); g.select('native-delegation-backend', 'model-router-profiles'); assert.equal(g.byId('native-delegation-save').props.disabled, false)
-  g.check('native-profile-other', false); assert.equal(g.byId('native-delegation-save').props.disabled, false)
+  const g = harness({ data: existing }); g.select('native-delegation-backend', 'model-router-profiles'); assert.equal(g.byId('model-section-save').props.disabled, false)
+  g.check('native-profile-other', false); assert.equal(g.byId('model-section-save').props.disabled, false)
 })
 
 function roleContext() { return { schema: 1, owner: { profile: 'claire', base_identity: 'd'.repeat(64) }, target_profile: 'other',
@@ -878,11 +775,11 @@ test('native profile-mode bulk save preserves each target hidden spare policy', 
   data.profiles[2].native_delegation.policy.light = { mode: 'custom', chain: [{ provider: 'existing-service', model: 'existing-spare' }] }
   const h = harness({ data })
   h.select('native-delegation-backend', 'model-router-profiles')
-  h.click('native-target-all')
+  h.click('model-target-all')
   h.check('native-profile-other', true)
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
   h.check('native-profile-access-consent', true)
-  h.setResponder(nativeReply); h.click('native-delegation-save'); await h.flush()
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   assert.equal(h.calls[0].body.updates.length, 3)
   const other = h.calls[0].body.updates.find(row => row.profile === 'other')
   assert.deepEqual(other.policy, data.profiles[2].native_delegation.policy)
@@ -893,66 +790,72 @@ test('expanding native save targets resets account-access confirmation', () => {
   const h = harness({ data: nativeBatchFixture() })
   h.select('native-delegation-backend', 'model-router-profiles')
   h.check('native-profile-other', true); h.check('native-profile-access-consent', true)
-  h.click('native-target-all')
+  h.click('model-target-all')
   assert.equal(h.byId('native-profile-access-consent').props.checked, false)
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
 })
 
 test('native non-source stale digest blocks save and retained callbacks without silently rebasing', () => {
   const h = harness({ data: nativeBatchFixture() })
-  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
-  const save = h.byId('native-delegation-save').props.onClick
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
+  const save = h.byId('model-section-save').props.onClick
   const next = structuredClone(h.data())
   next.profiles[0].native_delegation.digest = 'd'.repeat(64)
   h.setData(next); h.render()
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
   save(); h.render()
   assert.deepEqual(h.calls, [])
-  h.check('native-target-default', false)
-  assert.equal(h.byId('native-delegation-save').props.disabled, false)
+  h.check('model-target-default', false)
+  assert.equal(h.byId('model-section-save').props.disabled, false)
 })
 
 test('native target changes during preview prevent apply even when global revision is unchanged', async () => {
   const h = harness({ data: nativeBatchFixture() })
-  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
   let release
   h.setResponder(() => new Promise(resolve => { release = resolve }))
-  h.click('native-delegation-save')
+  h.click('model-section-save')
   const next = structuredClone(h.data()); next.profiles[2].native_delegation.digest = 'd'.repeat(64)
   h.setData(next); h.render()
   release({ plan_id: 'stale-target-plan', changes: [], warnings: [] }); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview'])
 })
 
-test('native disappeared or newly uneditable selected target blocks the complete batch', () => {
-  for (const change of ['remove', 'readonly']) {
-    const h = harness({ data: nativeBatchFixture() })
-    h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
-    const next = structuredClone(h.data())
-    if (change === 'remove') next.profiles = next.profiles.filter(row => row.name !== 'other')
-    else next.profiles[2].native_delegation.editable = false
-    h.setData(next); h.render()
-    assert.equal(h.byId('native-delegation-save').props.disabled, true)
-    assert.deepEqual(h.calls, [])
-  }
+test('a selected target that disappears is dropped; one that cannot take the method is skipped in the open', async () => {
+  const gone = harness({ data: nativeBatchFixture() })
+  gone.select('native-delegation-backend', 'model-router'); gone.click('model-target-all')
+  const fewer = structuredClone(gone.data()); fewer.profiles = fewer.profiles.filter(row => row.name !== 'other')
+  gone.setData(fewer); gone.render()
+  assert.deepEqual(gone.selected('model-target-'), ['claire', 'default'])
+  const h = harness({ data: nativeBatchFixture() })
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
+  const next = structuredClone(h.data()); next.profiles[2].native_delegation.editable = false
+  h.setData(next); h.render()
+  assert.match(text(h.byId('model-section-skipped')), /other/)
+  assert.match(text(h.byId('model-section-targets')), /맡기는 방식과 예비 모델은 적용하지 않습니다\. 이 프로필은 설정을 변경할 수 없습니다/)
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls[0].body.updates.map(row => row.profile), ['default', 'claire'])
+  assert.deepEqual(h.calls[4].body.model_targets, ['default', 'claire', 'other'])
 })
 
 test('native all-selected never enables a profile saved with role routing disabled', async () => {
   const data = nativeBatchFixture(); data.profiles[2].routing.enabled = false
   const h = harness({ data })
-  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
-  assert.deepEqual(h.selected('native-target-'), ['claire', 'default'])
-  h.setResponder(nativeReply); h.click('native-delegation-save'); await h.flush()
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
+  assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
+  assert.match(text(h.byId('model-section-targets')), /적용하지 않습니다\. 이 프로필의 작업 분담이 꺼져 있습니다/)
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls[0].body.updates.map(row => row.profile), ['default', 'claire'])
   assert.equal(JSON.stringify(h.calls[0].body).includes('routing_profiles'), false)
+  assert.deepEqual(h.calls[4].body.routing_profiles, ['default', 'claire'], 'saving models never turns routing back on')
 })
 
 test('native preview resolving after page unmount cannot start an apply', async () => {
   const h = harness({ data: nativeBatchFixture() })
-  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
   let release
   h.setResponder(() => new Promise(resolve => { release = resolve }))
-  h.click('native-delegation-save'); h.unmount()
+  h.click('model-section-save'); h.unmount()
   release({ plan_id: 'unmounted-plan', changes: [], warnings: [] }); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview'])
 })
@@ -960,17 +863,17 @@ test('native preview resolving after page unmount cannot start an apply', async 
 test('native ambiguous apply remains locked after page remount until explicit reconciliation', async () => {
   const storage = setupStorage(), data = nativeBatchFixture()
   const h = harness({ storage, data })
-  h.select('native-delegation-backend', 'model-router'); h.click('native-target-all')
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
   h.setResponder(operation => { if (operation === 'apply') throw new Error('unknown write'); return nativeReply(operation) })
-  h.click('native-delegation-save'); await h.flush(); h.unmount()
+  h.click('model-section-save'); await h.flush(); h.unmount()
   const next = harness({ storage, data })
-  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.equal(next.byId('model-main-model').props.disabled, true)
   assert.deepEqual(next.calls, [])
   next.clickLabel('실제 상태 확인 후 편집 재개'); await next.flush()
-  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.equal(next.byId('model-main-model').props.disabled, true)
   next.check('native-save-recovery-confirm', true)
   next.click('native-save-recover'); await next.flush()
-  assert.equal(next.byId('native-delegation-save').props.disabled, false)
+  assert.equal(next.byId('model-main-model').props.disabled, false)
 })
 
 test('native pending write from a disposed page is manual-only, not a permanent unrecoverable lock', async () => {
@@ -978,14 +881,14 @@ test('native pending write from a disposed page is manual-only, not a permanent 
   const owner = harness({ storage, data })
   owner.select('native-delegation-backend', 'model-router')
   owner.setResponder(operation => operation === 'apply' ? new Promise(() => {}) : nativeReply(operation))
-  owner.click('native-delegation-save'); await owner.flush(); owner.unmount()
+  owner.click('model-section-save'); await owner.flush(); owner.unmount()
   const next = harness({ storage, data })
-  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.equal(next.byId('model-main-model').props.disabled, true)
   assert.equal(next.byId('native-save-recovery-confirm').props.checked, false)
   assert.deepEqual(next.calls, [])
   next.check('native-save-recovery-confirm', true)
   next.click('native-save-recover'); await next.flush()
-  assert.equal(next.byId('native-delegation-save').props.disabled, false)
+  assert.equal(next.byId('model-main-model').props.disabled, false)
   assert.deepEqual(next.calls, [], 'reconciliation reads status only; it never retries the old write')
 })
 
@@ -994,13 +897,13 @@ test('native unresolved write cannot be cleared from a different connection to t
   const owner = harness({ storage, data })
   owner.select('native-delegation-backend', 'model-router')
   owner.setResponder(operation => { if (operation === 'apply') throw new Error('unknown write'); return nativeReply(operation) })
-  owner.click('native-delegation-save'); await owner.flush(); owner.unmount()
+  owner.click('model-section-save'); await owner.flush(); owner.unmount()
   const next = harness({ storage, data })
   next.state.connectionId.value = 'different-view-of-same-root'; next.render()
-  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.equal(next.byId('model-main-model').props.disabled, true)
   assert.throws(() => next.byId('native-save-recovery-confirm'))
   next.clickLabel('실제 상태 확인 후 편집 재개'); await next.flush()
-  assert.equal(next.byId('native-delegation-save').props.disabled, true)
+  assert.equal(next.byId('model-main-model').props.disabled, true)
   assert.deepEqual(next.calls, [])
 })
 
@@ -1009,11 +912,11 @@ test('native unresolved record does not lock an unrelated verified root', async 
   const owner = harness({ storage, data })
   owner.select('native-delegation-backend', 'model-router')
   owner.setResponder(operation => { if (operation === 'apply') throw new Error('unknown write'); return nativeReply(operation) })
-  owner.click('native-delegation-save'); await owner.flush(); owner.unmount()
+  owner.click('model-section-save'); await owner.flush(); owner.unmount()
   const foreign = nativeBatchFixture(); foreign.readiness_context.base_identity = 'e'.repeat(64)
   const next = harness({ storage, data: foreign })
   next.state.connectionId.value = 'other-root-connection'; next.render()
-  assert.equal(next.byId('native-delegation-save').props.disabled, false)
+  assert.equal(next.byId('model-main-model').props.disabled, false)
   assert.deepEqual(next.calls, [])
 })
 
@@ -1098,7 +1001,7 @@ test('native malformed saved mutation record is not interpreted as permission to
   const storage = setupStorage()
   storage.set('native-settings-save-fences-v1', { '["local","claire","open"]': { state: 'unknown' } })
   const h = harness({ storage, data: nativeBatchFixture() })
-  assert.equal(h.byId('native-delegation-save').props.disabled, true)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
   assert.deepEqual(h.calls, [])
 })
 
@@ -1106,13 +1009,13 @@ for (const changed of ['excluded-source', 'selected-target', 'root']) {
   test(`native preview rechecks uncached server ${changed} state before apply`, async () => {
     const h = harness({ data: nativeBatchFixture() })
     h.select('native-delegation-backend', 'model-router')
-    h.click('native-target-none'); h.check('native-target-other', true)
+    h.click('model-target-none'); h.check('model-target-other', true)
     const fresh = structuredClone(h.data())
     if (changed === 'root') fresh.readiness_context.base_identity = 'e'.repeat(64)
     else fresh.profiles.find(row => row.name === (changed === 'excluded-source' ? 'claire' : 'other')).native_delegation.digest = 'f'.repeat(64)
     h.setResponder(nativeReply); h.setStatusResponder(() => fresh)
-    h.click('native-delegation-save'); await h.flush()
-    assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status'])
+    h.click('model-section-save'); await h.flush()
+    assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'preview', 'status'])
     assert.deepEqual(h.calls[0].body.updates.map(row => row.profile), ['other'])
     assert.notDeepEqual(h.data(), fresh, 'fresh validation must not silently rebase query/drafts')
   })
@@ -1122,7 +1025,7 @@ test('native fresh status failure cannot dispatch apply', async () => {
   const h = harness({ data: nativeBatchFixture() })
   h.select('native-delegation-backend', 'model-router')
   h.setResponder(nativeReply); h.setStatusResponder(() => { throw new Error('status unavailable') })
-  h.click('native-delegation-save'); await h.flush()
+  h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status'])
 })
 
@@ -1132,7 +1035,7 @@ for (const change of ['unmount', 'leave-and-return']) {
     h.select('native-delegation-backend', 'model-router')
     let release
     h.setResponder(nativeReply); h.setStatusResponder(() => new Promise(resolve => { release = resolve }))
-    h.click('native-delegation-save'); await h.flush()
+    h.click('model-section-save'); await h.flush()
     assert.equal(typeof release, 'function')
     if (change === 'unmount') h.unmount()
     else { h.state.connectionId.value = 'elsewhere'; h.render(); h.state.connectionId.value = 'local'; h.render() }
@@ -1140,3 +1043,428 @@ for (const change of ['unmount', 'leave-and-return']) {
     assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'status'])
   })
 }
+
+// ---- Task slots: per-slot models, per-slot spare models, one save -------------
+const slotFixture = () => {
+  const data = nativeBatchFixture()
+  for (const row of data.profiles) row.native_delegation.backend = 'model-router'
+  return data
+}
+
+test('slot basis switching edits the draft only: custom is pre-filled from the followed model and cleared when leaving', () => {
+  const h = harness({ data: slotFixture() })
+  assert.equal(h.selectValue('slot-code-complex-follow'), 'delegation')
+  h.select('slot-code-complex-follow', 'custom')
+  assert.equal(h.byId('slot-code-complex-model').props.value, models.delegation.model)
+  assert.equal(h.byId('slot-code-complex-provider').props.value, models.delegation.provider)
+  assert.equal(h.selectValue('slot-code-complex-reasoning'), models.delegation.reasoning)
+  h.input('slot-code-complex-model', 'strong-coder')
+  h.select('slot-code-complex-follow', 'main')
+  assert.throws(() => h.byId('slot-code-complex-model'))
+  assert.equal(text(h.byId('slot-code-complex-resolved')), models.main.model)
+  h.select('slot-code-complex-follow', 'custom')
+  assert.equal(h.byId('slot-code-complex-model').props.value, models.main.model, 'a discarded custom route is not resurrected')
+  assert.deepEqual(h.calls, [])
+})
+
+test('a slot-only change is one routing-scoped store save carrying all six slots and the untouched tier pair', async () => {
+  const h = harness({ data: slotFixture() })
+  h.select('slot-computer-use-follow', 'custom')
+  h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
+  assert.match(text(h.byId('model-section-summary')), /작업 슬롯 모델\(직접 지정 3개\)/)
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['preview', 'apply'])
+  const body = h.calls[0].body
+  assert.equal(body.save_scope, 'routing')
+  assert.deepEqual(Object.keys(body.routing.slots), slotIds)
+  assert.deepEqual(body.routing.slots['computer-use'], { follow: 'custom', custom: route('screen-service', 'screen-model', models.delegation.reasoning) })
+  assert.deepEqual(body.routing.slots.design, declarations().design)
+  assert.deepEqual(body.routing.heavy, routing.heavy); assert.deepEqual(body.routing.light, routing.light)
+  assert.deepEqual(body.routing_targets, ['claire'])
+  assert.deepEqual(body.model_targets, [])
+  assert.deepEqual(body.routing_profiles, ['default', 'claire', 'other'])
+})
+
+test('an incomplete custom slot or an empty target list blocks the save before any request', () => {
+  const h = harness({ data: slotFixture() })
+  h.select('slot-verify-simple-follow', 'custom'); h.input('slot-verify-simple-model', '')
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  assert.match(text(h.byId('model-section-targets')), /검증 · 간단: 모델을 선택하세요/)
+  h.input('slot-verify-simple-model', 'quick-check')
+  assert.equal(h.byId('model-section-save').props.disabled, false)
+  h.click('model-target-none')
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  assert.match(text(h.byId('model-section-targets')), /적용 대상이 0개입니다/)
+  assert.deepEqual(h.calls, [])
+})
+
+test('slot models are read-only and left out of every store body while another installed profile cannot read them', async () => {
+  const data = slotFixture(); data.slot_capabilities.blocking_profiles = ['other']
+  const h = harness({ data })
+  assert.match(text(h.byId('slot-blocked-note')), /other/)
+  assert.equal(h.byId('slot-design-model').props.disabled, true)
+  assert.equal(h.byId('slot-design-fallback-mode') && h.selectValue('slot-design-fallback-mode'), 'off')
+  h.input('model-main-model', 'still-editable'); h.click('model-target-all')
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  const store = h.calls.filter(call => call.operation === 'preview').at(-1).body
+  assert.equal(store.save_scope, 'models')
+  assert.equal(Object.hasOwn(store.routing, 'slots'), false)
+  const g = harness({ data }); g.input('model-main-model', 'whole-page'); g.click('global-save'); await g.flush()
+  assert.equal(Object.hasOwn(g.calls[0].body.routing, 'slots'), false)
+})
+
+test('a profile whose plugin predates slots shows no slot cards and keeps its stored two-role spare policy', async () => {
+  const data = slotFixture(); delete data.slot_capabilities
+  for (const row of data.profiles) {
+    delete row.slots
+    for (const key of ['slot_policy', 'auto_slot_policy', 'policy_schema', 'auto_policy_schema', 'slot_policy_supported']) delete row.native_delegation[key]
+  }
+  data.profiles[1].native_delegation.policy.heavy = { mode: 'custom', chain: [{ provider: 'kept', model: 'kept-spare' }] }
+  const h = harness({ data })
+  assert.match(text(h.byId('slot-update-note')), /업데이트/)
+  assert.throws(() => h.byId('slot-design-follow'))
+  h.select('native-delegation-backend', 'model-router-auto'); h.select('native-delegation-backend', 'model-router-profiles')
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  const update = h.calls[0].body.updates[0]
+  assert.equal(Object.hasOwn(update, 'slot_policy'), false)
+  assert.deepEqual(update.policy, data.profiles[1].native_delegation.policy)
+  assert.equal(update.allow_additional_cost, true)
+})
+
+test('copying slot spare models refuses nothing silently: an older target is skipped by name and keeps its own policy', async () => {
+  const data = slotFixture(); data.profiles[2].native_delegation.slot_policy_supported = false
+  const h = harness({ data })
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+  h.click('model-target-all')
+  assert.match(text(h.byId('model-section-skipped')), /other/)
+  assert.match(text(h.byId('model-section-targets')), /슬롯별 예비 모델을 지원하지 않습니다/)
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  const updates = h.calls[0].body.updates
+  assert.deepEqual(updates.map(row => row.profile), ['default', 'claire'])
+  for (const update of updates) {
+    assert.deepEqual(update.slot_policy.design, { mode: 'custom', chain: [{ provider: 'spare-service', model: 'spare/model' }] })
+    assert.deepEqual(update.slot_policy['code-complex'], { mode: 'off', chain: [] })
+    assert.equal(Object.hasOwn(update, 'policy'), false)
+    assert.equal(update.allow_additional_cost, true)
+  }
+})
+
+test('a non-model method leaves every target spare policy in its stored shape', async () => {
+  const data = slotFixture()
+  data.profiles[0].native_delegation.policy_schema = 2
+  data.profiles[0].native_delegation.slot_policy.design = { mode: 'custom', chain: [{ provider: 'own', model: 'own-slot-spare' }] }
+  data.profiles[2].native_delegation.policy_schema = 1
+  data.profiles[2].native_delegation.policy.light = { mode: 'custom', chain: [{ provider: 'own', model: 'own-role-spare' }] }
+  const h = harness({ data })
+  h.select('native-delegation-backend', 'default'); h.click('model-target-all')
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  const byName = Object.fromEntries(h.calls[0].body.updates.map(row => [row.profile, row]))
+  assert.deepEqual(byName.default.slot_policy, data.profiles[0].native_delegation.slot_policy)
+  assert.equal(Object.hasOwn(byName.default, 'policy'), false)
+  assert.deepEqual(byName.other.policy, data.profiles[2].native_delegation.policy)
+  assert.equal(Object.hasOwn(byName.other, 'slot_policy'), false)
+  assert.deepEqual(byName.claire.policy, data.profiles[1].native_delegation.policy)
+})
+
+test('either preview failing stops the chain before anything is written', async () => {
+  for (const failing of ['delegation-preview', 'preview']) {
+    const h = harness({ data: slotFixture() })
+    h.select('slot-design-fallback-mode', 'custom')
+    h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+    h.input('model-main-model', 'edited-main')
+    h.setResponder(operation => { if (operation === failing) throw new Error('validation refused'); return nativeReply(operation) })
+    h.click('model-section-save'); await h.flush()
+    assert.equal(h.calls.some(call => call.operation === 'apply'), false)
+    assert.deepEqual(h.calls.map(call => call.operation), failing === 'preview' ? ['delegation-preview', 'preview'] : ['delegation-preview'])
+    assert.match(text(h.byId('model-section-targets')), /저장되지 않았습니다\. validation refused/)
+    assert.equal(h.byId('model-main-model').props.value, 'edited-main', 'the draft survives a refused save')
+    assert.equal(h.byId('model-section-save').props.disabled, false)
+  }
+})
+
+test('a store failure after the native apply is reported as partial, names both halves and is never retried', async () => {
+  for (const stage of ['second-preview', 'second-apply']) {
+    const h = harness({ data: slotFixture() })
+    h.select('slot-design-fallback-mode', 'custom')
+    h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+    h.input('model-main-model', 'edited-main')
+    let previews = 0, applies = 0
+    h.setResponder(operation => {
+      if (operation === 'preview' && ++previews === 2 && stage === 'second-preview') throw new Error('store changed meanwhile')
+      if (operation === 'apply' && ++applies === 2) throw new Error('transport lost')
+      return nativeReply(operation)
+    })
+    h.click('model-section-save'); await h.flush()
+    assert.deepEqual(h.calls.map(call => call.operation), stage === 'second-preview' ? CHAIN.slice(0, 5) : CHAIN)
+    const outcome = text(h.render())
+    assert.match(outcome, /일부 설정만 적용되었을 수 있습니다/)
+    assert.match(outcome, /‘맡기는 방식과 예비 모델’: 저장했습니다\./)
+    assert.match(outcome, stage === 'second-preview' ? /‘모델 변경’: 저장하지 않았습니다\..*\(사유: store changed meanwhile\)/ : /‘모델 변경’: 저장 결과를 확인할 수 없습니다\..*\(사유: transport lost\)/)
+    assert.doesNotMatch(outcome, /은\(는\)/)
+    assert.equal(h.byId('model-main-model').props.disabled, true, 'editing stays locked until the real state is reloaded')
+    const before = h.calls.length
+    h.byId('model-section-save').props.onClick?.(); await h.flush()
+    assert.equal(h.calls.length, before)
+  }
+})
+
+test('a partial native receipt ends the chain: the store save is not attempted', async () => {
+  const h = harness({ data: slotFixture() })
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+  h.input('model-main-model', 'edited-main')
+  h.setResponder(operation => operation === 'apply' ? { status: 'partial', applied: [], remaining: [{ profile: 'claire', key: 'delegation.backend' }] } : nativeReply(operation))
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'preview', 'status', 'apply'])
+  assert.match(text(h.render()), /일부 설정만 적용되었을 수 있습니다/)
+  assert.match(text(h.render()), /‘모델 변경’ 저장은 시작하지 않았습니다/)
+  // The same is said when the native apply itself is lost.
+  const g = harness({ data: slotFixture() })
+  g.select('slot-design-fallback-mode', 'custom')
+  g.input('slot-design-spare-provider-0', 'spare-service'); g.input('slot-design-spare-model-0', 'spare/model')
+  g.input('model-main-model', 'edited-main')
+  g.setResponder(operation => { if (operation === 'apply') throw new Error('transport lost'); return nativeReply(operation) })
+  g.click('model-section-save'); await g.flush()
+  assert.deepEqual(g.calls.map(call => call.operation), ['delegation-preview', 'preview', 'status', 'apply'])
+  assert.match(text(g.render()), /적용 결과를 확인할 수 없습니다/)
+  assert.match(text(g.render()), /transport lost ‘모델 변경’ 저장은 시작하지 않았습니다/)
+})
+
+test('profiles with task routing off get a separate re-enable save that changes membership only', async () => {
+  const quiet = harness({ data: slotFixture() })
+  assert.throws(() => quiet.byId('routing-reenable'), 'no notice while every profile has routing on')
+  assert.throws(() => quiet.byId('routing-enabled')); assert.throws(() => quiet.byId('routing-profile-claire'))
+  const data = fixture(); data.profiles[1].native_delegation.backend = 'model-router'
+  const h = harness({ data })
+  assert.deepEqual([...walk(h.byId('routing-reenable'))].filter(node => node.type === 'Checkbox').map(node => node.props.id), ['routing-reenable-default', 'routing-reenable-other'])
+  assert.equal(h.byId('routing-reenable-save').props.disabled, true)
+  h.check('routing-reenable-other', true)
+  h.select('slot-code-simple-follow', 'main'); h.input('model-main-model', 'unsaved-main')
+  h.click('routing-reenable-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['preview', 'apply'])
+  const body = h.calls[0].body
+  assert.equal(body.save_scope, 'routing')
+  assert.deepEqual(body.routing_profiles, ['claire', 'other'])
+  assert.deepEqual(body.routing_targets, [])
+  assert.equal(Object.hasOwn(body.routing, 'slots'), false)
+  assert.deepEqual(body.routing.heavy, routing.heavy); assert.deepEqual(body.routing.light, routing.light)
+  assert.equal(body.routing.enabled, true)
+  assert.deepEqual(body.model_targets, [])
+  assert.equal(JSON.stringify(body).includes('unsaved-main'), false)
+  const g = harness({ data })
+  g.check('routing-reenable-other', true); g.input('model-main-model', 'model-only')
+  g.click('model-section-save'); await g.flush()
+  assert.deepEqual(g.calls[0].body.routing_profiles, ['claire'], 'the model save never changes membership')
+})
+
+test('a review slot on the same model as complex code says so without blocking the save', () => {
+  const h = harness({ data: slotFixture() })
+  assert.throws(() => h.byId('slot-verify-same-model-note'))
+  h.select('slot-code-complex-follow', 'custom')
+  h.input('slot-code-complex-provider', 'operator'); h.input('slot-code-complex-model', 'independent-heavy')
+  assert.match(text(h.byId('slot-verify-same-model-note')), /같은 모델/)
+  assert.equal(h.byId('model-section-save').props.disabled, false)
+})
+
+// ---- Copy intent and stale-state locks for the one target list -----------------
+test('a hand-picked target list persists, but its copy intent ends with a profile change or a reload', async () => {
+  const h = harness({ data: slotFixture() })
+  h.click('model-target-none'); h.check('model-target-other', true)
+  h.selectProfile('default')
+  assert.deepEqual(h.selected('model-target-'), ['other'])
+  h.input('model-main-model', 'new-main')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [], 'slot models are not copied without an edit or a fresh choice')
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  h.click('model-target-all')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets, ['default', 'claire', 'other'])
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  h.input('model-main-model', 'next-main')
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets, [])
+})
+
+test('reverting a slot edit cancels its implicit copy: the save is role models only', async () => {
+  const h = harness({ data: slotFixture() })
+  h.input('slot-design-model', 'temporary-edit'); h.input('slot-design-model', 'independent-heavy')
+  h.input('model-main-model', 'model-only')
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['preview', 'apply'])
+  assert.equal(h.calls[0].body.save_scope, 'models')
+  assert.deepEqual(h.calls[0].body.routing_targets, [])
+})
+
+test('a background revision change locks the save, keeps the draft and never promotes old copy intent', async () => {
+  const h = harness({ data: slotFixture() })
+  h.input('slot-design-model', 'unsaved-old-edit'); h.click('model-target-all')
+  const staleSave = h.byId('model-section-save').props.onClick
+  const newer = structuredClone(h.data()); newer.revision++
+  h.setData(newer); h.render()
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  assert.equal(h.byId('global-save').props.disabled, true)
+  assert.equal(h.byId('slot-design-model').props.value, 'unsaved-old-edit')
+  staleSave(); await h.flush()
+  assert.equal(h.calls.length, 0)
+  assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
+  h.clickLabel('상태 새로고침'); await h.flush()
+  // The wide list is still ticked, but with no edit and no fresh choice there is nothing to save.
+  assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  assert.match(text(h.byId('model-section-summary')), /바뀐 내용이 없어 저장할 것이 없습니다/)
+  h.byId('model-section-save').props.onClick?.(); await h.flush()
+  assert.equal(h.calls.length, 0)
+  h.click('global-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'preview').body
+  assert.equal(body.expected_revision, 8)
+  assert.deepEqual(body.model_targets, [], 'a list that merely persisted copies no role models')
+  assert.deepEqual(body.routing_targets, [])
+})
+
+test('a status refresh during pending validation changes neither the captured targets nor the revision, and applies once', async () => {
+  const h = harness({ data: slotFixture() })
+  let release
+  h.setResponder(operation => operation === 'preview' ? new Promise(resolve => { release = resolve }) : { status: 'applied', revision: 8 })
+  h.input('slot-design-model', 'captured-route'); h.click('model-target-all')
+  h.click('global-save'); await h.flush()
+  const captured = structuredClone(h.calls[0].body)
+  h.setData({ ...structuredClone(h.data()), revision: 8 }); h.render()
+  release({ plan_id: 'captured-plan', changes: [] }); await h.flush()
+  assert.deepEqual(h.calls[0].body, captured)
+  assert.equal(captured.expected_revision, 7)
+  assert.deepEqual(captured.routing_targets, ['default', 'claire', 'other'])
+  assert.equal(captured.routing.slots.design.custom.model, 'captured-route')
+  assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
+})
+
+test('a source-only target list never widens when another profile is loaded', async () => {
+  const h = harness({ data: slotFixture() })
+  h.click('model-target-source')
+  h.selectProfile('other')
+  assert.deepEqual(h.selected('model-target-'), ['claire'])
+  h.input('slot-design-model', 'other-route-copy')
+  h.click('model-section-save'); await h.flush()
+  const body = h.calls.find(c => c.operation === 'preview').body
+  assert.equal(body.profile, 'other')
+  assert.deepEqual(body.routing_targets, ['claire'])
+})
+
+// ---- Review corrections: nothing-to-save, hidden values, whole-page coherence ----
+test('with nothing changed the model save is disabled; a persisted wide list copies nothing after a profile change', async () => {
+  const fresh = harness({ data: slotFixture() })
+  assert.equal(fresh.byId('model-section-save').props.disabled, true)
+  fresh.byId('model-section-save').props.onClick?.(); await fresh.flush()
+  assert.deepEqual(fresh.calls, [])
+  const h = harness({ data: slotFixture() })
+  h.click('model-target-all')
+  assert.equal(h.byId('model-section-save').props.disabled, false, 'a fresh choice is copy intent')
+  h.selectProfile('other')
+  assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  h.byId('model-section-save').props.onClick?.(); await h.flush()
+  assert.deepEqual(h.calls, [], 'the other profile models are never copied under a no-change summary')
+  // Picking the list again is a new, visible decision.
+  h.click('model-target-source')
+  assert.match(text(h.byId('model-section-summary')), /적용 대상: other/)
+  assert.equal(h.byId('model-section-save').props.disabled, false)
+})
+
+test('the whole-page save follows the same rules: no silent model copy, no membership change, zero targets is an error', async () => {
+  const data = fixture(); data.profiles[1].native_delegation.backend = 'model-router'
+  const h = harness({ data })
+  h.check('routing-reenable-other', true)
+  assert.doesNotMatch(text(h.byId('draft-reference-summary')), /다시 켜기/)
+  h.click('global-save'); await h.flush()
+  const untouched = h.calls.find(call => call.operation === 'preview').body
+  assert.deepEqual(untouched.model_targets, [])
+  assert.deepEqual(untouched.routing_profiles, ['claire'], 'a ticked re-enable box is saved only by its own button')
+  const g = harness({ data })
+  g.input('model-main-model', 'edited-main'); g.click('model-target-none')
+  assert.match(text(g.render()), /‘모델’ 섹션의 적용 대상이 0개입니다/)
+  g.click('global-save'); await g.flush()
+  assert.deepEqual(g.calls, [], 'an edited model with nowhere to go is refused, not reported as saved')
+  assert.match(text(g.render()), /저장되지 않았습니다\. .*‘모델’ 섹션의 적용 대상이 0개입니다/)
+  assert.doesNotMatch(text(g.render()), /적용 요청이 완료되었습니다/)
+  g.check('model-target-claire', true)
+  assert.match(text(g.byId('draft-reference-summary')), /대화 모델 적용 1개 \(claire\)/)
+  g.click('global-save'); await g.flush()
+  assert.deepEqual(g.calls.find(call => call.operation === 'preview').body.model_targets, ['claire'])
+})
+
+test('slot models are not copied by a hand-picked list while their cards are hidden; a profile-mode summary names the allow-list', async () => {
+  const data = slotFixture()
+  for (const row of data.profiles) row.native_delegation.backend = 'model-router-profiles'
+  data.profiles[1].native_delegation.profile_routes = { profiles: [{ name: 'default', description: '' }], default: 'default' }
+  const h = harness({ data })
+  assert.throws(() => h.byId('slot-design-follow'))
+  h.click('model-target-none'); h.check('model-target-claire', true)
+  const summary = text(h.byId('model-section-summary'))
+  assert.doesNotMatch(summary, /작업 슬롯 모델/)
+  assert.match(summary, /맡기는 방식: 전문 프로필에 맡기기/)
+  assert.match(summary, /허용할 전문 프로필: default · 기본: default/)
+  h.check('native-profile-access-consent', true)
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  const store = h.calls.filter(call => call.operation === 'preview').at(-1).body
+  assert.equal(store.save_scope, 'models')
+  assert.deepEqual(store.routing_targets, [])
+})
+
+test('a status that gains slot fields under a mounted page renders without slot cards instead of failing', () => {
+  const old = slotFixture(); delete old.slot_capabilities
+  for (const row of old.profiles) delete row.slots
+  const h = harness({ data: old })
+  assert.throws(() => h.byId('slot-design-follow'))
+  h.setData(slotFixture())
+  assert.doesNotThrow(() => h.render())
+  assert.throws(() => h.byId('slot-design-follow'), 'cards wait for a draft seeded by a reload')
+})
+
+test('a profile without slot support in a model mode keeps every target stored policy shape', async () => {
+  const data = slotFixture(); delete data.slot_capabilities
+  delete data.profiles[1].slots; data.profiles[1].native_delegation.slot_policy_supported = false
+  data.profiles[0].native_delegation.policy_schema = 2
+  data.profiles[0].native_delegation.slot_policy.design = { mode: 'custom', chain: [{ provider: 'own', model: 'own-slot-spare' }] }
+  const h = harness({ data })
+  assert.match(text(h.byId('slot-update-note')), /업데이트/)
+  h.click('model-target-all')
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  const byName = Object.fromEntries(h.calls[0].body.updates.map(row => [row.profile, row]))
+  assert.deepEqual(byName.default.slot_policy, data.profiles[0].native_delegation.slot_policy)
+  assert.equal(Object.hasOwn(byName.default, 'policy'), false)
+  for (const name of ['claire', 'other']) {
+    assert.deepEqual(byName[name].policy, data.profiles[name === 'claire' ? 1 : 2].native_delegation.policy)
+    assert.equal(Object.hasOwn(byName[name], 'slot_policy'), false)
+  }
+  const store = h.calls.filter(call => call.operation === 'preview').at(-1).body
+  assert.equal(Object.hasOwn(store.routing, 'slots'), false)
+})
+
+test('a target that stops being editable between the click and the fresh status check blocks the whole save', async () => {
+  const h = harness({ data: slotFixture() })
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+  h.click('model-target-all')
+  const changed = structuredClone(h.data()); changed.profiles[2].native_delegation.editable = false
+  h.setStatusResponder(() => changed)
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  assert.equal(h.calls.some(call => call.operation === 'apply'), false)
+  assert.match(text(h.byId('model-section-targets')), /저장되지 않았습니다\. 원본 또는 선택한 프로필의 설정이 바뀌었습니다/)
+})
+
+test('a request too large for the backend is refused up front with the reason, before anything is sent', async () => {
+  const h = harness({ data: slotFixture() })
+  h.input('model-main-model', 'm'.repeat(17000))
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls, [])
+  assert.match(text(h.byId('model-section-targets')), /저장되지 않았습니다\. 한 번에 저장하기에는 내용이 너무 큽니다\. 적용 대상 프로필을 줄여/)
+})
+
+test('the restart reminder shows only before any slot setting was ever saved', () => {
+  const h = harness({ data: slotFixture() })
+  assert.match(text(h.byId('slot-first-save-note')), /다시 시작하지 않은 Hermes 창이나 게이트웨이/)
+  const stored = slotFixture(); stored.profiles[0].slots.stored = ['design']
+  assert.throws(() => harness({ data: stored }).byId('slot-first-save-note'))
+  const spare = slotFixture(); spare.profiles[2].native_delegation.policy_schema = 2
+  assert.throws(() => harness({ data: spare }).byId('slot-first-save-note'))
+})

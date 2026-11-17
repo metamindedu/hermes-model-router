@@ -1,5 +1,77 @@
 # Model Router implementation contract
 
+## 2026-11-17: Authorized commit and installation of task slots
+
+After the stage 1 and stage 2 report, the user approved committing and installing this work. This supersedes the source-only restriction in the two sections below for this change only. Scope: one commit on `main` as v0.11.0, non-forced push to the owned repository so that the normal exact-SHA native install can be used, and replacement of the existing installation in every current profile (default plus ten named) with its existing enablement kept. Before installation: full suites on a clean export of the exact commit and a fresh Heavy independent review of the post-review corrections.
+
+Not authorized: a Git tag, GitHub release or catalog update; Hermes core or dependency changes; restarting Desktop, a gateway or any session (the user performs the restart); any settings save, including the first slot save; enabling the plugin or routing where it is off; grant, model, fallback, runtime-limit or backend-selection changes. Preserve Claire's local compatibility-guide edit and any unexpected tracked or untracked state; stop on it instead of forcing. The untracked research files `model_router/execution_metadata.py` and `tests/test_execution_metadata.py` stay out of the commit.
+
+## 2026-11-17: Task slots replace the Heavy/Light pair (source only, staged)
+
+User decision in this session: a task's model is chosen per **slot**, set directly on each slot, not inherited from two Heavy/Light tiers. Spare models are per slot from the start. The settings page merges the task-routing section into the model section and drops the routing on/off control from the page (the stored flag stays readable for older opt-outs). A later stage lets the operator add slots of their own, as `advanced-delegation` does with named routes. `설계 · 간단` is deliberately not a slot: simple design stays with Main.
+
+### Slots (frozen interface)
+
+| slot id | purposes the agent may send | tier |
+|---|---|---|
+| `design` | `plan` | heavy |
+| `code-complex` | `implementation` | light |
+| `code-simple` | `mechanical` | light |
+| `verify-simple` | `preliminary-review` | light |
+| `verify-complex` | `semantic-final`, `independent-review` | heavy |
+| `computer-use` | `computer-use` (new) | light |
+
+The existing purpose names are kept, so the bundled policy keeps working. A process still running pre-slot code does not: after the first slot save (store schema 3) it refuses settings reads and purpose routing for every profile, and after a per-slot spare save (block schema 2) for that profile, until restarted. It fails closed and writes nothing. Install order is therefore: update every profile, restart every Hermes process, then save slots. **Tier** survives only as an internal grouping for the things that are not per slot: the two routed runtime limits, the watchdog role, the runtime label (`model:heavy` / `model:light`) and the meaning of a slot nobody has set yet. It is no longer something the operator picks a model for.
+
+### Store (`settings.json`, additive)
+
+`routing.slots` is an optional mapping `slot id -> {follow: main|delegation|custom, custom: route|null}`. A slot that is absent resolves to its tier's existing `routing.heavy` / `routing.light` declaration, so an untouched install behaves exactly as before and nothing is migrated on read. `follow: main|delegation` keeps today's live link to a visible model role; `custom` is an explicit route. The page always writes every built-in slot explicitly, so after the first routing save the tier declarations are inert for native dispatch. The file is written as schema 3 only while some profile carries `slots`; otherwise it stays schema 2, so a downgrade remains possible until slots are actually used. Schema 1/2 files stay readable.
+
+`routing_config()` gains `slots` (every built-in slot resolved to a route) and `slot_tiers`; `heavy` / `light` stay for the historical readers. The native provider resolves `purpose -> slot -> route`. Copying to routing targets copies the submitted slot declarations like Heavy/Light today.
+
+### Native continuation policy (`delegation.backends.model-router[-auto]`)
+
+Block schema 2 is `{schema: 2, fallbacks: {<slot id>: {mode, chain, consent}}}` with consent bound to the slot id. A schema-1 block (`heavy` / `light`) stays valid and is applied by tier; it is never rewritten on read and its consent is never reused for a slot. A slot-shaped policy save writes schema 2 with fresh exact-chain cost consent; a legacy two-role policy save is still accepted while the stored block is schema 1 and refused once it is schema 2. The status DTO adds `slot_policy` / `auto_slot_policy` (schema-1 blocks shown expanded by tier) and `policy_schema`.
+
+### Stages
+
+1. Backend slots, per-slot continuation policy, the `computer-use` purpose, bundled policy wording, Python tests.
+2. Settings page: one model section (conversation roles + six slot cards with primary and spare models), the delegation-method card reduced to method and profile routes, routing on/off removed from the page, legacy Heavy/Light section removed. Node suites and renderer fixture at mobile/tablet/desktop widths.
+3. Operator-added slots (name, one-line description, model, tier), at most four, built-ins not removable; the purpose enum then follows the stored slots and applies from new sessions.
+
+### Stage 2 design decisions (settings page)
+
+One `모델` section replaces `모델 대상`, `작업 분담과 예비 모델` and `Heavy / Light 기본 모델`:
+
+- `대화 모델`: the four existing role cards (기본 대화, 작업 위임, 압축, 제목), unchanged fields.
+- `작업 모델`: the delegation-method Select (`native-delegation-backend`) first. Model modes show the six slot cards; each card holds the slot's primary model (basis Select `main` / `delegation` / `custom`, the picker and level for `custom`) and its spare models (mode + chain, native `slot_policy`). Profile modes show the allowed-profile list. The default mode shows a one-line note that the 작업 위임 model above is used.
+- One `적용 대상` list for the section, defaulting to the loaded profile only, and one save button. Spare-model cost is a notice next to the slot cards; profile-access consent stays an explicit checkbox in the profile modes.
+- Routing on/off is not on the page. `routing_profiles` is sent back as loaded. Only when some profile has the stored opt-out does a notice with per-profile re-enable checkboxes appear.
+- A slot draft is always the six explicit declarations from `row.slots.declarations`; the page sends all six in `routing.slots` and never edits `routing.heavy` / `routing.light` (sent back as loaded). When `slot_capabilities.blocking_profiles` is non-empty or the loaded profile is not slot-capable, slot editing is read-only with the reason; the legacy Heavy/Light editor is not kept as a fallback.
+- Saving is two existing transactions behind one button, native first because a native apply does not move the store revision: native preview, store preview (validation only), native apply, store preview again, store apply. A step that is not needed is skipped (nothing changed and the target list was not edited by hand). A native apply followed by a failed store step is reported as partial, names what was and was not saved, and requires the usual status reload. Nothing is retried automatically.
+- The legacy fallback section, the runtime-limit section and the combined-save section stay; the combined save carries the slot declarations because it sends the same routing draft.
+
+### Progress log
+
+- Stage 1 source is in place: `slots.py`, store schema 3 with the capability gate, `routing_config().slots`, purpose -> slot -> route in the native provider, per-slot continuation blocks (settings + runtime validators), the `computer-use` purpose and label, bundled policy wording, `tests/test_slots.py`.
+- Stage 1 verification (Hermes interpreter, scratch-only pytest path): full Python suite 1411 passed, 28 failed, 27 skipped. The same 28 fail on an unmodified `HEAD` export in this environment (real-core integration suites: `test_native_execution`, `test_native_role_watchdog`, `test_native_total_integration`, `test_observer_loader`, `test_background_review`, `test_fast_native_integration`), so they are not caused by this change; they are not fixed here. `tests/test_slots.py` adds 26 passing tests.
+- Stage 2 is handed to one implementation child with `docs/handoff/2026-11-17-slot-settings-page.md` as the baseline (owns `desktop/plugin.js`, `tests/*.mjs`, the renderer fixture data). Main keeps the visual pass, the diff review and final acceptance.
+- Stage 2 source is in place. The child stopped twice on contract gaps (re-enable ordering, older-plugin rule) and delivered draft helpers plus four tests; Main resolved both gaps in the handoff file and implemented the page: one `모델` section (`대화 모델`, `작업 모델` with six slot cards, re-enable notice, one `적용 대상` list, `저장할 내용` summary, `model-section-save`), the two-transaction chain as a `followUp` extension of `runSave`, and the separate `routing-reenable-save`. Removed from the page: `routing-enabled`, the membership list, the Heavy/Light editors, `routing-save`, the native card's own targets/save, `models-save`.
+- Decisions taken during implementation, recorded in the handoff file's `Implementation record`: the store step is scoped (`models` or `routing`) when only one part changed and unscoped only when both did; a selected target that cannot take the delegation method (routing off, not editable, no slot-policy support) is skipped for the native step and named in the summary and on its row instead of blocking the save, and still receives model values; cost is a notice, not a checkbox, as in the previous native save.
+- Defect found by the renderer pass and fixed with regression tests: one catalog choice edits provider and model in the same turn, and the guarded updaters (`updateNativeDelegationDraft`, `updateFallbackDraft`) dropped the second edit because the first one moved the generation. Slot spare pickers lost the model; the legacy spare lists kept the old model under the new provider. Edits of the same turn are now accepted; a callback kept past the turn is still rejected.
+- Independent review (two fresh read-only children, desktop and Python, both GO-WITH-FIXES) and its corrections are recorded at the end of the handoff file. Fixed with tests: a no-change model save that still copied role models to a persisted target list, chain-stop wording, a render guard, the zero-target whole-page save, summary omissions, an apply-time capability gate, initial-setup validation of slot routes, the request-size limit, and policy/docs wording. After the corrections: Node 368 tests, 352 pass, 0 fail, 16 skipped; Python 1412 passed, 28 failed, 27 skipped, the 28 being the same names that fail on an unmodified `HEAD` export; renderer pass repeated at the three widths. The corrections themselves have not had a second independent review.
+- Stage 2 verification before the review: `node --check desktop/plugin.js` passes; `node --test tests/*.mjs` 360 tests, 344 pass, 0 fail, 16 skipped. Isolated renderer (real native controls, invented profiles and catalog) at 1280 / 820 / 390 px: no element of the section outside the viewport, document width equals viewport width, target rows top-aligned; a full edit-and-save pass issued `delegation-preview`, `preview`, `status`, `apply`, `preview`, `apply` with the expected bodies against the synthetic transport. Not done: any commit, install or live write. Not verified: `computer-use` children actually driving a browser or desktop.
+
+This request authorizes source implementation and isolated verification only. No commit, push, tag, release, catalog update, live install, live settings write or shared restart. The Heavy independent review gate before any live installation is unchanged.
+
+## 2026-11-17: Model selection UX in the settings page (source only)
+
+The user asks to improve how a model is chosen on the settings page. Replace the three free-text route inputs with the host's own `ModelCatalogMenu` (public SDK export, the composer's searchable provider-grouped picker) plus a reasoning-level Select limited to the backend's accepted `EFFORTS`. Keep exact provider/model ID inputs under a manual-entry disclosure, and render the previous inputs unchanged on hosts whose SDK lacks the menu. Applies to the four model roles, Heavy/Light custom routes, routing fallback routes and every spare-model chain entry. Main owns this bounded UI change and its tests.
+
+The picker only edits the existing draft through the existing field updaters: no new save path, payload field, target-selection rule or backend change. Choosing a model must not rewrite the role's saved reasoning level. Catalog reads are read-only `model.options` for the loaded profile with `explicit_only`, issued only when the user opens a menu: the active profile through the connected socket, another loaded profile only through its exact fresh local route descriptor, otherwise refused with a readable message. No generation request, refresh, credential or provider change.
+
+This request covers source implementation and isolated verification. It does not authorize a commit, push/tag/release/catalog update, installing or replacing the live app-level UI or any profile package, live settings writes or a shared restart. Verify with the Node suites, a real-control renderer fixture at mobile/tablet/desktop widths using invented catalog data, and keep the Heavy independent review gate before any live installation.
+
 ## 2026-11-13: Authorized release and all-current-profile activation
 
 The user explicitly requests installing and activating this reviewed implementation in every current local profile, publishing it on GitHub, and submitting the official catalog update. Release as v0.9.0 after exact-commit checks, genuine isolated native admission and fresh independent release-delta acceptance. Current inventory is default plus ten named profiles; freeze and verify every target separately. This supersedes the preceding no-install/no-publication restriction for this release only. It does not authorize Hermes core/dependency replacement, shared restarts, forced conversation/tool rebuilds, actual target/provider smoke runs or cross-profile grant expansion. Preserve models, budgets, fallback/cost consent, native backend selections and full-profile OFF/empty policies. Plugin/package activation is separate from account/tool access grants.

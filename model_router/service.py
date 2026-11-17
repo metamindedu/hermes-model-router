@@ -18,8 +18,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import effective_config, fallback_policy, installation, timeouts, native_service
+from . import slots as slot_model
 
 SCHEMA = 2
+# Written only while some profile carries task-slot declarations, so an
+# untouched install keeps a file an older package can still read.
+SLOT_SCHEMA = 3
 STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
 STATE_RELATIVE = Path("plugin-data") / "model-router" / "recent_apply.json"
 SKILL_NAME = "adaptive-coding-orchestration"
@@ -146,7 +150,7 @@ def _models(value: Any, *, allow_empty_model: bool = False) -> dict[str, dict[st
 
 
 def _routing(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {"enabled", "heavy", "light", "fallback"}:
+    if not isinstance(value, dict) or set(value) - {"slots"} != {"enabled", "heavy", "light", "fallback"}:
         raise ValueError("routing must define enabled, heavy, light, and fallback")
     if not isinstance(value["enabled"], bool):
         raise ValueError("routing.enabled must be boolean")
@@ -171,7 +175,21 @@ def _routing(value: Any) -> dict[str, Any]:
     fb_light = None if fallback["light"] is None else _route(fallback["light"])
     if fallback["enabled"] and (fb_heavy is None or fb_light is None):
         raise ValueError("enabled fallback requires explicit Heavy and Light routes")
-    return {"enabled": value["enabled"], **resolved, "fallback": {"enabled": fallback["enabled"], "heavy": fb_heavy, "light": fb_light}}
+    result = {"enabled": value["enabled"], **resolved, "fallback": {"enabled": fallback["enabled"], "heavy": fb_heavy, "light": fb_light}}
+    # Canonical form: the key exists only while at least one slot is declared.
+    declared = slot_model.validate_slots(value["slots"], _route) if "slots" in value else {}
+    if declared:
+        result["slots"] = declared
+    return result
+
+
+def _store_schema(entries: dict[str, Any]) -> int:
+    return SLOT_SCHEMA if any(entry["routing"].get("slots") for entry in entries.values()) else SCHEMA
+
+
+def _stored_slots(entries: dict[str, Any]) -> dict[str, Any]:
+    return {name: entry["routing"]["slots"] for name, entry in entries.items()
+            if isinstance(entry, dict) and isinstance(entry.get("routing"), dict) and entry["routing"].get("slots")}
 
 
 class _FileLock:
@@ -293,7 +311,7 @@ class Service:
             not isinstance(data, dict)
             or set(data) != {"schema", "revision", "profiles"}
             or isinstance(data.get("schema"), bool)
-            or data.get("schema") not in {1, SCHEMA}
+            or data.get("schema") not in {1, SCHEMA, SLOT_SCHEMA}
         ):
             raise ServiceError("settings schema is invalid")
         if not isinstance(data.get("revision"), int) or isinstance(data.get("revision"), bool) or data["revision"] < 0:
@@ -310,6 +328,8 @@ class Service:
                         raise ValueError("schema1 profile entry has unknown fields")
                     models = _models(entry["models"], allow_empty_model=True)
                     routing = _routing(entry["routing"])
+                    if "slots" in entry["routing"]:
+                        raise ValueError("schema1 profile entry cannot declare slots")
                     native_fallback = None
                     delegation_fallback = None
                     legacy_consent = None
@@ -324,6 +344,8 @@ class Service:
                         raise ValueError("schema2 profile entry has unknown fields")
                     models = _models(entry["models"], allow_empty_model=True)
                     routing = _routing(entry["routing"])
+                    if "slots" in entry["routing"] and (data["schema"] != SLOT_SCHEMA or "slots" not in routing):
+                        raise ValueError("slot declarations require the slot schema and must not be empty")
                     native_fallback = self._validate_native_fallback(entry["native_fallback"])
                     delegation_fallback = self._validate_delegation_fallback(entry.get("delegation_fallback"))
                     raw_consent = entry["fallback_consent"]
@@ -353,6 +375,8 @@ class Service:
                 raise ServiceError("settings profile entry is invalid") from exc
         # Schema-1 reads are normalized only in memory. Persistence occurs only
         # through an explicit settings apply or the existing initializer.
+        if data["schema"] == SLOT_SCHEMA and _store_schema(normalized) != SLOT_SCHEMA:
+            raise ServiceError("settings schema is invalid")
         return {"schema": data["schema"], "revision": data["revision"], "profiles": normalized}
 
     def _validate_native_fallback(self, value: Any) -> dict[str, Any] | None:
@@ -594,6 +618,8 @@ class Service:
         # Validate both routes while allowing the same provider/model/effort.
         _route(heavy)
         _route(light)
+        for slot in routing.get("slots", {}):
+            _route(slot_model.slot_route(routing, models, slot))
 
     @staticmethod
     def _check_changed_routing_fallbacks(before: dict, after: dict) -> None:
@@ -963,7 +989,7 @@ class Service:
                 self._check_primary_routes(entries[name]["routing"], entries[name]["models"])
             changed = stored is None or entries != stored["profiles"]
             revision = (stored["revision"] if stored else 0) + (1 if changed else 0)
-            data = {"schema": SCHEMA, "revision": revision, "profiles": entries}
+            data = {"schema": _store_schema(entries), "revision": revision, "profiles": entries}
             if changed:
                 _atomic_write(self.store_path, _json_bytes(data))
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -1053,6 +1079,7 @@ class Service:
                 "name": name,
                 "models": models,
                 "routing": routing,
+                "slots": self._slots_dto(name, routing),
                 "actual_models": actual,
                 "drift": drift,
                 "fallbacks": self._fallback_dto(name, view_entry),
@@ -1076,6 +1103,44 @@ class Service:
             "recent_apply": self._recent_apply(),
             "fallback_capabilities": dict(fallback_policy.CAPABILITIES),
             "readiness_context": installation.readiness_context(self),
+            "slot_capabilities": {
+                "schema": 1,
+                "slots": list(slot_model.BUILTIN_SLOTS),
+                "tiers": dict(slot_model.SLOT_TIERS),
+                "purposes": dict(slot_model.PURPOSE_SLOTS),
+                "follows": list(slot_model.FOLLOWS),
+                "blocking_profiles": self._slot_blocking_profiles(discovered),
+            },
+        }
+
+    def _slot_capable(self, profile: str) -> bool:
+        """Whether that profile's installed package can read slot settings.
+
+        The canonical store is shared by every profile, so one profile saving
+        slots changes what every other installed package has to parse.
+        """
+        home = self._profile_home(profile)
+        package = home / "plugins" / "model-router"
+        try:
+            if not (package / "plugin.yaml").is_file():
+                return True  # nothing installed there reads the shared store
+            path = package / "model_router" / "slots.py"
+            reference = Path(__file__).with_name("slots.py")
+            if path.is_symlink() or not _inside(path, home) or not path.is_file() or path.stat().st_size > 256 * 1024:
+                return False
+            return path.read_bytes().replace(b"\r\n", b"\n") == reference.read_bytes().replace(b"\r\n", b"\n")
+        except OSError:
+            return False
+
+    def _slot_blocking_profiles(self, discovered: list[str]) -> list[str]:
+        return [name for name in discovered if not self._slot_capable(name)]
+
+    def _slots_dto(self, profile: str, routing: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": 1,
+            "capable": self._slot_capable(profile),
+            "stored": [slot for slot in slot_model.BUILTIN_SLOTS if slot in routing.get("slots", {})],
+            "declarations": slot_model.effective_declarations(routing),
         }
 
     def native_route_config(self, profile: str) -> dict[str, Any]:
@@ -1111,6 +1176,11 @@ class Service:
             "enabled": enabled,
             "heavy": dict(heavy),
             "light": dict(light),
+            # What each task slot runs on. Heavy/Light above remain for
+            # historical readers and for a slot that has never been set.
+            "slots": slot_model.resolved_slots(routing, models),
+            "slot_tiers": dict(slot_model.SLOT_TIERS),
+            "purpose_slots": dict(slot_model.PURPOSE_SLOTS),
             "fallback": dict(routing["fallback"]),
             "revision": revision,
             "light_timeout_seconds": timeouts.routed_seconds(limits, "light"),
@@ -1266,7 +1336,7 @@ class Service:
             submitted_routing = _routing(body["routing"])
         elif scope == "routing":
             routing_body = body["routing"]
-            if not isinstance(routing_body, dict) or set(routing_body) != {"enabled", "heavy", "light", "fallback"}:
+            if not isinstance(routing_body, dict) or set(routing_body) - {"slots"} != {"enabled", "heavy", "light", "fallback"}:
                 raise ValueError("routing must define enabled, heavy, light, and fallback")
             # Fallback is a separate save scope. Validate only membership and
             # Heavy/Light declarations; the submitted fallback draft is inert.
@@ -1275,11 +1345,15 @@ class Service:
                 "heavy": routing_body["heavy"],
                 "light": routing_body["light"],
                 "fallback": {"enabled": False, "heavy": None, "light": None},
+                **({"slots": routing_body["slots"]} if "slots" in routing_body else {}),
             })
         else:
             submitted_routing = None
         if submitted_routing is not None and submitted_routing["enabled"] != (profile in selected):
             raise ValueError("routing.enabled must match routing_profiles membership")
+        # A client that predates slots omits the key; its save must leave any
+        # stored slot declarations alone instead of clearing what it cannot see.
+        slots_submitted = submitted_routing is not None and isinstance(body["routing"], dict) and "slots" in body["routing"]
 
         stored = self._load_store()
         revision = stored["revision"] if stored else 0
@@ -1303,6 +1377,10 @@ class Service:
             after = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
         if scope is None and submitted_routing["fallback"] != after[profile]["routing"]["fallback"]:
             raise ValueError("routing.fallback can only be changed by fallback_preview")
+        if submitted_routing is not None and submitted_routing.get("slots"):
+            blocking = self._slot_blocking_profiles(discovered)
+            if blocking:
+                raise ValueError("task slots need every installed profile on this plugin version first")
         changes: list[dict[str, Any]] = []
         snapshots: dict[str, dict[str, Any]] = {}
         writes: list[dict[str, Any]] = []
@@ -1348,6 +1426,10 @@ class Service:
                 new_routing = copy.deepcopy(entry["routing"])
                 new_routing["heavy"] = copy.deepcopy(submitted_routing["heavy"])
                 new_routing["light"] = copy.deepcopy(submitted_routing["light"])
+                if slots_submitted:
+                    new_routing.pop("slots", None)
+                    if submitted_routing.get("slots"):
+                        new_routing["slots"] = copy.deepcopy(submitted_routing["slots"])
                 new_routing["enabled"] = new_enabled
                 if entry["routing"] != new_routing:
                     changes.append({"profile": name, "field": "routing", "before": entry["routing"], "after": new_routing})
@@ -1785,6 +1867,12 @@ class Service:
                 return native_service.apply_consumed(self, plan, plan_id)
             if plan.get("kind") == "initial_setup":
                 return native_service.initial_setup_apply_consumed(self, plan, plan_id)
+            # The preview checked that every installed package can read slots; an older
+            # package may have appeared since. Clearing all slots stays possible.
+            after_slots = _stored_slots(plan.get("after") or {})
+            if after_slots and after_slots != _stored_slots((current or {}).get("profiles") or {}):
+                if self._slot_blocking_profiles(self._discover_profiles()):
+                    raise RevisionConflict("task slots need every installed profile on this plugin version first; preview again")
             for item in plan.get("timeout_writes", []):
                 self._check_timeout_write(item)
             for profile in set(plan["snapshots"]) | set(plan.get("validation_profiles", [])):
@@ -1816,7 +1904,7 @@ class Service:
                 self._store_apply(receipt)
                 return receipt
             new_revision = revision + 1 if plan["state_changed"] else revision
-            next_store = {"schema": SCHEMA, "revision": new_revision, "profiles": plan["after"]}
+            next_store = {"schema": _store_schema(plan["after"]), "revision": new_revision, "profiles": plan["after"]}
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             profiles_to_backup = sorted({item["profile"] for item in plan["writes"]})
             timeout_writes = [item for item in plan.get("timeout_writes", []) if item.get("write_required", True)]

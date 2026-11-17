@@ -111,12 +111,14 @@ test('bulk target actions invalidate pending previews and their prior confirmati
   const invalidated = helpers.invalidatePlanState(12)
   assert.deepEqual(invalidated, { generation: 13, preview: null, previewPending: false, reviewed: false })
   assert.equal(helpers.previewMatchesScope(preview, 'scope-a', invalidated.generation, 'claire'), false)
-  for (const action of ['selectAllTargets', 'selectNoTargets']) {
-    const match = source.match(new RegExp(`const ${action} = \\(\\) => \\{([\\s\\S]*?)\\n  \\}`))
-    assert.ok(match, `${action} handler missing`)
-    assert.match(match[1], /invalidatePlan\(\)/)
-    assert.match(match[1], /setModelTargets\(/)
-    assert.doesNotMatch(match[1], /setRoutingProfiles/)
+  // Every target action goes through one setter that drops the pending plan and never touches membership.
+  const setter = source.match(/const setSectionTargets = next => \{([\s\S]*?)\n  \}/)
+  assert.ok(setter, 'setSectionTargets missing')
+  assert.match(setter[1], /invalidatePlan\(\)/)
+  assert.match(setter[1], /setModelTargets\(/)
+  assert.doesNotMatch(setter[1], /setRoutingProfiles/)
+  for (const action of ['selectAllTargets', 'selectNoTargets', 'selectSourceTargets', 'toggleModelTarget']) {
+    assert.match(source, new RegExp(`const ${action} = \\([^)]*\\) => setSectionTargets\\(`), `${action} must use the shared setter`)
   }
 })
 
@@ -200,8 +202,8 @@ test('disk plugin uses only supported SDK imports and registers the Korean nativ
 
 test('form exposes four model roles, distinct application scopes, and accessible field names', () => {
   for (const role of ['main', 'delegation', 'compression', 'title']) assert.ok(source.includes(`id: '${role}'`) || source.includes(`id: '${role}',`), `${role} role missing`)
-  assert.match(source, /모델 설정 적용 대상/)
-  assert.match(source, /라우팅 활성 프로필/)
+  assert.match(source, /id: 'model-section-targets'/)
+  assert.match(source, /작업 분담이 꺼져 있는 프로필/)
   assert.match(source, /model_targets:/)
   assert.match(source, /routing_profiles:/)
   assert.match(source, /공급자 ID/)

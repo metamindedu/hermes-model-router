@@ -192,8 +192,7 @@ def _plain(snapshot, profile, names):
         backend = "default"
     if not isinstance(backend, str) or not _BACKEND.fullmatch(backend):
         raise ValueError("unsupported backend declaration")
-    policy = snapshot.raw(ns.KEY_POLICY)
-    policy = ns.default_policy() if policy is None else ns.validate_policy_block(profile, policy)
+    policy = ns.read_policy(profile, snapshot.raw(ns.KEY_POLICY))
     profiles = snapshot.raw(ns.KEY_PROFILES)
     if profiles is None:
         profiles = {"profiles": [], "default": None}
@@ -203,8 +202,8 @@ def _plain(snapshot, profile, names):
         declared = profiles.get("profiles") if isinstance(profiles, dict) else None
         declared_names = [row.get("name") for row in declared if isinstance(row, dict)] if isinstance(declared, list) else []
         profiles = ns.validate_profiles_block(profiles, declared_names)
-    auto_policy = snapshot.raw(ns.KEY_AUTO_POLICY)
-    auto_policy = ns.default_policy() if auto_policy is None else ns.validate_policy_block(profile, auto_policy, backend="model-router-auto")
+    auto_policy = ns.read_policy(profile, snapshot.raw(ns.KEY_AUTO_POLICY), backend="model-router-auto")
+    # Each policy is a view: stored schema, the two-role form and the per-slot form.
     return backend, policy, profiles, auto_policy
 
 
@@ -214,7 +213,11 @@ def status(service, profile: str) -> dict[str, Any]:
     result = {"schema": 1, "supported": code is not None, "editable": False, "backend": "unavailable",
               "role_intro_inheritance": {"schema": 1, "supported": role_code is not None, "code_identity": role_code, "activation": "new_session_or_supported_rebuild"},
               "digest": "", "policy": ns.default_policy(),
-              "profile_routes": {"profiles": [], "default": None}, "auto_policy": ns.default_policy(), "auto_supported": False, "warnings": []}
+              "profile_routes": {"profiles": [], "default": None}, "auto_policy": ns.default_policy(), "auto_supported": False, "warnings": [],
+              # Spare models per task slot. A stored two-role block is shown by tier;
+              # policy_schema says which shape is stored (0 none, 1 two roles, 2 per slot).
+              "slot_policy": ns.default_slot_policy(), "auto_slot_policy": ns.default_slot_policy(),
+              "policy_schema": 0, "auto_policy_schema": 0, "slot_policy_supported": False}
     try:
         names = inventory(service)
         if profile not in names:
@@ -223,7 +226,10 @@ def status(service, profile: str) -> dict[str, Any]:
         backend, policy, profiles, auto_policy = _plain(snapshot, profile, names)
         auto_code = _auto_code_signature(service, profile, code)
         from .service import _digest
-        result.update(backend=backend, policy=policy, profile_routes=profiles, auto_policy=auto_policy, auto_supported=auto_code is not None,
+        result.update(backend=backend, policy=policy["policy"], profile_routes=profiles, auto_policy=auto_policy["policy"], auto_supported=auto_code is not None,
+                      slot_policy=policy["slot_policy"], auto_slot_policy=auto_policy["slot_policy"],
+                      policy_schema=policy["schema"], auto_policy_schema=auto_policy["schema"],
+                      slot_policy_supported=code is not None and service._slot_capable(profile),
                       digest=_digest({"snapshot": snapshot.cas_digest, "code": code, "auto_code": auto_code, "role_code": role_code, "profile": profile}),
                       editable=code is not None)
         if any(row["name"] not in names for row in profiles["profiles"]):
@@ -252,9 +258,10 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
             raise RevisionConflict("settings revision changed")
         names = inventory(service)
         records, changes, seen = [], [], set()
-        fields = {"profile", "expected_digest", "backend", "policy", "profile_routes", "allow_additional_cost", "allow_profile_access"}
+        fields = {"profile", "expected_digest", "backend", "profile_routes", "allow_additional_cost", "allow_profile_access"}
         for update in updates:
-            if not isinstance(update, dict) or set(update) != fields:
+            # Exactly one policy shape: the two roles an older page sends, or one entry per task slot.
+            if not isinstance(update, dict) or set(update) not in (fields | {"policy"}, fields | {"slot_policy"}):
                 raise ValueError("invalid native delegation update fields")
             profile = service._require_profile(update["profile"], names)
             if profile in seen:
@@ -274,7 +281,14 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("profile execution confirmation must be boolean")
             policy_backend = "model-router-auto" if backend == "model-router-auto" else "model-router"
             policy_key = ns.KEY_AUTO_POLICY if backend == "model-router-auto" else ns.KEY_POLICY
-            policy = ns.build_policy_block(profile, update["policy"], update["allow_additional_cost"], backend=policy_backend)
+            if "slot_policy" in update:
+                if dto["slot_policy_supported"] is not True:
+                    raise ValueError("task slots are unsupported by this installed profile; update it first")
+                policy = ns.build_slot_policy_block(profile, update["slot_policy"], update["allow_additional_cost"], backend=policy_backend)
+            else:
+                if dto["auto_policy_schema" if backend == "model-router-auto" else "policy_schema"] == ns.SLOT_SCHEMA:
+                    raise ValueError("spare models are stored per task slot; a two-role policy cannot replace them")
+                policy = ns.build_policy_block(profile, update["policy"], update["allow_additional_cost"], backend=policy_backend)
             profiles = ns.validate_profiles(update["profile_routes"], names)
             validate_native_targets(service, profiles)
             old_profiles = dto["profile_routes"]
@@ -338,7 +352,7 @@ def apply_consumed(service, plan, plan_id):
         validate_native_targets(service, ns.validate_profiles_block(record["after"][ns.KEY_PROFILES], names))
         for key, backend in ((ns.KEY_POLICY, "model-router"), (ns.KEY_AUTO_POLICY, "model-router-auto")):
             if record["after"][key] is not None:
-                ns.validate_policy_block(profile, record["after"][key], backend=backend)
+                ns.read_policy(profile, record["after"][key], backend=backend)
         if record["after"][ns.KEY_BACKEND] in ("model-router", "model-router-auto") and service.routing_config(profile).get("enabled") is not True:
             raise RevisionConflict("purpose routing was disabled")
         snapshots[profile] = {key: snapshot.raw(key) for key in ns.KEYS}
@@ -586,16 +600,18 @@ def _initial_observation(service, profile, readiness=None):
         if routes.get('enabled') is not True:
             raise ValueError('initial setup routing unavailable')
         _route(routes['heavy']); _route(routes['light'])
+        for slot_route in (routes.get('slots') or {}).values():
+            _route(slot_route)  # what purposes actually run on
         action, reason = 'complete', 'already_selected'
     else:
         # Keep the normal settings DTO readable after setup; an opaque owned
         # model-only block needs manual review, not a successful but unreadable setup.
         if snapshot.raw_present(ns.KEY_POLICY):
-            ns.validate_policy_block(profile, snapshot.raw(ns.KEY_POLICY))
+            ns.read_policy(profile, snapshot.raw(ns.KEY_POLICY))
         policy = snapshot.raw(ns.KEY_AUTO_POLICY)
         if snapshot.raw_present(ns.KEY_AUTO_POLICY):
-            parsed = ns.validate_policy_block(profile, policy, backend=INITIAL_SETUP_BACKEND)
-            if any(parsed[role]['mode'] != 'off' for role in ns.ROLES):
+            parsed = ns.read_policy(profile, policy, backend=INITIAL_SETUP_BACKEND)['slot_policy']
+            if any(row['mode'] != 'off' for row in parsed.values()):
                 raise ValueError('initial setup does not activate existing continuation')
         if snapshot.raw_present(ns.KEY_PROFILES):
             profiles = ns.validate_profiles_block(snapshot.raw(ns.KEY_PROFILES), names)
@@ -622,6 +638,8 @@ def _initial_observation(service, profile, readiness=None):
             if routes.get('enabled') is not True:
                 raise ValueError('initial setup routing unavailable')
             _route(routes['heavy']); _route(routes['light'])
+            for slot_route in (routes.get('slots') or {}).values():
+                _route(slot_route)  # what purposes actually run on
             action, reason = 'select_backend', 'backend_unset'
     if action in ('install', 'enable') and not _initial_native_enable_preserves_tools(raw):
         action, reason = 'manual', 'native_enable_changes_tool_selection'

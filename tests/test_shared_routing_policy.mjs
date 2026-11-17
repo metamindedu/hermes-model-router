@@ -34,7 +34,7 @@ test('discovery and settings copy expose the direct-Main default without changin
   assert.match(registration, /at least two substantive independent workstreams/)
   assert.match(registration, /required Heavy\/independent review remains mandatory/)
   assert.match(desktop, /간단한 작업은 메인 모델이 직접 처리/)
-  assert.match(desktop, /계획이나 중요한 검토는 Heavy/)
+  assert.match(desktop, /최종 의미 검토와 독립 검수/)
   // Detailed execution policy remains in the canonical skill/docs, not consumer UI.
   assert.match(readme, /작고 범위가 명확한 수정은 메인 모델이 직접 처리/)
   assert.match(readme, /독립적인 실작업 두 개 이상/)
@@ -57,10 +57,11 @@ test('canonical and compatibility skill keep the name and share complex non-codi
 })
 
 test('settings page explains broad routing scope, default-on installation, and preserved explicit opt-outs', () => {
-  assert.match(desktop, /계획이나 중요한 검토는 Heavy/)
-  assert.match(desktop, /단순 글쓰기·번역·요약 때문에 무조건 Heavy를 쓰지는 않습니다/)
-  assert.match(desktop, /새로 설치한 프로필은 작업 분담이 기본으로 켜집니다/)
-  assert.match(desktop, /이전에 꺼 둔 프로필은 그대로 유지/)
+  assert.match(desktop, /코드뿐 아니라 복잡한 조사·문서 작업도 같은 슬롯으로 맡기며/)
+  assert.match(desktop, /단순 글쓰기·번역·요약은 맡기지 않고 메인 모델이 처리/)
+  assert.match(desktop, /새 설치에서는 작업 분담이 기본으로 켜지며, 이전에 꺼 둔 설정은 유지/)
+  assert.match(desktop, /작업 분담이 꺼져 있는 프로필입니다\. 이전에 꺼 두었거나/)
+  assert.doesNotMatch(desktop, /id: 'routing-enabled'/, 'the page no longer offers turning task routing off')
   assert.match(desktop, /작업·검증 라우팅 폴백/)
   assert.doesNotMatch(desktop, /코딩·검증 라우팅/)
   assert.match(readme, /동봉 정책은 프로필마다 동일합니다/)

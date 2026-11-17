@@ -99,7 +99,7 @@ function harness(initial = statusFixture()) {
   for (const match of source.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"][^'"]+['"]/g)) {
     for (const name of match[1].split(',').map(value => value.trim()).filter(Boolean)) imports[name] = name
   }
-  Object.assign(imports, { useState, useRef, useEffect, jsx, jsxs: jsx, host,
+  Object.assign(imports, { DesktopSDK: {}, useState, useRef, useEffect, jsx, jsxs: jsx, host,
     useValue: atom => atom.get(), useQuery: () => query })
   const executable = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
     .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
@@ -219,21 +219,19 @@ test('timeout target eligibility is DTO-backed; source-only and manual nonempty 
   assert.doesNotMatch(text(h.tree), /전체 저장에 복사 의도 포함/)
 })
 
-test('models-only save ignores dirty routing, timeout, and fallback drafts and uses stored routing baselines', async () => {
+test('model section save ignores dirty timeout, re-enable and fallback drafts and uses stored routing baselines', async () => {
   const h = harness()
   h.input('model-main-model', 'unsaved-model-draft')
   h.input('routed-light-total-minutes', '9999')
-  h.check('routing-profile-other', true)
-  h.select('heavy-follow', 'custom')
-  h.input('heavy-custom-model', 'unsaved-heavy-draft')
+  h.check('routing-reenable-other', true)
   h.check('routing-fallback-enabled', true)
-  await h.click('models-save')
+  await h.click('model-section-save')
   await h.flush()
   const body = lastPreview(h).body
   assert.equal(body.save_scope, 'models')
-  assert.deepEqual(body.model_targets, ['default', 'claire', 'other'])
+  assert.deepEqual(body.model_targets, ['claire'])
   assert.deepEqual(body.routing_targets, [])
-  assert.deepEqual(body.routing_profiles, ['claire'])
+  assert.deepEqual(body.routing_profiles, ['claire'], 'a ticked re-enable box is not part of the model save')
   assert.equal(body.models.main.model, 'unsaved-model-draft')
   assert.equal(body.routing.heavy.follow, 'main')
   assert.deepEqual(body.routing.fallback, profileRow(h, 'claire').routing.fallback)
@@ -244,25 +242,25 @@ test('models-only save ignores dirty routing, timeout, and fallback drafts and u
   assert.equal(h.calls.filter(call => call.operation === 'apply').length, 1)
 })
 
-test('routing-only save applies activation membership and explicit Heavy/Light targets, but baseline models/timeouts/fallback only', async () => {
+test('re-enable save changes activation membership only, with baseline models, routes, timeouts and fallback', async () => {
   const h = harness()
   const sourceModels = structuredClone(profileRow(h, 'claire').models)
   h.input('model-main-model', 'dirty-unsaved-model')
   h.input('delegate-total-minutes', '12345')
-  h.select('heavy-follow', 'custom')
-  h.input('heavy-custom-model', 'routing-only-heavy')
-  h.check('routing-profile-other', true)
+  h.click('model-target-all')
+  h.check('routing-reenable-other', true)
   h.check('routing-fallback-enabled', true)
-  await h.click('routing-save')
+  await h.click('routing-reenable-save')
   await h.flush()
   const body = lastPreview(h).body
   assert.equal(body.save_scope, 'routing')
   assert.deepEqual(body.model_targets, [])
-  assert.deepEqual(body.routing_targets, ['default', 'claire', 'other'])
+  assert.deepEqual(body.routing_targets, [], 'nothing is copied to other profiles')
   assert.deepEqual(body.routing_profiles, ['claire', 'other'])
   assert.deepEqual(body.models, sourceModels)
-  assert.equal(body.routing.heavy.follow, 'custom')
-  assert.equal(body.routing.heavy.custom.model, 'routing-only-heavy')
+  assert.deepEqual(body.routing.heavy, profileRow(h, 'claire').routing.heavy)
+  assert.deepEqual(body.routing.light, profileRow(h, 'claire').routing.light)
+  assert.equal('slots' in body.routing, false)
   assert.deepEqual(body.routing.fallback, profileRow(h, 'claire').routing.fallback)
   assert.equal('timeout_updates' in body, false)
   assert.equal('fallback_updates' in body, false)
@@ -292,9 +290,7 @@ test('timeout-only save copies unchanged values to a frozen manual subset and om
   h.click('timeout-target-none')
   h.check('timeout-target-other', true)
   h.input('model-main-model', 'dirty-model')
-  h.check('routing-profile-other', true)
-  h.select('heavy-follow', 'custom')
-  h.input('heavy-custom-model', 'dirty-routing')
+  h.check('routing-reenable-other', true)
   h.check('routing-fallback-enabled', true)
   await h.click('timeouts-save')
   await h.flush()
@@ -355,12 +351,12 @@ test('unknown scoped apply result is one-shot and never triggers a blind preview
   h.setResponder(operation => operation === 'preview'
     ? { plan_id: 'one-shot-section-plan', changes: [] }
     : { status: 'unknown', error: 'apply response unavailable' })
-  await h.click('models-save')
+  await h.click('model-section-save')
   await h.flush()
   assert.equal(h.calls.filter(call => call.operation === 'preview').length, 1)
   assert.equal(h.calls.filter(call => call.operation === 'apply').length, 1)
-  assert.equal(h.byId('models-save').props.disabled, true)
-  h.byId('models-save').props.onClick()
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  h.byId('model-section-save').props.onClick()
   await h.flush()
   assert.equal(h.calls.filter(call => call.operation === 'preview').length, 1)
   assert.equal(h.calls.filter(call => call.operation === 'apply').length, 1)

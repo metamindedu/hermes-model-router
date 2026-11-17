@@ -112,7 +112,7 @@ function harness(initial = statusFixture()) {
   for (const match of source.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"][^'"]+['"]/g)) {
     for (const name of match[1].split(',').map(value => value.trim()).filter(Boolean)) imports[name] = name
   }
-  Object.assign(imports, { useState, useRef, useEffect, jsx, jsxs: jsx, host,
+  Object.assign(imports, { DesktopSDK: {}, useState, useRef, useEffect, jsx, jsxs: jsx, host,
     useValue: atom => atom.get(), useQuery: () => query })
   const executable = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
     .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
@@ -167,7 +167,7 @@ test('recovery and Fast inheritance notes are readonly and do not claim provider
   assert.match(text(recovery), /사용 제한이 풀리면/)
   assert.match(text(recovery), /정상 응답을 확인했다는 뜻은 아닙니다/)
   const fast = h.byId('fast-inheritance-note')
-  assert.match(text(fast), /기본 위임과 Heavy\/Light/)
+  assert.match(text(fast), /기본 위임과 작업 슬롯/)
   assert.match(text(fast), /시작할 때/)
   assert.match(text(fast), /지원하지 않는/)
   assert.match(text(fast), /추가 요금|크레딧/)
@@ -213,14 +213,15 @@ test('fallback targets start with all and preserve explicit subset or empty sele
   assert.equal(helpers.reconcileFallbackTargets(null, names), null)
 })
 
-test('all four target groups default to every editable profile without enabling or saving routing', async () => {
+test('fallback target groups default to every editable profile, model targets to the loaded one, without enabling or saving routing', async () => {
   const data = delegationStatus()
   data.profiles.find(row => row.name === 'other').routing.enabled = false
   const h = harness(data)
-  for (const prefix of ['model-target', 'native-fallback-target', 'routing-fallback-target', 'delegation-fallback-target']) {
+  for (const prefix of ['native-fallback-target', 'routing-fallback-target', 'delegation-fallback-target']) {
     for (const name of ['default', 'claire', 'other']) assert.equal(h.byId(`${prefix}-${name}`).props.checked, true)
   }
-  assert.equal(h.byId('routing-profile-other').props.checked, false)
+  for (const name of ['default', 'claire', 'other']) assert.equal(h.byId(`model-target-${name}`).props.checked, name === 'claire')
+  assert.equal(h.byId('routing-reenable-other').props.checked, false)
   assert.equal(h.calls.length, 0)
   h.setResponder(() => ({ plan_id: 'models-only', changes: [], warnings: [] }))
   globalButton(h, '저장')
@@ -242,7 +243,8 @@ test('initial selection excludes readonly or unsupported profiles without hiding
     assert.deepEqual(helpers.editableFallbackTargets(scope, data.profiles), ['default', 'claire'])
     assert.deepEqual(helpers.selectFallbackTargets(['other'], 'claire', ['default', 'claire', 'other'], ['default', 'claire']), ['other'])
   }
-  assert.equal(h.byId('model-target-other').props.checked, true)
+  assert.equal(h.byId('model-target-other').props.checked, false)
+  assert.equal(h.byId('model-target-other').props.disabled, false)
 })
 
 test('source-only button narrows selection without saving and manual subsets survive source change and refresh', async () => {
@@ -428,9 +430,9 @@ test('native fallback preview cannot return after source-profile change and unsu
   assert.throws(() => unsupported.byId('routing-fallback-enabled'))
 })
 
-test('routing details exposes readonly fallback summary/navigation; no legacy editable fallback path remains', () => {
-  assert.match(source, /legacy-routing-fallback-summary/)
-  assert.match(source, /href: '#native-delegation-settings'/)
+test('the legacy fallback section points to the model section for slot spare models; no legacy editable fallback path remains', () => {
+  assert.match(source, /현재 작업 슬롯의 예비 모델은 위 ‘모델’ 섹션의 각 슬롯에서 설정하세요/)
+  assert.match(source, /id: 'native-delegation-settings'/)
   assert.doesNotMatch(source, /id: 'fallback-enabled'/)
   assert.doesNotMatch(source, /updateFallback\s*=/)
   assert.match(source, /operation: '\/fallback-preview'/)
@@ -495,7 +497,8 @@ test('delegation custom draft/template preserves other scopes and uses cost noti
   assert.equal(h.byId('delegation-fallback-target-claire').props.checked, true)
   assert.equal(h.byId('delegation-fallback-target-default').props.checked, true)
   h.click('delegation-fallback-target-source')
-  assert.equal(h.byId('model-target-default').props.checked, true)
+  assert.equal(h.byId('delegation-fallback-target-default').props.checked, false)
+  assert.equal(h.byId('model-target-claire').props.checked, true, 'another list is untouched')
   selectDelegationMode(h, 'custom')
   h.click('delegation-fallback-template-non-openai')
   assert.equal(h.calls.length, 0)
@@ -667,7 +670,6 @@ test('saved target copy is not repeated on later model-only save while selection
   h.setResponder(operation => operation === 'preview'
     ? { plan_id: 'copy-plan', changes: [{ profile: 'other', field: 'native_fallback', before: null, after: { enabled: false, chain: [] } }], warnings: [] }
     : { status: 'applied', revision: 13 })
-  h.click('model-target-none')
   h.check('native-fallback-target-other', true)
   globalButton(h, '저장')
   await h.flush()
@@ -708,4 +710,20 @@ test('unchanged saved routing fallback is checked against changed main model in 
   await h.flush()
   assert.equal(h.calls.length, 0)
   assert.match(text(h.tree), /저장된 작업·검증 라우팅 폴백/)
+})
+
+test('one catalog choice edits provider and model of a legacy spare entry in the same turn; a retained callback stays rejected', async () => {
+  const h = harness(delegationStatus())
+  selectDelegationMode(h, 'custom')
+  h.click('delegation-fallback-template-non-openai')
+  // The catalog menu calls the field handler twice in one turn: provider, then model.
+  const provider = h.byId('delegation-chain-0-provider').props.onChange, model = h.byId('delegation-chain-0-model').props.onChange
+  provider({ target: { value: 'sample-lab' } }); model({ target: { value: 'sample-flash' } })
+  h.render()
+  assert.equal(h.byId('delegation-chain-0-provider').props.value, 'sample-lab')
+  assert.equal(h.byId('delegation-chain-0-model').props.value, 'sample-flash', 'the second field of one choice must not be dropped')
+  await Promise.resolve()
+  model({ target: { value: 'late-stale-edit' } }); h.render()
+  assert.equal(h.byId('delegation-chain-0-model').props.value, 'sample-flash')
+  assert.equal(h.calls.length, 0)
 })

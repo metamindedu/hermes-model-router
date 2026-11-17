@@ -11,8 +11,13 @@ import json
 import re
 from typing import Any
 
+from .slots import BUILTIN_SLOTS, SLOT_TIERS
+
 AUTO_ROUTING_SUPPORTED = True
 SCHEMA = 1
+# Per-slot continuation block. A schema-1 block keeps its two roles until an
+# operator saves a slot-shaped policy; it is never rewritten on read.
+SLOT_SCHEMA = 2
 BACKENDS = frozenset({"default", "model-router", "model-router-profiles", "model-router-auto"})
 KEY_BACKEND = "delegation.backend"
 KEY_POLICY = "delegation.backends.model-router"
@@ -31,12 +36,12 @@ def _literal(value: Any, pattern: re.Pattern, label: str) -> str:
     return value
 
 
-def validate_policy(value: Any) -> dict[str, Any]:
+def validate_policy(value: Any, keys: tuple[str, ...] = ROLES) -> dict[str, Any]:
     """Validate the client policy (which must never include consent)."""
-    if not isinstance(value, dict) or set(value) != set(ROLES):
-        raise ValueError("policy must contain heavy and light")
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise ValueError("policy must contain heavy and light" if keys == ROLES else "policy must contain every task slot")
     result = {}
-    for role in ROLES:
+    for role in keys:
         item = value[role]
         if not isinstance(item, dict) or set(item) != {"mode", "chain"}:
             raise ValueError("invalid role policy")
@@ -111,8 +116,41 @@ def consent_matches(profile: str, backend: str, role: str, chain: list[dict[str,
         return False
 
 
+def make_slot_consent(profile: str, backend: str, slot: str, chain: list[dict[str, str]]) -> dict[str, Any]:
+    """Slot-bound approval. Never equal to a role consent, so neither can stand in for the other."""
+    _literal(profile, _PROFILE, "profile")
+    if backend not in ("model-router", "model-router-auto") or slot not in BUILTIN_SLOTS:
+        raise ValueError("invalid consent scope")
+    policy = {s: {"mode": "custom" if s == slot else "off", "chain": chain if s == slot else []} for s in BUILTIN_SLOTS}
+    chain = validate_policy(policy, BUILTIN_SLOTS)[slot]["chain"]
+    binding = {"schema": SLOT_SCHEMA, "backend": backend, "origin_profile": profile, "slot": slot,
+               "mode": "custom", "chain": chain, "execution": "continue_conversation",
+               "trigger": "hermes_runtime", "additional_cost": True}
+    encoded = json.dumps(binding, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return {"schema": SLOT_SCHEMA, "digest": hashlib.sha256(encoded).hexdigest(),
+            "execution": "continue_conversation", "additional_cost": True}
+
+
+def slot_consent_matches(profile: str, backend: str, slot: str, chain: list[dict[str, str]], consent: Any) -> bool:
+    try:
+        return (isinstance(consent, dict) and type(consent.get("schema")) is int
+                and consent.get("additional_cost") is True
+                and consent == make_slot_consent(profile, backend, slot, chain))
+    except (ValueError, TypeError):
+        return False
+
+
 def default_policy() -> dict[str, Any]:
     return {role: {"mode": "off", "chain": []} for role in ROLES}
+
+
+def default_slot_policy() -> dict[str, Any]:
+    return {slot: {"mode": "off", "chain": []} for slot in BUILTIN_SLOTS}
+
+
+def expand_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    """A two-role policy shown per slot: each slot continues as its tier does."""
+    return {slot: copy.deepcopy(policy[SLOT_TIERS[slot]]) for slot in BUILTIN_SLOTS}
 
 
 def build_policy_block(profile: str, policy: Any, allow_additional_cost: bool, *, backend: str = "model-router") -> dict[str, Any]:
@@ -150,6 +188,70 @@ def validate_policy_block(profile: str, block: Any, *, backend: str = "model-rou
         elif not consent_matches(profile, backend, role, parsed[role]["chain"], item["consent"]):
             raise ValueError("invalid native continuation consent")
     return parsed
+
+
+def build_slot_policy_block(profile: str, policy: Any, allow_additional_cost: bool, *, backend: str = "model-router") -> dict[str, Any]:
+    """Construct a whole owned per-slot block; a custom slot always requires fresh consent."""
+    if not isinstance(allow_additional_cost, bool):
+        raise ValueError("cost confirmation must be boolean")
+    parsed = validate_policy(policy, BUILTIN_SLOTS)
+    entries = {}
+    for slot, item in parsed.items():
+        if item["mode"] == "custom" and not allow_additional_cost:
+            raise ValueError("custom continuation requires explicit additional-cost confirmation")
+        entries[slot] = {**copy.deepcopy(item), "consent": make_slot_consent(profile, backend, slot, item["chain"]) if item["mode"] == "custom" else None}
+    return {"schema": SLOT_SCHEMA, "fallbacks": entries}
+
+
+def validate_slot_policy_block(profile: str, block: Any, *, backend: str = "model-router") -> dict[str, Any]:
+    """Validate a persisted per-slot block and its slot-bound consent."""
+    if not isinstance(block, dict) or set(block) != {"schema", "fallbacks"} or type(block["schema"]) is not int or block["schema"] != SLOT_SCHEMA:
+        raise ValueError("invalid native policy block")
+    fallbacks = block["fallbacks"]
+    if not isinstance(fallbacks, dict) or set(fallbacks) != set(BUILTIN_SLOTS):
+        raise ValueError("invalid native policy block")
+    plain = {}
+    for slot in BUILTIN_SLOTS:
+        item = fallbacks[slot]
+        if not isinstance(item, dict) or set(item) != {"mode", "chain", "consent"}:
+            raise ValueError("invalid native policy entry")
+        plain[slot] = {"mode": item["mode"], "chain": item["chain"]}
+    parsed = validate_policy(plain, BUILTIN_SLOTS)
+    for slot in BUILTIN_SLOTS:
+        item = fallbacks[slot]
+        if parsed[slot]["mode"] == "off":
+            if item["consent"] is not None:
+                raise ValueError("off policy cannot carry consent")
+        elif not slot_consent_matches(profile, backend, slot, parsed[slot]["chain"], item["consent"]):
+            raise ValueError("invalid native continuation consent")
+    return parsed
+
+
+def block_schema(block: Any) -> int:
+    """0 when nothing is stored; otherwise the stored block's own schema (unvalidated)."""
+    if block is None:
+        return 0
+    schema = block.get("schema") if isinstance(block, dict) else None
+    if type(schema) is not int or schema not in (SCHEMA, SLOT_SCHEMA):
+        raise ValueError("invalid native policy block")
+    return schema
+
+
+def read_policy(profile: str, block: Any, *, backend: str = "model-router") -> dict[str, Any]:
+    """Validate a stored block of either schema and show it both ways.
+
+    ``policy`` is the two-role view an older client edits; a per-slot block has
+    no such view and reports the all-off default there. ``slot_policy`` is what
+    actually applies to each slot.
+    """
+    schema = block_schema(block)
+    if schema == 0:
+        return {"schema": 0, "policy": default_policy(), "slot_policy": default_slot_policy()}
+    if schema == SCHEMA:
+        policy = validate_policy_block(profile, block, backend=backend)
+        return {"schema": SCHEMA, "policy": policy, "slot_policy": expand_policy(policy)}
+    return {"schema": SLOT_SCHEMA, "policy": default_policy(),
+            "slot_policy": validate_slot_policy_block(profile, block, backend=backend)}
 
 
 def validate_profiles_block(block: Any, inventory: set[str] | list[str]) -> dict[str, Any]:

@@ -119,7 +119,7 @@ function harness(initial = statusFixture()) {
   for (const match of source.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"][^'"]+['"]/g)) {
     for (const name of match[1].split(',').map(value => value.trim()).filter(Boolean)) imports[name] = name
   }
-  Object.assign(imports, { useState, useRef, useEffect, jsx, jsxs: jsx, host,
+  Object.assign(imports, { DesktopSDK: {}, useState, useRef, useEffect, jsx, jsxs: jsx, host,
     useValue: atom => atom.get(), useQuery: () => query })
   const executable = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
     .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
@@ -227,9 +227,9 @@ test('actual page renders three accessible minute fields and independently inher
   const delegate = h.byId('delegate-total-minutes')
   const light = h.byId('routed-light-total-minutes')
   const heavy = h.byId('routed-heavy-total-minutes')
-  assert.equal(delegate.props['aria-label'], '일반 서브 에이전트 전체 실행 시간 (분)')
-  assert.equal(light.props['aria-label'], '라우팅 Light 전체 실행 시간 (분)')
-  assert.equal(heavy.props['aria-label'], '라우팅 Heavy 전체 실행 시간 (분)')
+  assert.equal(delegate.props['aria-label'], '일반 위임 작업 제한 (분)')
+  assert.equal(light.props['aria-label'], '짧은 작업 제한 (분)')
+  assert.equal(heavy.props['aria-label'], '긴 작업 제한 (분)')
   for (const field of [delegate, light, heavy]) {
     assert.equal(field.props.type, 'number')
     assert.equal(field.props.min, 0)
@@ -241,7 +241,7 @@ test('actual page renders three accessible minute fields and independently inher
   for (const phrase of [
     '작업별 실행 시간 제한', '분 (minutes)', '다른 제한은 그대로 유지',
     '중단을 요청하지만', '실제로 멈추기까지 시간이 걸릴', '작업을 시작할 때의 설정',
-    '응답 대기나 반복 횟수', '모델·라우팅·폴백 적용 대상과는 독립적', 'Light', 'Heavy'
+    '응답 대기나 반복 횟수', '모델·라우팅·폴백 적용 대상과는 독립적', '코드·검증(간단)·컴퓨터 유즈 슬롯', '설계·검증(복잡) 슬롯'
   ]) assert.ok(copy.includes(phrase), `missing UI explanation: ${phrase}`)
 })
 
@@ -276,7 +276,7 @@ test('whole-page save emits changed minute fields as seconds and sends all three
       { profile: 'claire', expected_revision: 8, ...expected },
       { profile: 'other', expected_revision: 11, ...expected }
     ])
-    assert.deepEqual(body.model_targets, ['default', 'claire', 'other'])
+    assert.deepEqual(body.model_targets, [], 'an unchanged model draft copies nothing; timeout targets are their own list')
     assert.deepEqual(body.timeout_updates.map(update => update.profile), ['default', 'claire', 'other'])
     assert.equal('fallback_updates' in body, false)
   }

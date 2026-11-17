@@ -23,6 +23,7 @@ PURPOSE_DEFAULTS = {
     "plan": "작업 계획",
     "semantic-final": "최종 의미 검토",
     "independent-review": "독립 검수",
+    "computer-use": "화면 조작",
 }
 PURPOSE_LABELS = {
     "implementation": "기능 구현",
@@ -31,6 +32,7 @@ PURPOSE_LABELS = {
     "plan": "작업 계획",
     "semantic-final": "최종 의미 검토",
     "independent-review": "독립 검수",
+    "computer-use": "화면 조작",
 }
 HEAVY_PURPOSES = frozenset({"plan", "semantic-final", "independent-review"})
 

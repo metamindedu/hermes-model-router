@@ -2,6 +2,14 @@
 
 Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. Native work uses `delegate_task`; historical routed-process starts remain retired. A separate explicitly opt-in `profile_task` path attaches to Gateway-owned target sessions, not a private agent executor. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
+## Task slots (0.11.0)
+
+A delegated task's model is now chosen per **task slot** instead of from two Heavy/Light tiers. The six built-in slots are design, complex code, simple code, simple verification, complex verification and computer use; each has its own primary model and its own optional spare models. The purposes an agent sends are unchanged (`plan`, `implementation`, `mechanical`, `preliminary-review`, `semantic-final`, `independent-review`) plus the new `computer-use`, and a purpose runs on the model of its slot. Heavy/Light remains only as the review class of a purpose, the two routed runtime limits and the runtime label; a slot nobody has set keeps resolving through its tier's existing declaration, so an untouched install behaves as before. `computer-use` selects a model suited to driving a screen; it grants no tools the parent session lacks.
+
+The settings page has one **모델** section: conversation models, the delegation method, six slot cards, one target list (the loaded profile by default) and one save button. The routing on/off control is gone from the page; a profile that already has task routing off is offered a separate re-enable action. Sections further down this README that describe a `Heavy / Light` editor, a routing membership list or a separate `작업 분담과 예비 모델` card describe releases before 0.11.0.
+
+**Upgrade order.** Slot settings use a newer shared-store format. Update the plugin in every profile, restart every Hermes process (Desktop, gateways, open sessions), and only then save a slot model or a per-slot spare model for the first time. A process still running the previous code cannot read the new format and refuses settings reads and purpose routing until it is restarted; it writes nothing. Details: [docs/releases/v0.11.0.md](docs/releases/v0.11.0.md) and `docs/wiki/task-slots.md`.
+
 ## Native parent return and scoped execution visibility (0.10.0)
 
 The workflow separates authority: original registered **host operator CLI** commands review/save full-profile grants; the plugin displays and manages scoped jobs; **Hermes에서 대상 대화 열기** hands approval/clarification to the exact native target conversation. Generic plugin RPC refuses grant writes and every approval/denial/clarification relay, even with caller operator/human flags. CLI is existing OS/operator authority, not human attestation or an OS sandbox. Installing or enabling the package never grants full-profile access or approves a job.

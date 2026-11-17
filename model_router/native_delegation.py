@@ -23,8 +23,7 @@ _PROVIDER = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*\Z')
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]*\Z')
 AUTO_ROUTING_SUPPORTED = True
 ROLE_INTRO_INHERITANCE_SCHEMA = 1
-PURPOSE_ROLES = {'implementation': 'light', 'mechanical': 'light', 'preliminary-review': 'light',
-                 'plan': 'heavy', 'semantic-final': 'heavy', 'independent-review': 'heavy'}
+from .slots import BUILTIN_SLOTS, PURPOSE_ROLES, PURPOSE_SLOTS, SLOT_TIERS
 
 
 def _profile(value: Any) -> str:
@@ -88,26 +87,54 @@ def validate_continuation_consent(profile: str, role: str, chain: Any, consent: 
             and consent.get('additional_cost') is True and consent == expected)
 
 
-def validate_native_policy(value: Any, profile: str, *, backend: str = 'model-router') -> dict[str, Any]:
+def make_slot_continuation_consent(profile: str, slot: str, chain: Any, *, backend: str = 'model-router') -> dict[str, Any]:
+    """Slot-bound consent. Its binding names a slot, so a role consent can never satisfy it."""
     _profile(profile)
-    if not isinstance(value, dict) or set(value) != {'schema', 'fallbacks'} or type(value['schema']) is not int or value['schema'] != 1:
+    if slot not in BUILTIN_SLOTS or backend not in ('model-router', 'model-router-auto'):
+        raise ValueError('invalid continuation slot')
+    selection = {'schema': 2, 'backend': backend, 'origin_profile': profile, 'slot': slot,
+                 'mode': 'custom', 'chain': _chain(chain), 'execution': 'continue_conversation',
+                 'trigger': 'hermes_runtime', 'additional_cost': True}
+    digest = hashlib.sha256(json.dumps(selection, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+    return {'schema': 2, 'digest': digest, 'execution': 'continue_conversation', 'additional_cost': True}
+
+
+def validate_native_policy(value: Any, profile: str, *, backend: str = 'model-router') -> dict[str, Any]:
+    """Validate a stored continuation block: two roles (schema 1) or one entry per slot (schema 2)."""
+    _profile(profile)
+    if not isinstance(value, dict) or set(value) != {'schema', 'fallbacks'} or type(value['schema']) is not int or value['schema'] not in (1, 2):
         raise ValueError('invalid native continuation policy')
+    by_slot = value['schema'] == 2
+    keys = BUILTIN_SLOTS if by_slot else ('heavy', 'light')
     fallbacks = value['fallbacks']
-    if not isinstance(fallbacks, dict) or set(fallbacks) != {'heavy', 'light'}:
+    if not isinstance(fallbacks, dict) or set(fallbacks) != set(keys):
         raise ValueError('invalid native continuation policy')
     result = {}
-    for role in ('heavy', 'light'):
-        row = fallbacks[role]
+    for key in keys:
+        row = fallbacks[key]
         if not isinstance(row, dict) or set(row) != {'mode', 'chain', 'consent'} or row['mode'] not in ('off', 'custom'):
             raise ValueError('invalid native continuation policy')
         chain = _chain(row['chain'])
         if row['mode'] == 'off':
             if chain or row['consent'] is not None:
                 raise ValueError('invalid native continuation policy')
-        elif not chain or not validate_continuation_consent(profile, role, chain, row['consent'], backend=backend):
+        elif not chain:
             raise ValueError('native continuation consent is invalid')
-        result[role] = {'mode': row['mode'], 'chain': chain, 'consent': row['consent']}
-    return {'schema': 1, 'fallbacks': result}
+        elif by_slot:
+            consent = row['consent']
+            if not (isinstance(consent, dict) and type(consent.get('schema')) is int and consent.get('additional_cost') is True
+                    and consent == make_slot_continuation_consent(profile, key, chain, backend=backend)):
+                raise ValueError('native continuation consent is invalid')
+        elif not validate_continuation_consent(profile, key, chain, row['consent'], backend=backend):
+            raise ValueError('native continuation consent is invalid')
+        result[key] = {'mode': row['mode'], 'chain': chain, 'consent': row['consent']}
+    return {'schema': value['schema'], 'fallbacks': result}
+
+
+def slot_continuation_chain(parsed: Mapping[str, Any], slot: str) -> list[dict[str, str]]:
+    """The spare models one slot may continue on. A two-role block applies by the slot's tier."""
+    row = parsed['fallbacks'][slot if parsed['schema'] == 2 else SLOT_TIERS[slot]]
+    return list(row['chain']) if row['mode'] == 'custom' else []
 
 
 def _unlinked(path: Path) -> bool:
@@ -204,9 +231,11 @@ if DelegationProvider is not None:
 
         def route_task(self, task, config):
             try:
-                role = PURPOSE_ROLES.get(task.get('purpose'))
-                if role is None:
+                slot = PURPOSE_SLOTS.get(task.get('purpose')) if isinstance(task.get('purpose'), str) else None
+                if slot is None:
                     raise ValueError('purpose is required')
+                # Tier only picks the runtime limit, the watchdog role and the label.
+                role = SLOT_TIERS[slot]
                 from agent.safe_worker_policy import worker_config_snapshot
                 if worker_config_snapshot() is not None:
                     raise ValueError('managed workers are unsupported')
@@ -216,7 +245,9 @@ if DelegationProvider is not None:
                 if route_config.get('enabled') is not True:
                     raise ValueError('routing is disabled')
                 from .routing import _safe_route
-                route = _safe_route(route_config.get(role), role)
+                # A config without slot routes is the pre-slot shape: the slot runs on its tier.
+                slots = route_config.get('slots')
+                route = _safe_route(slots[slot] if isinstance(slots, dict) else route_config.get(role), role)
                 budget = task.get('total_timeout_seconds', route_config.get(role + '_timeout_seconds'))
                 if not _timeout(budget):
                     raise ValueError('invalid total runtime')
@@ -226,9 +257,7 @@ if DelegationProvider is not None:
                 policy = _settings(config, self.name, None)
                 chain = []
                 if policy is not None:
-                    parsed = validate_native_policy(policy, profile, backend=self.name)
-                    if parsed['fallbacks'][role]['mode'] == 'custom':
-                        chain = parsed['fallbacks'][role]['chain']
+                    chain = slot_continuation_chain(validate_native_policy(policy, profile, backend=self.name), slot)
                 return {'provider': route['provider'], 'model': route['model'], 'reasoning_effort': route['reasoning'],
                         'label': role, 'fallback_providers': chain}
             except Exception as exc:
@@ -309,7 +338,7 @@ if DelegationProvider is not None:
                 choices.append('profile')
                 parameters['profile'] = profiles
             parameters['execution'] = {'type': 'string', 'enum': choices, 'description':
-                'Required per-task choice: model uses this profile Heavy/Light via purpose; profile uses an explicitly allowed target own model and reasoning. Never send purpose and profile together.'}
+                'Required per-task choice: model uses this profile task-slot model via purpose; profile uses an explicitly allowed target own model and reasoning. Never send purpose and profile together.'}
             return parameters
 
         def description(self, config) -> str:
