@@ -139,6 +139,9 @@ class ExecutionRoster:
                           'api_call_count', 'duration_seconds', 'model', 'provider'):
                 if field in child:
                     row[field] = child[field]
+            if child.get('models'):
+                row['models'] = copy.deepcopy(child['models'])
+                row['models_truncated'] = bool(child.get('models_truncated'))
             _set_status(row, child.get('status', 'dispatched'))
             row['updated_at'] = time.time()
 
@@ -284,9 +287,18 @@ class ExecutionRoster:
             if api:
                 child['api_call_count'] = (child.get('api_call_count') or 0) + 1
                 if isinstance(model, str) and '..' not in model and _MODEL.fullmatch(model):
-                    child['model'] = model
-                if _safe(provider):
-                    child['provider'] = provider
+                    # One pair per call. The first call runs the routed model; a later
+                    # different pair is Hermes' spare-model switch (fallback chain).
+                    pair = {'model': model, 'provider': provider if _safe(provider) else None}
+                    child['model'], child['provider'] = pair['model'], pair['provider']
+                    # Transitions, not distinct pairs: A -> B -> A stays visible. Bounded: the
+                    # first pair and the latest three are kept.
+                    models = child.setdefault('models', [])
+                    if not models or models[-1] != pair:
+                        models.append(pair)
+                        if len(models) > 4:
+                            del models[1]
+                            child['models_truncated'] = True
             elif _safe(tool_name):
                 child['last_tool'] = tool_name
                 child['tool_count'] = (child.get('tool_count') or 0) + 1

@@ -2187,7 +2187,8 @@ const ROLE_PROPOSAL_MESSAGES = {
   provider_failed: '모델이 제안을 완료하지 못했습니다. 자동으로 다시 요청하지 않습니다.',
   invalid_output: '안전한 한 줄 역할 설명을 얻지 못했습니다. 자동으로 다시 요청하지 않습니다.',
   unsupported_transport: '이 연결에서는 역할 제안을 사용할 수 없습니다.',
-  unsupported_sdk: '현재 Hermes에서 역할 제안을 지원하지 않습니다.'
+  unsupported_sdk: '현재 Hermes에서 역할 제안을 지원하지 않습니다.',
+  payer_unavailable: '연결 프로필의 기본 모델 경로를 확인할 수 없어 역할 제안을 보내지 않습니다. 기본 제공자를 사용하거나 엔드포인트·키를 직접 덮어쓴 설정이 없는지 확인하세요.'
 }
 const roleProposalMessage = code => ROLE_PROPOSAL_MESSAGES[code] || '역할 제안을 확인할 수 없습니다. 기존 소개와 입력한 설명은 유지했습니다.'
 
@@ -2285,6 +2286,7 @@ function RoleProposalDialog({ view, onCancel, onGenerate, onUse }) {
     payer ? jsxs('div', { style: styles.cardSection, children: [
       jsx('strong', { children: `사용량을 사용하는 연결 프로필: ${payer.profile}` }),
       jsx('p', { style: styles.hint, children: `저장된 기본 모델: ${payer.provider} / ${payer.model}` }),
+      payer.transport === 'user_process' ? jsx('p', { style: styles.hint, children: '직접 설치한 제공자(외부 프로세스)로 실행합니다. 이 프로필의 대화가 쓰는 경로와 같습니다.' }) : null,
       jsx('p', { style: styles.hint, children: `기존 예비 모델: ${(payer.fallback_policy || []).map(row => `${row.provider} / ${row.model}`).join(' → ') || '없음'}` }),
       jsx('p', { style: styles.hint, children: '이 요청에는 해당 프로필의 기존 Hermes 복구 정책이 적용됩니다. 연결 실패나 인증 갱신 등으로 다시 시도하거나 예비 모델을 사용할 수 있으며, 사용량·비용이 발생할 수 있습니다. 금액은 미리 확정할 수 없습니다.' })
     ] }) : null,
@@ -3842,16 +3844,39 @@ function executionNativeCall(input) {
 }
 function executionModelPair(input, runtime) {
   const api = executionSafeText(input.model)
-  if (api) return { model: api, provider: executionSafeText(input.provider), model_source: 'api' }
+  if (api) {
+    // Distinct model/provider pairs in call order; more than one means Hermes switched to a spare.
+    const models = (Array.isArray(input.models) ? input.models.slice(0, 4) : [])
+      .map(item => ({ model: executionSafeText(item?.model), provider: executionSafeText(item?.provider) }))
+      .filter(item => item.model && !item.model.includes('..') && !/\s/.test(item.model))
+    return { model: api, provider: executionSafeText(input.provider), model_source: 'api', models, models_truncated: input.models_truncated === true }
+  }
   const route = executionSafeText(input.observed?.model)
   if (route) return { model: route, provider: executionSafeText(input.observed?.provider), model_source: 'route' }
   const roster = executionSafeText(runtime?.model)
   return roster ? { model: roster, provider: null, model_source: 'roster' } : { model: null, provider: null, model_source: null }
 }
 const EXECUTION_MODEL_SOURCE = { api: 'API 호출 기준', route: '런타임 보고', roster: '시작 시 배정 · 예비 모델 전환 미반영' }
+const executionPairText = item => `${item.model}${item.provider ? ` · ${item.provider}` : ''}`
+const executionSamePair = (a, b) => a?.model === b?.model && (a?.provider || null) === (b?.provider || null)
+// Model/provider transitions observed in the child's own API REQUESTS (attempts, not confirmed
+// replies), in order; when bounded, the first and the latest transitions are kept. Usually Hermes' spare-model handling, but a provider can also substitute a model, so
+// this is not labelled a spare switch, and the first observed pair is not claimed to be the routed one.
+export function executionSpare(row) {
+  const models = row?.model_source === 'api' && Array.isArray(row.models) ? row.models : []
+  if (models.length < 2 || !row.model) return null
+  const current = { model: row.model, provider: row.provider || null }
+  return { first: models[0], current, changed: !executionSamePair(models[0], current), observed: models }
+}
 function executionModelText(row) {
   if (!row.model) return null
-  return `${row.model}${row.provider ? ` · ${row.provider}` : ''} (${EXECUTION_MODEL_SOURCE[row.model_source] || '보고된 모델'})`
+  const spare = executionSpare(row)
+  if (spare) {
+    const steps = spare.observed.map(executionPairText)
+    const path = row.models_truncated ? `${steps[0]} → … → ${steps.slice(1).join(' → ')}` : steps.join(' → ')
+    return `${executionPairText(spare.current)} (API 호출 기준 · 모델 변경 관찰: ${path})`
+  }
+  return `${executionPairText(row)} (${EXECUTION_MODEL_SOURCE[row.model_source] || '보고된 모델'})`
 }
 export function mergeExecutionRows(snapshot, live, targetProfile) {
   if (!snapshot || snapshot.schema !== 1 || snapshot.origin_profile !== targetProfile || !Array.isArray(snapshot.rows)) return []
@@ -4429,7 +4454,7 @@ function executionChip(row) {
   const time = executionTime(row)
   return jsxs('span', { style: stripStyles.chip, 'data-execution-chip': row.id, children: [
     jsx('span', { 'aria-hidden': true, style: { color: executionStatusColor(row.status) }, children: '●' }),
-    [executionShortLabel(row), row.model, EXECUTION_ACTIVE.has(row.status) ? time : `${EXECUTION_STATUS[row.status] || '상태 미확인'}${time ? ` ${time}` : ''}`].filter(Boolean).join(' · ')
+    [executionShortLabel(row), row.model ? `${row.model}${executionSpare(row) ? ' (모델 변경)' : ''}` : null, EXECUTION_ACTIVE.has(row.status) ? time : `${EXECUTION_STATUS[row.status] || '상태 미확인'}${time ? ` ${time}` : ''}`].filter(Boolean).join(' · ')
   ] }, row.id)
 }
 export function ExecutionLine({ row, controls = null }) {
@@ -4443,7 +4468,7 @@ export function ExecutionLine({ row, controls = null }) {
       jsx('span', { role: 'status', 'data-execution-status': row.status, style: { color: executionStatusColor(row.status), whiteSpace: 'nowrap' }, children: EXECUTION_STATUS[row.status] || '상태 미확인' }),
       jsxs('span', { style: stripStyles.name, children: [
         jsx('span', { style: { color: 'var(--ui-text-primary)' }, children: executionShortLabel(row) }),
-        jsx('span', { style: stripStyles.model, children: row.model || (EXECUTION_ACTIVE.has(row.status) ? '모델 보고 전' : '모델 보고 없음') })
+        jsx('span', { style: stripStyles.model, children: row.model ? `${row.model}${executionSpare(row) ? ' · 모델 변경 관찰' : ''}` : (EXECUTION_ACTIVE.has(row.status) ? '모델 보고 전' : '모델 보고 없음') })
       ] }),
       jsx('span', { style: stripStyles.meta, children: [time, tools !== null ? `도구 ${tools}회` : null].filter(Boolean).join(' · ') })
     ] }),
@@ -4490,6 +4515,80 @@ export function ExecutionStrip({ rows, unavailable, jobControls = null, jobsPane
       open && jobsPanel ? jsx(LazySection, { label: '전체 프로필 작업 · 허용 범위와 운영자 안내', render: jobsPanel }, 'profile-jobs') : null
     ] })
   ] })
+}
+// Host-markup compatibility layer, not an SDK API: composer.top renders with no per-composer
+// owner, and the strip describes the FOCUSED chat. With several chats split in one window, show
+// it only where that chat is shown. Chat surfaces carry data-composer-target: 'main', or 'tile:'
+// plus the stored session id; a popped-out composer host carries data-floating-composer-target
+// or data-composer-owner (the surface id). Unknown markup fails open (shown).
+function chatSurfaces(root) { return Array.from(root?.querySelectorAll?.('[data-chat-surface]') || []) }
+// The chat surface an element belongs to, also for a popped-out composer portalled to the document body.
+function composerSurfaceOf(element, root) {
+  const surface = element?.closest?.('[data-chat-surface]')
+  if (surface?.getAttribute?.('data-composer-target')) return surface
+  const owner = element?.closest?.('[data-composer-owner]')?.getAttribute?.('data-composer-owner')
+  return owner ? chatSurfaces(root).find(item => item.getAttribute?.('data-composer-surface-id') === owner) || null : null
+}
+function composerTargetOf(element, root) {
+  const surface = composerSurfaceOf(element, root)
+  const target = surface?.getAttribute?.('data-composer-target')
+  if (target) return { target, surface }
+  const floating = element?.closest?.('[data-floating-composer-target]')?.getAttribute?.('data-floating-composer-target')
+  return floating ? { target: floating, surface: null } : null
+}
+export function composerShowsFocused(element, focusedStoredId, root = globalThis.document, focusedRuntimeId = null, primaryRuntimeId = null) {
+  const found = composerTargetOf(element, root)
+  if (!found) return true
+  const { target } = found
+  if (target.startsWith('tile:')) return Boolean(focusedStoredId) && target === `tile:${focusedStoredId}`
+  if (target !== 'main') return true
+  // The primary shows only with positive identity: the host's focused runtime id IS the primary's
+  // runtime id (host.state.activeSessionId). A missing tile node is not proof (a parked tile can
+  // stay focused while unmounted).
+  if (!focusedRuntimeId || focusedRuntimeId !== primaryRuntimeId) return false
+  if (!focusedStoredId) return true
+  // Attribute comparison, not a selector: ids never need escaping.
+  const inTile = chatSurfaces(root).some(item => item.getAttribute?.('data-composer-target') === `tile:${focusedStoredId}`)
+  if (!inTile) return true
+  // The focused chat is open in a tile. The SDK does not say which chat the primary shows, and
+  // pointer, focus and keyboard-shortcut paths all move focus differently, so the primary hides:
+  // when the same chat is also open in the primary, its strip shows in the tile only. A missing
+  // strip is better than another chat's strip.
+  return false
+}
+// Every mounted gate. A chat surface mounting or unmounting (its composer mounts a gate) makes
+// the others re-check, with no id change needed: a tile can mount after an async runtime bind.
+const composerGates = new Set()
+function recheckComposerGates() { for (const recheck of [...composerGates]) recheck() }
+export function ComposerFocusGate({ children }) {
+  const focusedStored = useValue(host.state?.focusedStoredSessionId || EXECUTION_EMPTY_ATOM)
+  const focusedRuntime = useValue(host.state?.focusedSessionId || EXECUTION_EMPTY_ATOM)
+  const primaryRuntime = useValue(host.state?.activeSessionId || EXECUTION_EMPTY_ATOM)
+  const anchor = useRef(null)
+  const [visible, setVisible] = useState(false)
+  useEffect(() => {
+    // Tiles open, close and move by gestures that need not change focus: re-check after pointer,
+    // focus and key events too (attribute reads only; React skips unchanged answers).
+    let live = true
+    const timers = new Set()
+    const check = () => { if (live) setVisible(composerShowsFocused(anchor.current, focusedStored, globalThis.document, focusedRuntime, primaryRuntime)) }
+    check()
+    const doc = globalThis.document
+    const later = () => {
+      const timer = globalThis.setTimeout(() => { timers.delete(timer); check() }, 0); timers.add(timer)
+    }
+    composerGates.add(later)
+    recheckComposerGates()
+    for (const type of ['pointerup', 'focusin', 'keyup']) doc?.addEventListener?.(type, later, true)
+    return () => {
+      live = false
+      composerGates.delete(later)
+      for (const timer of timers) globalThis.clearTimeout(timer)
+      for (const type of ['pointerup', 'focusin', 'keyup']) doc?.removeEventListener?.(type, later, true)
+      recheckComposerGates()
+    }
+  }, [focusedStored, focusedRuntime, primaryRuntime])
+  return jsx('div', { ref: anchor, style: { display: 'contents' }, 'data-model-router-focus-gate': visible ? 'shown' : 'hidden', children: visible ? children() : null })
 }
 export function ExecutionPanel({ compact = false, ctx, observer } = {}) {
   const { scope, key, query, data } = useExecutionSnapshot(observer)
@@ -4805,7 +4904,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.11.1',
+  version: '0.11.2',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
@@ -4835,7 +4934,7 @@ export default {
     if (typeof host.state?.activeSessionId?.get === 'function') {
       ctx.registerMany([
         // No layout pane: the host disables a single-pane plugin as a whole when that pane is closed.
-        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ExecutionPanel, { compact: true, ctx, observer: executionObserver }) }
+        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ComposerFocusGate, { children: () => jsx(ExecutionPanel, { compact: true, ctx, observer: executionObserver }) }) }
       ])
     }
     ctx.registerMany([

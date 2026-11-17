@@ -331,6 +331,31 @@ def test_construction_is_queued_until_actual_child_activity(env):
     assert rows(r)[0]['model'] == 'fixture-model'
 
 
+def test_spare_model_switch_is_recorded_as_ordered_pairs(env):
+    r, _, _ = env
+    pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit'})
+    r.api_pre(session_id='child', model='primary-model', provider='primary')
+    r.api_pre(session_id='child', model='primary-model', provider='primary')
+    r.api_pre(session_id='child', model='spare-model', provider='spare')
+    row = rows(r)[0]
+    assert (row['model'], row['provider']) == ('spare-model', 'spare')
+    assert row['models'] == [{'model': 'primary-model', 'provider': 'primary'}, {'model': 'spare-model', 'provider': 'spare'}]
+    # A provider that fails validation never pairs the new model with the previous provider.
+    r.api_pre(session_id='child', model='third-model', provider='bad provider\n')
+    row = rows(r)[0]
+    assert (row['model'], row['provider']) == ('third-model', None)
+    # A -> B -> A is kept as transitions, not collapsed to distinct pairs.
+    r.api_pre(session_id='child', model='spare-model', provider='spare')
+    assert [m['model'] for m in rows(r)[0]['models']][-2:] == ['third-model', 'spare-model']
+    for i in range(6):
+        r.api_pre(session_id='child', model=f'm{i}', provider='p')
+    models = rows(r)[0]['models']
+    assert len(models) == 4 and models[0]['model'] == 'primary-model' and models[-1]['model'] == 'm5'
+    assert rows(r)[0]['models_truncated'] is True
+
+
 def test_activity_does_not_reconcile_all_finished_children(env, monkeypatch):
     r, _, _ = env
     pre(r)

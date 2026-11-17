@@ -16,7 +16,7 @@ function load(overrides = {}) {
     useState: value => [value, () => {}], useRef: value => ({ current: value }), useEffect: effect => effects.push(effect),
     useQuery: options => { queryOptions = options; return query }, useValue: atom => atom.get(), ...overrides })
   const code = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '').replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '').replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-  const api = new Function(...Object.keys(params), code + '\nreturn {executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,pluginDefinition}')( ...Object.values(params))
+  const api = new Function(...Object.keys(params), code + '\nreturn {executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,executionSpare,composerShowsFocused,pluginDefinition}')( ...Object.values(params))
   // Leaf rendering/invalidation fixture. Actual observer transport/fences are
   // exercised separately in test_active_execution_observer.mjs.
   const observer = { cacheId: 'leaf-fixture', revisionAtom: { get: () => 1 }, eligible: selected => Boolean(api.executionScopeKey(selected)),
@@ -172,6 +172,68 @@ test('model and provider stay one pair from one source; the roster model is neve
   const routed = snapshot(); routed.rows[0] = { ...routed.rows[0], observed: { kind: 'model', role: 'light', model: 'route-model', provider: 'route-provider', evidence: 'runtime_reported' } }
   assert.deepEqual(api.mergeExecutionRows(routed, live('running'), 'claire').map(item => [item.model, item.provider, item.model_source])[0], ['route-model', 'route-provider', 'route'])
 })
+test('a spare-model switch names the model that ran and the routed model it replaced', () => {
+  const api = load()
+  const data = snapshot(); data.rows[0] = { ...data.rows[0], requested: { kind: 'model', role: 'light', slot: 'code-simple', profile: null }, status: 'running',
+    model: 'gemini-4-hydrogen', provider: 'gemini', models: [{ model: 'gpt-6.1-terra', provider: 'openai-codex' }, { model: 'gemini-4-hydrogen', provider: 'gemini' }, { model: '../bad', provider: 'x' }] }
+  const [row] = api.mergeExecutionRows(data, { subagents: [] }, 'claire')
+  assert.equal(row.models.length, 2, 'unsafe pairs are dropped')
+  assert.equal(api.executionSpare(row).changed, true)
+  const line = text(api.ExecutionLine({ row }))
+  assert.match(line, /gemini-4-hydrogen · 모델 변경 관찰/)
+  assert.match(line, /gemini-4-hydrogen · gemini \(API 호출 기준 · 모델 변경 관찰: gpt-6\.1-terra · openai-codex → gemini-4-hydrogen · gemini\)/)
+  // The first observed pair is not claimed to be the routed model.
+  assert.doesNotMatch(line, /기본 gpt|에서 전환/)
+  assert.match(text(api.ExecutionStrip({ rows: [row] }).props.children[0]), /gemini-4-hydrogen \(모델 변경\)/)
+  const back = { ...row, model: 'gpt-6.1-terra', provider: 'openai-codex' }
+  assert.equal(api.executionSpare(back).changed, false)
+  assert.match(text(api.ExecutionLine({ row: back })), /변경 관찰: gpt-6\.1-terra · openai-codex → gemini-4-hydrogen · gemini/)
+  const aba = { ...back, models: [...row.models.slice(0, 2), { model: 'gpt-6.1-terra', provider: 'openai-codex' }] }
+  assert.match(text(api.ExecutionLine({ row: aba })), /gpt-6\.1-terra · openai-codex → gemini-4-hydrogen · gemini → gpt-6\.1-terra · openai-codex\)/)
+  const cut = { ...aba, models_truncated: true }
+  assert.match(text(api.ExecutionLine({ row: cut })), /gpt-6\.1-terra · openai-codex → … → gemini-4-hydrogen/)
+  // One pair only: no spare claim; route/roster sources never claim a spare.
+  assert.equal(api.executionSpare({ ...row, models: [row.models[0]] }), null)
+  assert.equal(api.executionSpare({ ...row, model_source: 'roster' }), null)
+})
+test('with split chats the strip shows only in the surface holding the focused chat', () => {
+  const api = load()
+  const surface = (target, attrs = {}) => ({ getAttribute: name => name === 'data-composer-target' ? target : attrs[name] ?? null, hasAttribute: name => name in attrs })
+  const node = (target, attrs) => ({ closest: selector => selector === '[data-chat-surface]' && target !== undefined ? surface(target, attrs) : null })
+  const root = tiles => ({ querySelectorAll: () => tiles.map(id => surface(`tile:${id}`)) })
+  // runtime ids: primary runs 'ra'; tile B runs 'rb'.
+  const shows = (el, stored, tiles, focusedRuntime, primary = 'ra') => api.composerShowsFocused(el, stored, root(tiles), focusedRuntime, primary)
+  assert.equal(shows(node('tile:B'), 'B', ['B', 'C'], 'rb'), true)
+  assert.equal(shows(node('tile:C'), 'B', ['B', 'C'], 'rb'), false)
+  assert.equal(shows(node('main'), 'B', ['B', 'C'], 'rb'), false, 'focused chat is in a tile')
+  assert.equal(shows(node('main'), 'A', ['B', 'C'], 'ra'), true, 'focused chat is the primary (positive runtime match)')
+  // Focused tile B parked (unmounted) behind another tab: no tile:B node, but the runtime is B's.
+  assert.equal(shows(node('main'), 'B', [], 'rb'), false, 'a missing tile node is not proof the primary holds the chat')
+  // The same chat open in the primary and a tile: the tile shows it, the primary hides.
+  assert.equal(shows(node('main'), 'B', ['B'], 'ra', 'ra'), false)
+  assert.equal(shows(node('tile:B'), 'B', ['B'], 'ra', 'ra'), true)
+  // Fresh draft / unresolved runtime: the primary needs a positive match.
+  assert.equal(shows(node('main'), null, ['B'], null), false)
+  assert.equal(shows(node('main'), null, ['B'], 'ra'), true)
+  assert.equal(shows(node('tile:B'), null, ['B'], 'ra'), false)
+  assert.equal(api.composerShowsFocused(node('tile:x"]\n'), 'x"]\n', root(['x"]\n'])), true, 'ids are compared, never put into a selector')
+  // Popped-out composers resolve through their owner surface id.
+  const owned = { closest: selector => selector === '[data-composer-owner]' ? { getAttribute: () => 'surface-2' } : null }
+  const surfaces = { querySelectorAll: () => [{ getAttribute: name => ({ 'data-composer-surface-id': 'surface-2', 'data-composer-target': 'tile:C' })[name] ?? null, hasAttribute: () => false }] }
+  assert.equal(api.composerShowsFocused(owned, 'B', surfaces), false)
+  assert.equal(api.composerShowsFocused(owned, 'C', surfaces), true)
+  const mainOwned = { getAttribute: name => ({ 'data-composer-surface-id': 'surface-1', 'data-composer-target': 'main' })[name] ?? null, hasAttribute: () => false }
+  const poppedMain = { closest: selector => selector === '[data-composer-owner]' ? { getAttribute: () => 'surface-1' } : selector === '[data-floating-composer-target]' ? { getAttribute: () => 'main' } : null }
+  const withMain = { querySelectorAll: () => [mainOwned, surface('tile:B')] }
+  assert.equal(api.composerShowsFocused(poppedMain, 'B', withMain, 'rb', 'ra'), false, 'popped-out primary resolves to the primary surface')
+  assert.equal(api.composerShowsFocused(poppedMain, 'A', withMain, 'ra', 'ra'), true)
+  const floating = { closest: selector => selector === '[data-floating-composer-target]' ? { getAttribute: () => 'tile:B' } : null }
+  assert.equal(api.composerShowsFocused(floating, 'B', root([])), true)
+  assert.equal(api.composerShowsFocused(floating, 'C', root([])), false)
+  assert.equal(api.composerShowsFocused(node(undefined), 'B', root([])), true, 'unknown markup fails open')
+  assert.equal(api.composerShowsFocused(node('other'), 'B', root([])), true)
+})
+
 test('full-profile job controls and the profile-job guide stay reachable from the composer strip', () => {
   const api = load(), job = { id: 'job-1', target_profile: 'wallace', status: 'running' }
   const rows = [{ id: 'gateway:job-1', execution_mode: 'gateway', requested: { kind: 'profile', profile: 'wallace', role: null }, observed: unknown(), status: 'running', job }, row()]

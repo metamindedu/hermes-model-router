@@ -1,6 +1,6 @@
 [project]
 name = "hermes-model-router"
-version = "0.11.1"
+version = "0.11.2"
 description = "Profile-scoped model settings and default-on task routing for Hermes Agent"
 license = "MIT"
 requires-python = ">=3.10"
