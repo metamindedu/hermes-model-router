@@ -118,7 +118,7 @@ function harness(options = {}) {
   }
   const find = predicate => { const node = [...walk(tree)].find(predicate); assert.ok(node, 'Control not found'); return node }
   const byId = id => find(node => node.props?.id === id)
-  const flush = async () => { for (let at = 0; at < 20; at++) await Promise.resolve(); render() }
+  const flush = async () => { for (let at = 0; at < 40; at++) await Promise.resolve(); render() }
   const click = id => { const node = byId(id); assert.ok(!node.props.disabled); node.props.onClick(); render() }
   const button = label => find(node => node.type === 'Button' && text(node).includes(label))
   const clickLabel = label => { const node = button(label); assert.ok(!node.props.disabled); node.props.onClick(); render() }
@@ -1367,6 +1367,23 @@ test('with nothing changed the model save is disabled; a persisted wide list cop
   // Picking the list again is a new, visible decision.
   h.click('model-target-source')
   assert.match(text(h.byId('model-section-summary')), /적용 대상: other/)
+  assert.equal(h.byId('model-section-save').props.disabled, false)
+})
+test('a changed delegation method or spare model that no selected profile can take is an error, not a quiet no-op', async () => {
+  const data = slotFixture()
+  const names = data.profiles.map(row => row.name)
+  const loaded = data.current_profile, away = names.find(name => name !== loaded)
+  data.profiles.find(row => row.name === away).routing.enabled = false
+  const h = harness({ data })
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+  h.click('model-target-none'); h.check(`model-target-${away}`, true)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  assert.match(text(h.byId('model-section-targets')), /받을 수 있는 프로필이 적용 대상에 없습니다/)
+  h.byId('model-section-save').props.onClick?.(); await h.flush()
+  assert.deepEqual(h.calls, [], 'nothing is sent while the change has nowhere to go')
+  h.check(`model-target-${loaded}`, true)
+  assert.doesNotMatch(text(h.byId('model-section-targets')), /받을 수 있는 프로필이 적용 대상에 없습니다/)
   assert.equal(h.byId('model-section-save').props.disabled, false)
 })
 

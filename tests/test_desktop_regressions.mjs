@@ -26,10 +26,50 @@ test('late reload after gateway switch does not replace draft or unlock state',a
  assert.deepEqual(changes,[])
 })
 
+// The page transport plus the two pure helpers it relies on, evaluated outside the module.
+function nativeCallSource(){
+ const cut=(from,to)=>{const at=source.indexOf(from);assert.ok(at>=0,from);return source.slice(at,source.indexOf(to,at))}
+ return [cut('function sameValue(','\nexport function selectedModelPreset'),cut('export const STATUS_PAGE_LIMIT','\n// The backend refuses a request body'),
+  cut('export async function nativeBackendCall','\nfunction RouterPage')].join('\n').replaceAll('export ','')
+}
+
+test('the page reads a status larger than one CLI reply in pages and joins it',async()=>{
+ const names=Array.from({length:11},(_,index)=>'profile-'+index)
+ const filler='x'.repeat(4600)
+ const row=name=>({name,models:{filler}})
+ const argvs=[]
+ const host={state:{profile:{get:()=> 'default'}},request:async(method,args)=>{
+  const sent=JSON.parse(args.argv.at(-1)); argvs.push(sent)
+  const wanted=sent.profiles||names
+  const page={revision:3,readiness_context:{base_identity:'i'},profile_names:names,profiles:wanted.slice(0,5).map(row),pending_profiles:wanted.slice(5)}
+  // Hermes cuts one reply at 48,000 characters.
+  return {blocked:false,code:0,output:('MODEL_ROUTER_JSON:'+JSON.stringify(page)).slice(0,48000)}
+ }}
+ const call=new Function('host',nativeCallSource()+'; return nativeBackendCall;')(host)
+ const status=await call('/status')
+ assert.deepEqual(status.profiles.map(item=>item.name),names)
+ assert.ok(JSON.stringify(status).length>48000,'the joined status is larger than a single reply could carry')
+ assert.deepEqual(argvs,[{paged:true},{paged:true,profiles:names.slice(5)},{paged:true,profiles:names.slice(10)}])
+ // An older backend refuses the paged body with exit code 2: the page asks once more the old way.
+ const seen=[]
+ const older={state:{profile:{get:()=> 'default'}},request:async(method,args)=>{
+  const sent=args.argv.at(-1); seen.push(sent)
+  return sent==='{}'?{blocked:false,code:0,output:'MODEL_ROUTER_JSON:{"revision":2,"profiles":[]}'}
+   :{blocked:false,code:2,output:'MODEL_ROUTER_JSON:{"error":"ValueError","message":"The request is invalid."}'}
+ }}
+ const legacy=new Function('host',nativeCallSource()+'; return nativeBackendCall;')(older)
+ assert.equal((await legacy('/status')).revision,2)
+ assert.deepEqual(seen,['{"paged":true}','{}'])
+ // Other operations are sent once, unchanged.
+ seen.length=0
+ await assert.rejects(()=>legacy('/preview',{body:{profile:'default'}}),/The request is invalid/)
+ assert.deepEqual(seen,['{"profile":"default"}'])
+})
+
 test('native RPC timeout outlives the backend command instead of expiring at default 30s',async()=>{
  const start=source.indexOf('export async function nativeBackendCall')
  const end=source.indexOf('\nfunction RouterPage',start)
- const body=source.slice(start,end).replace('export ','')
+ const body=nativeCallSource()
  let recorded
  const host={state:{profile:{get:()=> 'default'}},request:async(method,args,timeoutMs)=>{recorded={method,args,timeoutMs};return {blocked:false,code:0,output:'MODEL_ROUTER_JSON:'+JSON.stringify({revision:1})}}}
  const call=new Function('host',body+'; return nativeBackendCall;')(host)
@@ -40,13 +80,13 @@ test('native RPC timeout outlives the backend command instead of expiring at def
 test('native backend uses explicit-profile argv and framed JSON, no shell',async()=>{
  const start=source.indexOf('export async function nativeBackendCall')
  const end=source.indexOf('\nfunction RouterPage',start)
- const body=source.slice(start,end).replace('export ','')
+ const body=nativeCallSource()
  let recorded
  const host={state:{profile:{get:()=> 'default'}},request:async(method,args)=>{recorded={method,args};return {blocked:false,code:0,output:'MODEL_ROUTER_JSON:{"revision":1}\n'}}}
  const call=new Function('host',body+'; return nativeBackendCall;')(host)
  assert.equal((await call('/status')).revision,1)
  assert.equal(recorded.method,'cli.exec')
- assert.deepEqual(recorded.args.argv,['--profile','default','model-router','status','--body','{}'])
+ assert.deepEqual(recorded.args.argv,['--profile','default','model-router','status','--body','{"paged":true}'])
  assert.equal(recorded.args.profile,'default')
  await assert.rejects(()=>call('/arbitrary'))
 })

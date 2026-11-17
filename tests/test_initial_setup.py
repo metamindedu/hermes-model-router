@@ -182,6 +182,24 @@ def test_initial_managed_state_and_invalid_routes_are_manual(setup_fixture, monk
     assert calls == []
 
 
+def test_initial_setup_checks_the_slot_routes_purposes_run_on(setup_fixture, monkeypatch):
+    service, calls, _, ready = setup_fixture
+    # The fixture's route config predates slots (no key): it is judged by its tier routes alone.
+    legacy = service.native_route_config('default')
+    assert 'slots' not in legacy
+    baseline = native.initial_setup_status(service, 'default')
+    assert baseline['eligible'] is True
+    planner = {'provider': 'fixture', 'model': 'planner', 'reasoning': 'high'}
+    good = dict(legacy, slots={'design': planner, 'code-simple': legacy['light']})
+    monkeypatch.setattr(service, 'native_route_config', lambda name: good)
+    assert native.initial_setup_status(service, 'default')['action'] == baseline['action']
+    broken = dict(legacy, slots={'design': {}, 'code-simple': legacy['light']})
+    monkeypatch.setattr(service, 'native_route_config', lambda name: broken)
+    status = native.initial_setup_status(service, 'default')
+    assert status['eligible'] is False and status['action'] == 'manual'
+    assert calls == []
+
+
 @pytest.mark.parametrize('container', ['absent', 'empty', 'null'])
 def test_initial_delegation_container_presence_is_preserved(setup_fixture, container):
     service, calls, _, _ = setup_fixture

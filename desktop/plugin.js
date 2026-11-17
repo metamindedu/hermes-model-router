@@ -928,6 +928,39 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
   return { body, errors }
 }
 
+// Hermes returns at most 48,000 characters of one CLI call's output, so the status of many profiles
+// is read in size-bounded pages and joined here. `send(body)` performs one status call. Every page
+// must describe the same revision, installation and profile list, otherwise nothing is returned.
+// A backend from before paging refuses any status body; it is then asked once the old way.
+export const STATUS_PAGE_LIMIT = 64
+export const STATUS_CHANGED_MESSAGE = '상태를 읽는 동안 설정이나 프로필 목록이 바뀌었습니다. 상태를 다시 불러오세요.'
+export async function readPagedStatus(send) {
+  let first
+  try { first = await send({ paged: true }) }
+  catch (error) {
+    if (error?.backendError !== 'ValueError') throw error
+    return send({})
+  }
+  if (!first || !Array.isArray(first.pending_profiles)) return first
+  const names = first.profile_names
+  const rowNames = data => Array.isArray(data?.profiles) ? data.profiles.map(row => row?.name) : null
+  const identity = data => data?.readiness_context?.base_identity ?? null
+  const fail = () => { throw new Error(STATUS_CHANGED_MESSAGE) }
+  if (!Array.isArray(names) || !rowNames(first) || !sameValue([...rowNames(first), ...first.pending_profiles], names)) fail()
+  const rows = [...first.profiles]
+  let pending = first.pending_profiles
+  for (let page = 0; pending.length; page++) {
+    if (page >= STATUS_PAGE_LIMIT) fail()
+    const next = await send({ paged: true, profiles: pending })
+    if (!next || next.revision !== first.revision || identity(next) !== identity(first) || !sameValue(next.profile_names, names) ||
+        !rowNames(next)?.length || !Array.isArray(next.pending_profiles) || !sameValue([...rowNames(next), ...next.pending_profiles], pending)) fail()
+    rows.push(...next.profiles)
+    pending = next.pending_profiles
+  }
+  const { pending_profiles: _pending, profile_names: _names, ...status } = first
+  return { ...status, profiles: rows }
+}
+
 // The backend refuses a request body over 16,384 characters before reading it; say why up front.
 export const PREVIEW_BODY_LIMIT = 16384
 export const BODY_TOO_LARGE_MESSAGE = '한 번에 저장하기에는 내용이 너무 큽니다. 적용 대상 프로필을 줄여 여러 번에 나눠 저장하세요.'
@@ -1432,15 +1465,21 @@ export function selectPreparationTargetRoute(routes, sourceRoute, name) {
 }
 
 export async function readProfilePreparationStatus(transport, route) {
-  const reply = await transport.requestProfile(route, 'cli.exec', {
-    argv: ['--profile', route.targetProfile, 'model-router', 'status', '--body', '{}'],
-    profile: route.targetProfile, timeout: 180
-  }, 210000)
-  if (!reply || reply.blocked || reply.code !== 0) throw new Error('preparation_status_unavailable')
-  const frames = String(reply.output || '').split(/\r?\n/).filter(line => line.startsWith('MODEL_ROUTER_JSON:'))
-  if (frames.length !== 1) throw new Error('preparation_status_unavailable')
+  const once = async body => {
+    const reply = await transport.requestProfile(route, 'cli.exec', {
+      argv: ['--profile', route.targetProfile, 'model-router', 'status', '--body', JSON.stringify(body)],
+      profile: route.targetProfile, timeout: 180
+    }, 210000)
+    if (!reply || reply.blocked) throw new Error('preparation_status_unavailable')
+    const frames = String(reply.output || '').split(/\r?\n/).filter(line => line.startsWith('MODEL_ROUTER_JSON:'))
+    if (frames.length !== 1) throw new Error('preparation_status_unavailable')
+    let page
+    try { page = JSON.parse(frames[0].slice('MODEL_ROUTER_JSON:'.length)) } catch { throw new Error('preparation_status_unavailable') }
+    if (reply.code !== 0 || page?.error) throw Object.assign(new Error('preparation_status_unavailable'), { backendError: page?.error })
+    return page
+  }
   let data
-  try { data = JSON.parse(frames[0].slice('MODEL_ROUTER_JSON:'.length)) } catch { throw new Error('preparation_status_unavailable') }
+  try { data = await readPagedStatus(once) } catch { throw new Error('preparation_status_unavailable') }
   if (!data || !Array.isArray(data.profiles) || !validPreparationContext(data.readiness_context)) throw new Error('preparation_status_unavailable')
   return data
 }
@@ -1591,15 +1630,21 @@ export function initialSetupEligible(row, safety, base) {
 
 async function initialSetupRequest(transport, route, operation, body = {}) {
   if (!['status', 'initial-setup-preview', 'apply'].includes(operation)) throw new Error('initial_setup_invalid_operation')
-  const response = await transport.requestProfile(route, 'cli.exec', {
-    argv: ['--profile', route.targetProfile, 'model-router', operation, '--body', JSON.stringify(body)],
-    profile: route.targetProfile, timeout: 180
-  }, 210000)
-  const frames = String(response?.output || '').split(/\r?\n/).filter(line => line.startsWith('MODEL_ROUTER_JSON:'))
-  if (!response || response.blocked || response.code !== 0 || frames.length !== 1) throw new Error('initial_setup_reply_unavailable')
-  const data = JSON.parse(frames[0].slice('MODEL_ROUTER_JSON:'.length))
-  if (!data || typeof data !== 'object' || data.error) throw new Error('initial_setup_reply_unavailable')
-  if (operation === 'status' && (!Array.isArray(data.profiles) || !validInitialContext(data.readiness_context))) throw new Error('initial_setup_status_unavailable')
+  const once = async payload => {
+    const response = await transport.requestProfile(route, 'cli.exec', {
+      argv: ['--profile', route.targetProfile, 'model-router', operation, '--body', JSON.stringify(payload)],
+      profile: route.targetProfile, timeout: 180
+    }, 210000)
+    const frames = String(response?.output || '').split(/\r?\n/).filter(line => line.startsWith('MODEL_ROUTER_JSON:'))
+    if (!response || response.blocked || frames.length !== 1) throw new Error('initial_setup_reply_unavailable')
+    const reply = JSON.parse(frames[0].slice('MODEL_ROUTER_JSON:'.length))
+    if (response.code !== 0 || !reply || typeof reply !== 'object' || reply.error) throw Object.assign(new Error('initial_setup_reply_unavailable'), { backendError: reply?.error })
+    return reply
+  }
+  if (operation !== 'status') return once(body)
+  let data
+  try { data = await readPagedStatus(once) } catch { throw new Error('initial_setup_reply_unavailable') }
+  if (!data || !Array.isArray(data.profiles) || !validInitialContext(data.readiness_context)) throw new Error('initial_setup_status_unavailable')
   return data
 }
 
@@ -2314,6 +2359,7 @@ function NativeDelegationCard({ dto, draft, profiles, origin, targets, disabled,
   })
   const slotCard = slot => {
     const declaration = slots.draft[slot.id]
+    if (!declaration) return null  // a draft seeded from an incomplete status shows no card rather than failing the page
     const resolved = slotResolvedRoute(declaration, slots.models)
     const coder = slot.id === 'verify-complex' ? slotResolvedRoute(slots.draft['code-complex'], slots.models) : null
     const sameAsCoder = Boolean(coder && resolved && coder.model && coder.provider === resolved.provider && coder.model === resolved.model)
@@ -2414,6 +2460,12 @@ function NativeDelegationCard({ dto, draft, profiles, origin, targets, disabled,
 }
 
 export async function nativeBackendCall(path, options = {}) {
+  // The status of many profiles does not fit one CLI reply; it is read in pages.
+  if (path === '/status' && !options.body) return readPagedStatus(body => nativeBackendCallOnce(path, { ...options, body }))
+  return nativeBackendCallOnce(path, options)
+}
+
+async function nativeBackendCallOnce(path, options = {}) {
   const operation = { '/status': 'status', '/preview': 'preview', '/fallback-preview': 'fallback-preview', '/delegation-preview': 'delegation-preview', '/initial-setup-preview': 'initial-setup-preview', '/apply': 'apply' }[path]
   if (!operation) throw new Error('지원하지 않는 플러그인 요청입니다.')
   const profile = options.profile || host.state.profile.get() || 'default'
@@ -2428,7 +2480,7 @@ export async function nativeBackendCall(path, options = {}) {
   let data
   try { data = JSON.parse(line.slice('MODEL_ROUTER_JSON:'.length)) }
   catch { throw new Error('플러그인 응답이 잘렸거나 손상됐습니다. 상태를 다시 확인하세요.') }
-  if (reply.code !== 0 || data.error) throw new Error(data.message || '요청이 완료되지 않았습니다.')
+  if (reply.code !== 0 || data.error) throw Object.assign(new Error(data.message || '요청이 완료되지 않았습니다.'), { backendError: data.error })
   return data
 }
 
@@ -2723,7 +2775,10 @@ function RouterPage({ ctx: pluginContext }) {
   }
   const sectionWriteNeeded = modelWriteNeeded || routingCopyPending || nativeWriteNeeded
   const noTargetError = (modelDraftChanged || slotDraftChanged || nativeDraftChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
-  const sectionSaveError = nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError ||
+  // A changed delegation method or spare model that no selected profile can take is never dropped silently.
+  const noNativeTargetError = nativeDraftChanged && selectedTargets.length && !nativeWriteTargets.length
+    ? '바꾼 ‘맡기는 방식·예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다. 받을 수 있는 프로필을 선택하거나 그 변경을 되돌리세요.' : ''
+  const sectionSaveError = nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
     (nativeWriteNeeded && !nativeStorageAvailable ? '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.' : '')
   const customSlotCount = draft?.slots ? TASK_SLOTS.filter(slot => draft.slots[slot.id]?.follow === 'custom').length : 0
   const spareSlotCount = nativeSlotCopy ? TASK_SLOTS.filter(slot => nativeDraftSlotPolicy(nativeDelegationDraft)[slot.id].mode === 'custom').length : 0
@@ -3092,7 +3147,7 @@ function RouterPage({ ctx: pluginContext }) {
       setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || refreshPendingRef.current || !profileBaselines) return
     const slotsNeeded = routingCopyPending
     const storeScope = modelWriteNeeded && slotsNeeded ? null : slotsNeeded ? 'routing' : 'models'
-    if (!sectionWriteNeeded) return
+    if (!sectionWriteNeeded || sectionSaveError) return
     const snapshot = freezeDeep({ ...captureSaveSnapshot(),
       nativeDraft: nativeDelegationDraft ? deepClone(nativeDelegationDraft) : null,
       nativeTargets: [...nativeWriteTargets], nativeBaselines: deepClone(nativeDelegationBaselines),

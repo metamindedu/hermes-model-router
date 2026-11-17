@@ -170,6 +170,87 @@ def test_an_older_package_appearing_after_preview_stops_the_apply_but_not_a_clea
     assert json.loads(service.store_path.read_text())['schema'] == SCHEMA
 
 
+def test_apply_gate_stops_only_added_or_changed_slots(tmp_path, monkeypatch):
+    from pathlib import Path
+    from model_router.service import RevisionConflict
+    service, cli, body = setup(tmp_path, monkeypatch)
+    planner = {'follow': 'custom', 'custom': route('operator', 'planner', 'high')}
+    body['routing']['slots'] = {'design': planner}
+    body['routing_targets'] = ['p1', 'p2']
+    assert service.apply(service.preview(body)['plan_id'])['status'] == 'applied'
+    package = service._profile_home('default') / 'plugins' / 'model-router'
+    (package / 'model_router').mkdir(parents=True)
+    (package / 'plugin.yaml').write_text('name: model-router\n', encoding='utf-8')  # an older package appears
+    status = service.status()
+    assert status['slot_capabilities']['blocking_profiles'] == ['default']
+    row = find_profile(status, 'p1')
+
+    def scoped(scope, **changes):
+        return {'expected_revision': service.status()['revision'], 'profile': 'p1', 'save_scope': scope,
+                'models': copy.deepcopy(row['models']), 'model_targets': [], 'routing_targets': [],
+                'routing': {key: value for key, value in copy.deepcopy(row['routing']).items() if key != 'slots'},
+                'routing_profiles': ['default', 'p1', 'p2'], **changes}
+
+    # A save that leaves stored slots as they are keeps working while the older package is present.
+    edited = copy.deepcopy(row['models']); edited['title'] = route('operator', 'new-title', 'none')
+    assert service.apply(service.preview(scoped('models', models=edited, model_targets=['p1']))['plan_id'])['status'] == 'applied'
+    assert json.loads(service.store_path.read_text())['profiles']['p2']['routing']['slots'] == {'design': planner}
+    # Clearing one profile while another keeps its slots removes data only: not stopped at apply.
+    clear = scoped('routing', routing_targets=['p1'])
+    clear['routing']['slots'] = {}
+    assert service.apply(service.preview(clear)['plan_id'])['status'] == 'applied'
+    stored = json.loads(service.store_path.read_text())
+    assert 'slots' not in stored['profiles']['p1']['routing'] and stored['profiles']['p2']['routing']['slots'] == {'design': planner}
+    assert stored['schema'] == SLOT_SCHEMA
+    # Changing a slot is stopped at apply when the older package appears after the preview.
+    (package / 'model_router' / 'slots.py').write_bytes(Path(slots.__file__).read_bytes())
+    change = scoped('routing', routing_targets=['p2'])
+    change['profile'] = 'p2'
+    change['models'] = copy.deepcopy(find_profile(service.status(), 'p2')['models'])
+    change['routing']['slots'] = {'design': {'follow': 'main', 'custom': None}}
+    plan = service.preview(change)['plan_id']
+    (package / 'model_router' / 'slots.py').unlink()
+    before = service.store_path.read_bytes()
+    with pytest.raises(RevisionConflict, match='every installed profile'):
+        service.apply(plan)
+    assert service.store_path.read_bytes() == before
+
+
+def test_paged_status_bounds_each_reply_and_names_what_is_left(tmp_path, monkeypatch):
+    names = ['default'] + ['profile-%02d' % index for index in range(1, 24)]
+    root, cli = setup_home(tmp_path, monkeypatch, profiles=tuple(names))
+    service = Service(root=root, writer=cli.writer)
+    service.initialize(names)
+    cli.calls.clear()
+    full = service.status()
+    assert 'pending_profiles' not in full and 'profile_names' not in full
+    assert [row['name'] for row in full['profiles']] == names
+    size = lambda value: len(json.dumps(value, ensure_ascii=False, separators=(',', ':')))
+    assert size(full) > 48000, 'the fixture must be larger than one Hermes CLI reply'
+    pages = [service.status(paged=True)]
+    while pages[-1]['pending_profiles']:
+        assert len(pages) < len(names)
+        pages.append(service.status(paged=True, profiles=pages[-1]['pending_profiles']))
+    assert len(pages) > 1
+    for page in pages:
+        assert size(page) <= Service.STATUS_PAGE_BUDGET < 48000 and page['profiles']
+        assert page['profile_names'] == names and page['revision'] == full['revision']
+        assert {key: value for key, value in page.items() if key not in ('profiles', 'pending_profiles', 'profile_names')} == \
+            {key: value for key, value in full.items() if key != 'profiles'}
+    assert [row for page in pages for row in page['profiles']] == full['profiles']
+    # One row is always returned, even when it alone is over the budget.
+    monkeypatch.setattr(Service, 'STATUS_PAGE_BUDGET', 1)
+    tiny = service.status(paged=True)
+    assert [row['name'] for row in tiny['profiles']] == names[:1] and tiny['pending_profiles'] == names[1:]
+    assert [row['name'] for row in service.status(paged=True, profiles=names[5:7])['profiles']] == names[5:6]
+    with pytest.raises(ValueError):
+        service.status(profiles=names[:1])
+    for bad in ([], [names[1], names[1]], ['unknown-profile'], names[1], [1]):
+        with pytest.raises(ValueError):
+            service.status(paged=True, profiles=bad)
+    assert cli.calls == []
+
+
 def test_store_schema_and_slot_key_must_agree(tmp_path, monkeypatch):
     service, cli, body = setup(tmp_path, monkeypatch)
     data = json.loads(service.store_path.read_text())

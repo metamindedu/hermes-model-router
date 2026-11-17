@@ -134,4 +134,11 @@ Left as is, known:
 - Dead state in `desktop/plugin.js` after the merge (`nativeDelegationTargets`, `routingTargets`, `routingBaseline`, the `models` / `routing` branches of `saveSection`, `sectionErrors.routing`).
 - Two React "unique key" development warnings from older sections that pass child arrays to `jsx` (runtime-limit fields, fallback target group, combined-save summary).
 - `README.md` and the `coding_route` tool description still describe Heavy/Light; `PLAN.md` does not list `routing_config().purpose_slots`.
-- `model_router/slots.py`, `tests/test_slots.py`, `tests/test_slots_desktop.mjs`, `tests/test_model_picker_desktop.mjs` and the fixture files are untracked; a commit must add them or the package cannot import.
+- `model_router/slots.py`, `tests/test_slots.py`, `tests/test_slots_desktop.mjs`, `tests/test_model_picker_desktop.mjs` and the fixture files are part of the v0.11.0 commit.
+
+## Corrections after the review of the commit
+
+- **Status is read in pages.** Hermes returns at most 48,000 characters of one CLI call's output. The slot fields grew the status of eleven real profiles to 50,866 characters, so the page could not load. `status` accepts `{"paged": true}` and an optional `profiles` list, returns rows up to `STATUS_PAGE_BUDGET` (30,000 characters) and names the rest in `pending_profiles`; the page joins the pages only when revision, installation identity and profile list agree. A call without a body returns the complete status as before. A backend from before paging refuses the body and is then asked once the old way.
+- The apply-time check stops only a plan that adds or changes some profile's slots; clearing one profile while another keeps its slots is no longer refused.
+- A changed delegation method or spare model that no selected profile can take is shown as an error instead of an empty summary, and the save handler refuses to run while the section shows an error.
+- Tests were added for the unchanged-slot apply path, the slot routes checked by initial setup, paging on both sides and the status CLI body.

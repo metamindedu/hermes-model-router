@@ -34,7 +34,7 @@ function harness(options = {}) {
     } else assert.deepEqual(actualRoute, route)
     if (method === 'plugins.catalog.lookup') return { status: 'found', entry: { name: 'model-router', repo: 'https://github.com/metamindedu/hermes-model-router', sha: options.movedPin ? 'c'.repeat(40) : snapshot.readiness_context.release.ref, version: snapshot.readiness_context.release.version, subdir: '' } }
     if (method === 'cli.exec') {
-      assert.deepEqual(params.argv, ['--profile', 'default', 'model-router', 'status', '--body', '{}'])
+      assert.deepEqual(params.argv, ['--profile', 'default', 'model-router', 'status', '--body', '{"paged":true}'])
       if (options.foreignBase) current.readiness_context.base_identity = id('d')
       return { code: 0, blocked: false, output: 'MODEL_ROUTER_JSON:' + JSON.stringify(current) + '\n' }
     }

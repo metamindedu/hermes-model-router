@@ -50,8 +50,10 @@ def register(ctx):
                     except Exception:
                         return False
                 if args.operation == "status":
-                    if body: raise ValueError("status does not accept a body")
-                    result = service.status()
+                    # A page asks for a size-bounded reply; anything else in the body is refused.
+                    if body and (set(body) - {"paged", "profiles"} or body.get("paged") is not True):
+                        raise ValueError("status accepts only paged and profiles")
+                    result = service.status(paged=True, profiles=body.get("profiles")) if body else service.status()
                     available = completion_available()
                     result['role_proposal'] = {'schema': 1, 'transport': 'native_cli', 'available': available, 'reason_code': None if available else 'unsupported_sdk'}
                     return result

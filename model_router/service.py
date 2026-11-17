@@ -1038,68 +1038,28 @@ class Service:
         from .role_metadata import resolve
         return resolve(self, profile)
 
-    def status(self) -> dict[str, Any]:
+    # Hermes returns at most 48,000 characters of a CLI call's output to the page; a larger reply
+    # arrives cut and cannot be parsed. A paged reply stays well under that.
+    STATUS_PAGE_BUDGET = 30000
+
+    def status(self, *, paged: bool = False, profiles: list[str] | None = None) -> dict[str, Any]:
+        """Settings status. ``paged`` bounds the reply size: rows that do not fit are named in
+        ``pending_profiles`` and are read with a further call passing them as ``profiles``."""
         discovered = self._discover_profiles()
+        if profiles is not None:
+            if not paged:
+                raise ValueError("profiles requires a paged status")
+            if (not isinstance(profiles, list) or not profiles or any(not isinstance(name, str) for name in profiles)
+                    or len(set(profiles)) != len(profiles) or not set(profiles) <= set(discovered)):
+                raise ValueError("profiles must be distinct known profile names")
         stored = self._load_store()
         entries = stored["profiles"] if stored else {}
-        result_profiles: list[dict[str, Any]] = []
-        for name in discovered:
-            entry = entries.get(name)
-            try:
-                actual = self._actual_models(name, tolerate=True)
-            except ServiceError:
-                actual = {}
-            if entry is None:
-                models = actual
-                routing = self._initial_routing(name)
-                view_entry = {
-                    "models": models,
-                    "routing": routing,
-                    "native_fallback": None,
-                    "delegation_fallback": None,
-                    "fallback_consent": {"native": None, "routing": None, "delegation": None},
-                }
-            else:
-                models, routing = entry["models"], entry["routing"]
-                view_entry = entry
-            drift: list[str] = []
-            if not actual:
-                drift.append("actual_models_unavailable")
-            else:
-                for role in MODEL_ROLES:
-                    if models.get(role) != actual.get(role):
-                        drift.append(f"models.{role}")
-            try:
-                disabled = self._read_disabled(name)
-                if (not ROUTING_SKILL_IDS.intersection(disabled)) != bool(routing.get("enabled")):
-                    drift.append("skills.disabled")
-            except ServiceError:
-                drift.append("skills.disabled_unavailable")
-            result_profiles.append({
-                "name": name,
-                "models": models,
-                "routing": routing,
-                "slots": self._slots_dto(name, routing),
-                "actual_models": actual,
-                "drift": drift,
-                "fallbacks": self._fallback_dto(name, view_entry),
-                "readiness": installation.profile_readiness(self, name, stored),
-                "native_delegation": native_service.status(self, name),
-                "role_intro": self._role_intro(name),
-                "initial_setup": native_service.initial_setup_status(self, name),
-                "timeouts": {
-                    **timeouts.timeout_status(
-                        self._profile_home(name),
-                        enforcement_available=self._timeout_enforcement_available(name),
-                    ),
-                    "split_routing_supported": self._timeout_role_enforcement_available(name),
-                },
-            })
-        return {
+        wanted = [name for name in discovered if profiles is None or name in profiles]
+        result: dict[str, Any] = {
             "role_proposal": {"schema": 1, "transport": "native_cli", "available": False, "reason_code": "unsupported_transport"},
             "revision": stored["revision"] if stored else 0,
             "current_profile": self.active_profile(),
-            "profiles": result_profiles,
+            "profiles": [],
             "recent_apply": self._recent_apply(),
             "fallback_capabilities": dict(fallback_policy.CAPABILITIES),
             "readiness_context": installation.readiness_context(self),
@@ -1110,6 +1070,73 @@ class Service:
                 "purposes": dict(slot_model.PURPOSE_SLOTS),
                 "follows": list(slot_model.FOLLOWS),
                 "blocking_profiles": self._slot_blocking_profiles(discovered),
+            },
+        }
+        if not paged:
+            result["profiles"] = [self._status_row(name, entries, stored) for name in wanted]
+            return result
+        result["profile_names"] = list(discovered)
+        result["pending_profiles"] = []
+        size = len(json.dumps({**result, "pending_profiles": wanted}, ensure_ascii=False, separators=(",", ":")))
+        for index, name in enumerate(wanted):
+            row = self._status_row(name, entries, stored)
+            size += len(json.dumps(row, ensure_ascii=False, separators=(",", ":"))) + 1
+            if result["profiles"] and size > self.STATUS_PAGE_BUDGET:
+                result["pending_profiles"] = wanted[index:]
+                break
+            result["profiles"].append(row)
+        return result
+
+    def _status_row(self, name: str, entries: dict[str, Any], stored: dict[str, Any] | None) -> dict[str, Any]:
+        entry = entries.get(name)
+        try:
+            actual = self._actual_models(name, tolerate=True)
+        except ServiceError:
+            actual = {}
+        if entry is None:
+            models = actual
+            routing = self._initial_routing(name)
+            view_entry = {
+                "models": models,
+                "routing": routing,
+                "native_fallback": None,
+                "delegation_fallback": None,
+                "fallback_consent": {"native": None, "routing": None, "delegation": None},
+            }
+        else:
+            models, routing = entry["models"], entry["routing"]
+            view_entry = entry
+        drift: list[str] = []
+        if not actual:
+            drift.append("actual_models_unavailable")
+        else:
+            for role in MODEL_ROLES:
+                if models.get(role) != actual.get(role):
+                    drift.append(f"models.{role}")
+        try:
+            disabled = self._read_disabled(name)
+            if (not ROUTING_SKILL_IDS.intersection(disabled)) != bool(routing.get("enabled")):
+                drift.append("skills.disabled")
+        except ServiceError:
+            drift.append("skills.disabled_unavailable")
+        return {
+            "name": name,
+            "models": models,
+            "routing": routing,
+            "slots": self._slots_dto(name, routing),
+            "actual_models": actual,
+            "drift": drift,
+            "fallbacks": self._fallback_dto(name, view_entry),
+            "readiness": installation.profile_readiness(self, name, stored),
+            "native_delegation": native_service.status(self, name),
+            "role_intro": self._role_intro(name),
+            "initial_setup": native_service.initial_setup_status(self, name),
+            "timeouts": {
+                **timeouts.timeout_status(
+                    self._profile_home(name),
+                    enforcement_available=self._timeout_enforcement_available(name),
+                ),
+                "split_routing_supported": self._timeout_role_enforcement_available(name),
             },
         }
 
@@ -1870,7 +1897,9 @@ class Service:
             # The preview checked that every installed package can read slots; an older
             # package may have appeared since. Clearing all slots stays possible.
             after_slots = _stored_slots(plan.get("after") or {})
-            if after_slots and after_slots != _stored_slots((current or {}).get("profiles") or {}):
+            current_slots = _stored_slots((current or {}).get("profiles") or {})
+            # Only a plan that adds or changes some profile's slots is stopped; removing them never is.
+            if any(after_slots[name] != current_slots.get(name) for name in after_slots):
                 if self._slot_blocking_profiles(self._discover_profiles()):
                     raise RevisionConflict("task slots need every installed profile on this plugin version first; preview again")
             for item in plan.get("timeout_writes", []):

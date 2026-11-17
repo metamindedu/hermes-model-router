@@ -77,3 +77,14 @@ def test_registered_cli_injects_actual_ctx_facade(environment, monkeypatch, caps
     finally:
         reset_hermes_home_override(token)
     assert len(calls) == 1
+    # Status: a plain call is unchanged; a page asks for a size-bounded reply; anything else is refused.
+    plain = invoke('status', {})
+    assert 'pending_profiles' not in plain and 'profile_names' not in plain and plain['role_proposal']['transport'] == 'native_cli'
+    paged = invoke('status', {'paged': True})
+    assert paged['pending_profiles'] == [] and paged['profile_names'] == [row['name'] for row in plain['profiles']]
+    assert paged['profiles'] == plain['profiles'] and paged['role_proposal'] == plain['role_proposal']
+    subset = invoke('status', {'paged': True, 'profiles': paged['profile_names'][:1]})
+    assert [row['name'] for row in subset['profiles']] == paged['profile_names'][:1]
+    for bad in ({'paged': False}, {'profiles': paged['profile_names'][:1]}, {'paged': True, 'revision': 1}, {'paged': True, 'profiles': ['no-such-profile']}):
+        assert handler(SimpleNamespace(operation='status', body=json.dumps(bad))) == 2
+        assert json.loads(capsys.readouterr().out.split('MODEL_ROUTER_JSON:')[-1])['error'] == 'ValueError'
