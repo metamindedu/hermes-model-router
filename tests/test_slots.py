@@ -216,6 +216,37 @@ def test_apply_gate_stops_only_added_or_changed_slots(tmp_path, monkeypatch):
     assert service.store_path.read_bytes() == before
 
 
+def test_a_plan_reply_too_large_for_one_cli_reply_keeps_profile_and_field(tmp_path, monkeypatch):
+    from model_router.service import cli_reply, CLI_REPLY_BUDGET
+    names = ['default'] + ['profile-%02d' % index for index in range(1, 11)]
+    root, cli = setup_home(tmp_path, monkeypatch, profiles=tuple(names))
+    service = Service(root=root, writer=cli.writer)
+    service.initialize(names)
+    status = service.status()
+    row = find_profile(status, 'default')
+    long = 'x' * 130
+    models = {role: route('operator', 'vendor/%s-%s' % (role, long), 'high') for role in row['models']}
+    routing = copy.deepcopy(row['routing'])
+    routing['slots'] = {slot: {'follow': 'custom', 'custom': route('operator', 'vendor/%s-%s' % (slot, long), 'high')} for slot in slots.BUILTIN_SLOTS}
+    plan = service.preview({'expected_revision': status['revision'], 'profile': 'default', 'models': models, 'model_targets': names,
+                            'routing': routing, 'routing_targets': names, 'routing_profiles': names})
+    full = 'MODEL_ROUTER_JSON:' + json.dumps(plan, ensure_ascii=False, separators=(',', ':'))
+    assert len(full) > 48000, 'the fixture must be larger than one Hermes CLI reply'
+    line = cli_reply(plan)
+    assert len(line) <= CLI_REPLY_BUDGET + len('MODEL_ROUTER_JSON:') < 48000
+    sent = json.loads(line.split(':', 1)[1])
+    assert sent['changes_compacted'] is True and sent['plan_id'] == plan['plan_id'] and sent['expires_at'] == plan['expires_at']
+    assert sent['changes'] == [{'profile': change['profile'], 'field': change['field']} for change in plan['changes']]
+    # The stored plan is complete: applying it writes every value.
+    assert service.apply(sent['plan_id'])['status'] == 'applied'
+    assert all(find_profile(service.status(), name)['models'] == models for name in names)
+    # A reply that fits, and any reply without a change list, is printed unchanged.
+    small = {'plan_id': 'p', 'changes': plan['changes'][:2], 'warnings': []}
+    assert cli_reply(small) == 'MODEL_ROUTER_JSON:' + json.dumps(small, ensure_ascii=False, separators=(',', ':'))
+    big_status = service.status()
+    assert cli_reply(big_status) == 'MODEL_ROUTER_JSON:' + json.dumps(big_status, ensure_ascii=False, separators=(',', ':'))
+
+
 def test_paged_status_bounds_each_reply_and_names_what_is_left(tmp_path, monkeypatch):
     names = ['default'] + ['profile-%02d' % index for index in range(1, 24)]
     root, cli = setup_home(tmp_path, monkeypatch, profiles=tuple(names))

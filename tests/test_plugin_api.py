@@ -81,6 +81,8 @@ def plugin(monkeypatch):
         child = ModuleType(package.__name__ + "." + name)
         setattr(child, cls.__name__, cls)
         monkeypatch.setitem(sys.modules, child.__name__, child)
+    # The real cli_reply is tested in test_slots.py; this stand-in shows the handler printed through it.
+    sys.modules[package.__name__ + ".service"].cli_reply = lambda result: "MODEL_ROUTER_JSON:" + json.dumps({**result, "via_cli_reply": True}, ensure_ascii=False, separators=(",", ":"))
     constants = ModuleType("hermes_constants")
     constants.get_hermes_home = lambda: Path("C:/fake/profiles/claire")
     constants.set_hermes_home_override = lambda home: state["bound"].append(str(home)) or "token"
@@ -194,7 +196,8 @@ def test_native_fallback_command_is_scoped_and_framed(plugin, capsys):
     handler = state['cli'][3]
     assert handler(SimpleNamespace(operation='fallback-preview', body=json.dumps(body))) == 0
     output = capsys.readouterr().out
-    assert json.loads(output.split('MODEL_ROUTER_JSON:', 1)[1])['plan_id'] == 'f' * 32
+    reply = json.loads(output.split('MODEL_ROUTER_JSON:', 1)[1])
+    assert reply['plan_id'] == 'f' * 32 and reply['via_cli_reply'] is True, 'a plan reply is bounded to fit one Hermes CLI reply'
     assert state['fallback_body'] == body
     assert state['bound'][-1] == 'token'
     assert handler(SimpleNamespace(operation='fallback-preview', body='x' * 16385)) == 2

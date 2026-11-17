@@ -85,7 +85,8 @@ def register(ctx):
                     print('MODEL_ROUTER_JSON:' + json.dumps({'schema': 1, 'status': 'error', 'code': 'owner_mismatch'}, separators=(',', ':')))
                     return 0
             result = scoped(operation)
-            print("MODEL_ROUTER_JSON:" + json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+            from .model_router.service import cli_reply
+            print(cli_reply(result))
             return 0
         except Exception as exc:
             print("MODEL_ROUTER_JSON:" + json.dumps({"error": type(exc).__name__, "message": "작업이 완료되지 않았습니다. 상태를 확인한 후 다시 미리보기 하세요."}, ensure_ascii=False))

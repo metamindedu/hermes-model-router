@@ -226,6 +226,23 @@ class _FileLock:
             pass
 
 
+# A plan reply larger than this keeps each change's profile and field and drops its values.
+CLI_REPLY_BUDGET = 40000
+
+
+def cli_reply(result: Any) -> str:
+    """The framed JSON line of one CLI reply. Hermes hands the page at most 48,000 characters of
+    a CLI call's output, so a plan whose change list would be larger than ``CLI_REPLY_BUDGET``
+    is sent with each change's profile and field only (``changes_compacted``). The plan stored
+    for apply is not affected; only what is printed shrinks."""
+    text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    if len(text) <= CLI_REPLY_BUDGET or not isinstance(result, dict) or not isinstance(result.get("changes"), list):
+        return "MODEL_ROUTER_JSON:" + text
+    changes = [{key: change[key] for key in ("profile", "field") if key in change} if isinstance(change, dict) else {}
+               for change in result["changes"]]
+    return "MODEL_ROUTER_JSON:" + json.dumps({**result, "changes": changes, "changes_compacted": True}, ensure_ascii=False, separators=(",", ":"))
+
+
 class Service:
     """Settings authority for one Hermes base. ``root`` is a testable Hermes base override."""
 
