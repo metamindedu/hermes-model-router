@@ -1,0 +1,2529 @@
+{
+  "schema": 1,
+  "generated_by": "tests/test_native_contract_desktop.mjs",
+  "cases": [
+    {
+      "name": "backend-only-method-change",
+      "description": "Model save choosing the profile method: no slot cards on screen, so only the method is sent.",
+      "part": "native",
+      "origin": "default",
+      "seeds": {
+        "default": {
+          "backend": "model-router"
+        },
+        "p1": {
+          "backend": "model-router"
+        },
+        "p2": {
+          "backend": "model-router-auto"
+        }
+      },
+      "dtos": {
+        "default": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router",
+          "digest": "digest:default",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p1": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router",
+          "digest": "digest:p1",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p2": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-auto",
+          "digest": "digest:p2",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        }
+      },
+      "body": {
+        "expected_revision": 0,
+        "updates": [
+          {
+            "profile": "default",
+            "expected_digest": "digest:default",
+            "backend": "model-router-profiles",
+            "allow_profile_access": false
+          },
+          {
+            "profile": "p1",
+            "expected_digest": "digest:p1",
+            "backend": "model-router-profiles",
+            "allow_profile_access": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "model-save-with-slot-cards",
+      "description": "Model-only source with an edited slot spare model, copied to a profile-only target that has no stored policy.",
+      "part": "native",
+      "origin": "default",
+      "seeds": {
+        "default": {
+          "backend": "model-router",
+          "slot": "off"
+        },
+        "p1": {
+          "backend": "model-router-profiles"
+        },
+        "p2": {
+          "backend": "model-router"
+        }
+      },
+      "dtos": {
+        "default": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router",
+          "digest": "digest:default",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 2,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p1": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-profiles",
+          "digest": "digest:p1",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p2": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router",
+          "digest": "digest:p2",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        }
+      },
+      "body": {
+        "expected_revision": 0,
+        "updates": [
+          {
+            "profile": "default",
+            "expected_digest": "digest:default",
+            "backend": "model-router",
+            "allow_profile_access": false,
+            "slot_policy": {
+              "design": {
+                "mode": "custom",
+                "chain": [
+                  {
+                    "provider": "spare-service",
+                    "model": "design-spare"
+                  }
+                ]
+              },
+              "code-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "code-simple": {
+                "mode": "off",
+                "chain": []
+              },
+              "verify-simple": {
+                "mode": "off",
+                "chain": []
+              },
+              "verify-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "computer-use": {
+                "mode": "off",
+                "chain": []
+              }
+            },
+            "allow_additional_cost": true
+          },
+          {
+            "profile": "p1",
+            "expected_digest": "digest:p1",
+            "backend": "model-router",
+            "allow_profile_access": false,
+            "slot_policy": {
+              "design": {
+                "mode": "custom",
+                "chain": [
+                  {
+                    "provider": "spare-service",
+                    "model": "design-spare"
+                  }
+                ]
+              },
+              "code-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "code-simple": {
+                "mode": "off",
+                "chain": []
+              },
+              "verify-simple": {
+                "mode": "off",
+                "chain": []
+              },
+              "verify-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "computer-use": {
+                "mode": "off",
+                "chain": []
+              }
+            },
+            "allow_additional_cost": true
+          },
+          {
+            "profile": "p2",
+            "expected_digest": "digest:p2",
+            "backend": "model-router",
+            "allow_profile_access": false,
+            "slot_policy": {
+              "design": {
+                "mode": "custom",
+                "chain": [
+                  {
+                    "provider": "spare-service",
+                    "model": "design-spare"
+                  }
+                ]
+              },
+              "code-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "code-simple": {
+                "mode": "off",
+                "chain": []
+              },
+              "verify-simple": {
+                "mode": "off",
+                "chain": []
+              },
+              "verify-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "computer-use": {
+                "mode": "off",
+                "chain": []
+              }
+            },
+            "allow_additional_cost": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "model-save-auto-source",
+      "description": "Automatic source with an edited automatic slot spare model; the stored allow-list is not sent.",
+      "part": "native",
+      "origin": "default",
+      "seeds": {
+        "default": {
+          "backend": "model-router-auto",
+          "autoSlot": "off",
+          "routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "specialist"
+              }
+            ],
+            "default": null
+          }
+        },
+        "p1": {
+          "backend": "model-router-profiles"
+        },
+        "p2": {
+          "backend": "model-router-auto"
+        }
+      },
+      "dtos": {
+        "default": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-auto",
+          "digest": "digest:default",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 2,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "specialist"
+              }
+            ],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p1": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-profiles",
+          "digest": "digest:p1",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p2": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-auto",
+          "digest": "digest:p2",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        }
+      },
+      "body": {
+        "expected_revision": 0,
+        "updates": [
+          {
+            "profile": "default",
+            "expected_digest": "digest:default",
+            "backend": "model-router-auto",
+            "allow_profile_access": false,
+            "slot_policy": {
+              "design": {
+                "mode": "off",
+                "chain": []
+              },
+              "code-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "code-simple": {
+                "mode": "off",
+                "chain": []
+              },
+              "verify-simple": {
+                "mode": "custom",
+                "chain": [
+                  {
+                    "provider": "spare-service",
+                    "model": "verify-spare"
+                  }
+                ]
+              },
+              "verify-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "computer-use": {
+                "mode": "off",
+                "chain": []
+              }
+            },
+            "allow_additional_cost": true
+          },
+          {
+            "profile": "p2",
+            "expected_digest": "digest:p2",
+            "backend": "model-router-auto",
+            "allow_profile_access": false,
+            "slot_policy": {
+              "design": {
+                "mode": "off",
+                "chain": []
+              },
+              "code-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "code-simple": {
+                "mode": "off",
+                "chain": []
+              },
+              "verify-simple": {
+                "mode": "custom",
+                "chain": [
+                  {
+                    "provider": "spare-service",
+                    "model": "verify-spare"
+                  }
+                ]
+              },
+              "verify-complex": {
+                "mode": "off",
+                "chain": []
+              },
+              "computer-use": {
+                "mode": "off",
+                "chain": []
+              }
+            },
+            "allow_additional_cost": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "model-save-without-slot-cards",
+      "description": "Profile-only source copying its method; no spare models and no allow-list are sent.",
+      "part": "native",
+      "origin": "default",
+      "seeds": {
+        "default": {
+          "backend": "model-router-profiles",
+          "routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "kept"
+              }
+            ],
+            "default": "p1"
+          }
+        },
+        "p1": {
+          "backend": "model-router"
+        },
+        "p2": {
+          "backend": "model-router-profiles"
+        }
+      },
+      "dtos": {
+        "default": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-profiles",
+          "digest": "digest:default",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "kept"
+              }
+            ],
+            "default": "p1"
+          },
+          "warnings": []
+        },
+        "p1": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router",
+          "digest": "digest:p1",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p2": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-profiles",
+          "digest": "digest:p2",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        }
+      },
+      "body": {
+        "expected_revision": 0,
+        "updates": [
+          {
+            "profile": "default",
+            "expected_digest": "digest:default",
+            "backend": "model-router-profiles",
+            "allow_profile_access": false
+          },
+          {
+            "profile": "p1",
+            "expected_digest": "digest:p1",
+            "backend": "model-router-profiles",
+            "allow_profile_access": false
+          },
+          {
+            "profile": "p2",
+            "expected_digest": "digest:p2",
+            "backend": "model-router-profiles",
+            "allow_profile_access": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "profile-save-profile-source",
+      "description": "Profile-only source adding a specialist and a default; the automatic target keeps its own default.",
+      "part": "profiles",
+      "origin": "default",
+      "seeds": {
+        "default": {
+          "backend": "model-router-profiles",
+          "routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "old"
+              }
+            ],
+            "default": null
+          }
+        },
+        "p1": {
+          "backend": "model-router-profiles"
+        },
+        "p2": {
+          "backend": "model-router-auto",
+          "routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "own"
+              }
+            ],
+            "default": null
+          }
+        }
+      },
+      "dtos": {
+        "default": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-profiles",
+          "digest": "digest:default",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "old"
+              }
+            ],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p1": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-profiles",
+          "digest": "digest:p1",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p2": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-auto",
+          "digest": "digest:p2",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "own"
+              }
+            ],
+            "default": null
+          },
+          "warnings": []
+        }
+      },
+      "body": {
+        "expected_revision": 0,
+        "updates": [
+          {
+            "profile": "default",
+            "expected_digest": "digest:default",
+            "backend": "model-router-profiles",
+            "allow_profile_access": true,
+            "profile_routes": {
+              "profiles": [
+                {
+                  "name": "p1",
+                  "description": "old"
+                },
+                {
+                  "name": "p2",
+                  "description": "reviewer"
+                }
+              ],
+              "default": "p2"
+            }
+          },
+          {
+            "profile": "p1",
+            "expected_digest": "digest:p1",
+            "backend": "model-router-profiles",
+            "allow_profile_access": true,
+            "profile_routes": {
+              "profiles": [
+                {
+                  "name": "p1",
+                  "description": ""
+                },
+                {
+                  "name": "p2",
+                  "description": "reviewer"
+                }
+              ],
+              "default": "p2"
+            }
+          },
+          {
+            "profile": "p2",
+            "expected_digest": "digest:p2",
+            "backend": "model-router-auto",
+            "allow_profile_access": true,
+            "profile_routes": {
+              "profiles": [
+                {
+                  "name": "p1",
+                  "description": "own"
+                },
+                {
+                  "name": "p2",
+                  "description": "reviewer"
+                }
+              ],
+              "default": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "profile-save-auto-source",
+      "description": "Automatic source adding a specialist; a profile-only target keeps its stored default.",
+      "part": "profiles",
+      "origin": "default",
+      "seeds": {
+        "default": {
+          "backend": "model-router-auto",
+          "routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "a"
+              }
+            ],
+            "default": null
+          }
+        },
+        "p1": {
+          "backend": "model-router-profiles",
+          "routes": {
+            "profiles": [
+              {
+                "name": "p2",
+                "description": "own"
+              }
+            ],
+            "default": "p2"
+          }
+        },
+        "p2": {
+          "backend": "model-router-profiles"
+        }
+      },
+      "dtos": {
+        "default": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-auto",
+          "digest": "digest:default",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [
+              {
+                "name": "p1",
+                "description": "a"
+              }
+            ],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p1": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-profiles",
+          "digest": "digest:p1",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [
+              {
+                "name": "p2",
+                "description": "own"
+              }
+            ],
+            "default": "p2"
+          },
+          "warnings": []
+        },
+        "p2": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router-profiles",
+          "digest": "digest:p2",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        }
+      },
+      "body": {
+        "expected_revision": 0,
+        "updates": [
+          {
+            "profile": "default",
+            "expected_digest": "digest:default",
+            "backend": "model-router-auto",
+            "allow_profile_access": true,
+            "profile_routes": {
+              "profiles": [
+                {
+                  "name": "p1",
+                  "description": "a"
+                },
+                {
+                  "name": "p2",
+                  "description": "b"
+                }
+              ],
+              "default": null
+            }
+          },
+          {
+            "profile": "p1",
+            "expected_digest": "digest:p1",
+            "backend": "model-router-profiles",
+            "allow_profile_access": true,
+            "profile_routes": {
+              "profiles": [
+                {
+                  "name": "p1",
+                  "description": ""
+                },
+                {
+                  "name": "p2",
+                  "description": "b"
+                }
+              ],
+              "default": "p2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "deleted-specialist-method-change",
+      "description": "Model-only source whose stored allow-list still names a deleted profile switches to the profile method.",
+      "part": "native",
+      "origin": "default",
+      "seeds": {
+        "default": {
+          "backend": "model-router",
+          "routes": {
+            "profiles": [
+              {
+                "name": "ghost",
+                "description": "deleted"
+              }
+            ],
+            "default": "ghost"
+          }
+        },
+        "p1": {
+          "backend": "model-router"
+        },
+        "p2": {
+          "backend": "model-router"
+        }
+      },
+      "dtos": {
+        "default": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router",
+          "digest": "digest:default",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [
+              {
+                "name": "ghost",
+                "description": "deleted"
+              }
+            ],
+            "default": "ghost"
+          },
+          "warnings": [
+            "profile_target_missing_remove_from_allowlist"
+          ]
+        },
+        "p1": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router",
+          "digest": "digest:p1",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        },
+        "p2": {
+          "schema": 1,
+          "supported": true,
+          "editable": true,
+          "backend": "model-router",
+          "digest": "digest:p2",
+          "role_intro_inheritance": {
+            "schema": 1,
+            "supported": true
+          },
+          "auto_supported": true,
+          "policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_policy": {
+            "heavy": {
+              "mode": "off",
+              "chain": []
+            },
+            "light": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "auto_slot_policy": {
+            "design": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "code-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-simple": {
+              "mode": "off",
+              "chain": []
+            },
+            "verify-complex": {
+              "mode": "off",
+              "chain": []
+            },
+            "computer-use": {
+              "mode": "off",
+              "chain": []
+            }
+          },
+          "policy_schema": 0,
+          "auto_policy_schema": 0,
+          "slot_policy_supported": true,
+          "profile_routes": {
+            "profiles": [],
+            "default": null
+          },
+          "warnings": []
+        }
+      },
+      "body": {
+        "expected_revision": 0,
+        "updates": [
+          {
+            "profile": "default",
+            "expected_digest": "digest:default",
+            "backend": "model-router-profiles",
+            "allow_profile_access": false
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -148,6 +148,8 @@ def test_registered_discovery_copy_defaults_small_work_to_main(plugin):
     description = tools[0]['schema']['description']
     assert 'Main handles small bounded changes directly' in description
     assert 'at least two substantive independent workstreams' in description
+    assert 'heavy context, long runtime' in description
+    assert "on Main's own model, design stays with Main" in description
     assert 'unless explicitly requested by the user' in description
     assert 'required Heavy/independent review remains mandatory' in description
     assert 'Main handles small bounded changes directly' in skills[0][2]

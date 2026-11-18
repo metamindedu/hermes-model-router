@@ -290,6 +290,104 @@ export function reconcileTimeoutTargets(selected, profiles) {
   return uniqueProfileNames(selected).filter(name => allowed.has(name))
 }
 
+// What the page showed of one profile, frozen when it was first seen: every value a store save may
+// overwrite, in the shape the status row reports it. Sent as `expected`, so the service refuses a save
+// over a value that changed elsewhere (model_router/service.py _check_page_expectations).
+export function pageExpectation(row) {
+  if (!row || typeof row.name !== 'string' || !row.models || !row.routing) return null
+  const native = row.fallbacks?.native
+  return deepClone({ models: row.models, actual_models: row.actual_models || {},
+    routing: { enabled: Boolean(row.routing.enabled), heavy: row.routing.heavy ?? null, light: row.routing.light ?? null, slots: row.routing.slots ?? null,
+      skill_enabled: routingSkillEnabled(row) },
+    ...(native ? { native_fallback: { enabled: native.enabled ?? null, chain: native.chain ?? [], actual_chain: native.actual_chain ?? [] } } : {}) })
+}
+
+// The routing skill's own switch in the profile's skills.disabled: the status reports a
+// 'skills.disabled' drift when it differs from the canonical flag, and 'skills.disabled_unavailable'
+// when it cannot be read. A routing save may rewrite it, so it is part of what the page froze.
+export function routingSkillEnabled(row) {
+  const drift = Array.isArray(row?.drift) ? row.drift : []
+  return drift.includes('skills.disabled_unavailable') ? null : Boolean(row?.routing?.enabled) !== drift.includes('skills.disabled')
+}
+
+// Task routing actually runs for this profile: the canonical flag is on AND its routing skill is not
+// disabled in the profile's own config (what the service's routing_config reports as enabled).
+export function routingEffectivelyOn(row) {
+  return row?.routing?.enabled === true && routingSkillEnabled(row) === true
+}
+
+export function copyPageExpectations(profiles) {
+  return Object.fromEntries((Array.isArray(profiles) ? profiles : []).map(row => [row?.name, pageExpectation(row)]).filter(([name, value]) => typeof name === 'string' && value))
+}
+
+// The frozen expectations one request body needs: every profile and field it may write. Routing
+// membership and its skill switch can be repaired on any loaded profile, so a routing-scope body
+// covers every profile the page froze.
+export function pageExpectationsFor(operation, body, frozen, liveNames = []) {
+  const need = new Map()
+  const add = (name, field) => { if (!need.has(name)) need.set(name, new Set()); need.get(name).add(field) }
+  if (operation === '/preview') {
+    const scope = body?.save_scope ?? null
+    if (scope === null || scope === 'models') for (const name of body?.model_targets || []) { add(name, 'models'); add(name, 'actual_models') }
+    if (scope === null || scope === 'routing') for (const name of liveNames) if (frozen?.[name]) add(name, 'routing')
+    for (const update of body?.fallback_updates || []) if (update && Object.prototype.hasOwnProperty.call(update, 'native_fallback')) add(update.profile, 'native_fallback')
+  } else if (operation === '/fallback-preview') {
+    for (const update of body?.updates || []) if (update && Object.prototype.hasOwnProperty.call(update, 'native_fallback')) add(update.profile, 'native_fallback')
+  }
+  return [...need].map(([name, fields]) => {
+    const value = frozen?.[name]
+    if (!value || [...fields].some(field => !value[field])) throw new Error(`${name} 프로필은 이 화면에서 확인한 값이 없어 저장하지 않았습니다. 상태 새로고침 후 다시 저장하세요.`)
+    return { profile: name, ...Object.fromEntries([...fields].sort().map(field => [field, deepClone(value[field])])) }
+  })
+}
+
+// The service reports a compare-and-set refusal as {error: 'ExternalChange', conflict: {profile, field}}.
+const EXTERNAL_CHANGE_FIELD_RE = /^[a-z_]+(?:\.[a-z_]+)?$/
+export function externalChangeFromError(error) {
+  if (error?.backendError !== 'ExternalChange') return null
+  const profile = error?.conflict?.profile, field = error?.conflict?.field
+  return typeof profile === 'string' && profile && typeof field === 'string' && EXTERNAL_CHANGE_FIELD_RE.test(field)
+    ? { profile, field } : null
+}
+const EXTERNAL_FIELD_LABELS = { models: '저장된 모델', actual_models: '실제 모델 설정', routing: '작업 라우팅', native_fallback: '대화 예비 모델' }
+const EXTERNAL_ROLE_LABELS = { main: '대화 모델', delegation: '작업 모델', compression: '압축 모델', title: '제목 모델' }
+export function externalChangeLabel(conflict) {
+  const [base, role] = String(conflict?.field || '').split('.')
+  return `${EXTERNAL_FIELD_LABELS[base] || '설정'}${role ? `(${EXTERNAL_ROLE_LABELS[role] || role})` : ''}`
+}
+export function externalChangeMessage(conflict) {
+  return `다른 곳에서 변경됨 — 다시 불러오세요. ${conflict.profile} 프로필의 ${externalChangeLabel(conflict)} 값이 이 화면을 연 뒤 바뀌어 아무것도 저장하지 않았습니다. 상태 새로고침으로 최신 값을 불러온 뒤 다시 편집하세요.`
+}
+
+// Values that changed elsewhere since they were frozen, at the same store revision. Early feedback
+// only: the service refuses such a save by itself (see pageExpectation).
+export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations) {
+  const items = []
+  const same = (live, loaded) => sameValue(live ?? null, loaded ?? null)
+  const list = Array.isArray(rows) ? rows : []
+  const current = list.find(row => row.name === selected)
+  const frozen = frozenProfiles?.[selected]
+  const expect = frozenExpectations?.[selected]
+  if (current && frozen) {
+    if (!same(current.models, frozen.models) || (expect && !same(current.actual_models || {}, expect.actual_models))) items.push({ profile: selected, part: '대화·작업 모델' })
+    if (!same(current.routing?.heavy, frozen.routing?.heavy) || !same(current.routing?.light, frozen.routing?.light)) items.push({ profile: selected, part: '작업 라우팅' })
+    if (!same(current.slots?.declarations, frozen.slots)) items.push({ profile: selected, part: '작업 슬롯 모델' })
+  }
+  for (const row of list) {
+    const base = frozenProfiles?.[row.name]
+    const frozenSkill = frozenExpectations?.[row.name]?.routing?.skill_enabled
+    if ((base && Boolean(row.routing?.enabled) !== Boolean(base.routing?.enabled)) ||
+        (frozenSkill !== undefined && routingSkillEnabled(row) !== frozenSkill)) items.push({ profile: row.name, part: '작업 라우팅 사용 여부' })
+  }
+  if (current && expect?.native_fallback) {
+    const native = current.fallbacks?.native
+    const live = native ? { enabled: native.enabled ?? null, chain: native.chain ?? [], actual_chain: native.actual_chain ?? [] } : null
+    if (!same(live, expect.native_fallback)) items.push({ profile: selected, part: '대화 예비 모델', fallback: true })
+  }
+  return items
+}
+export const liveDriftMessage = items => `다른 곳에서 ${items.map(item => `${item.profile} 프로필의 ${item.part}`).join(', ')} 값이 바뀌었습니다. 그 값을 예전 값으로 덮어쓰지 않도록 저장을 막았습니다. 상태 새로고침으로 최신 값을 불러온 뒤 다시 편집하세요. 새로고침하면 저장하지 않은 편집은 사라집니다.`
+
 function copyProfileBaselines(profiles) {
   return Object.fromEntries((Array.isArray(profiles) ? profiles : [])
     .map(row => {
@@ -502,13 +600,16 @@ export function toggleName(names, name, checked) {
   return [...set]
 }
 
+// The retired routed-job fallback (`routing.fallback`) is never sent: the plugin keeps the stored
+// value when it is absent, and only fallback_preview could change it.
 export function buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets) {
+  const { fallback: _retiredFallback, ...routing } = deepClone(draft.routing) || {}
   return {
     expected_revision: revision,
     profile,
     models: deepClone(draft.models),
     model_targets: Array.isArray(modelTargets) ? [...modelTargets] : [],
-    routing: { ...deepClone(draft.routing), enabled: routingProfiles.includes(profile) },
+    routing: { ...routing, enabled: routingProfiles.includes(profile) },
     routing_profiles: [...routingProfiles],
     ...(routingTargets === undefined ? {} : { routing_targets: [...routingTargets] })
   }
@@ -720,12 +821,12 @@ export function fallbackTargetNeedsConsent(scope, row, next) {
 }
 
 export function nativeFallbackValidation(draft) {
-  if (!draft || typeof draft.enabled !== 'boolean' || !Array.isArray(draft.chain)) return '일반 대화 폴백 설정을 확인할 수 없습니다.'
-  if (draft.chain.length > 5) return '일반 대화 폴백 목록은 최대 5개까지 지원합니다.'
-  if (draft.chain.some(item => !item || typeof item.provider !== 'string' || !item.provider.trim() || typeof item.model !== 'string' || !item.model.trim())) return '각 폴백 항목에 공급자와 모델을 입력하세요.'
+  if (!draft || typeof draft.enabled !== 'boolean' || !Array.isArray(draft.chain)) return '대화 예비 모델 설정을 확인할 수 없습니다.'
+  if (draft.chain.length > 5) return '대화 예비 모델은 최대 5개까지 지원합니다.'
+  if (draft.chain.some(item => !item || typeof item.provider !== 'string' || !item.provider.trim() || typeof item.model !== 'string' || !item.model.trim())) return '각 예비 모델 항목에 공급자와 모델을 입력하세요.'
   const identities = draft.chain.map(item => JSON.stringify([item.provider, item.model]))
-  if (new Set(identities).size !== identities.length) return '일반 대화 폴백 목록에 중복된 공급자·모델 조합이 있습니다.'
-  if (draft.enabled && draft.chain.length === 0) return '일반 대화 폴백을 켜려면 모델을 하나 이상 추가하세요.'
+  if (new Set(identities).size !== identities.length) return '대화 예비 모델 목록에 중복된 공급자·모델 조합이 있습니다.'
+  if (draft.enabled && draft.chain.length === 0) return '대화 예비 모델을 켜려면 모델을 하나 이상 추가하세요.'
   return ''
 }
 
@@ -759,7 +860,7 @@ export function primaryRouteForFallback(row, role, projection = null) {
 }
 
 export function routingFallbackValidation(draft, targetRows = [], projection = null) {
-  if (!draft || typeof draft.enabled !== 'boolean') return '작업·검증 라우팅 폴백 설정을 확인할 수 없습니다.'
+  if (!draft || typeof draft.enabled !== 'boolean') return '이전 작업 방식의 예비 모델 설정을 확인할 수 없습니다.'
   if (!draft.enabled) return ''
   for (const role of ['heavy', 'light']) {
     const route = draft[role]
@@ -778,8 +879,11 @@ export function routingFallbackValidation(draft, targetRows = [], projection = n
   return ''
 }
 
+// Only the conversation scope is edited on the page. The other two are stored values the page
+// keeps reading (status, projected checks) but never writes; their titles say so.
+export const PAGE_FALLBACK_SCOPES = freezeDeep(['native'])
 export function fallbackScopeTitle(scope) {
-  return ({ native: '일반 대화 폴백', routing: '작업·검증 라우팅 폴백', delegation: '기본 위임 방식의 예비 모델' })[scope] || '폴백'
+  return ({ native: '대화 예비 모델', routing: '이전 작업 방식의 보관된 예비 모델', delegation: '이전 기본 위임 방식의 보관된 예비 모델' })[scope] || '예비 모델'
 }
 
 function fallbackValueForScope(scope, value) {
@@ -816,7 +920,7 @@ function fallbackScopeValidation(scope, value, rows, projection) {
           ? projection.models?.main
           : row.actual_models?.main || row.models?.main
         if (primary && value.chain.some(item => routeIdentity(item) === routeIdentity(primary))) {
-          return `${row.name}의 기본 대화 모델과 대화 폴백 모델은 달라야 합니다.`
+          return `${row.name}의 기본 대화 모델과 대화 예비 모델은 달라야 합니다.`
         }
       }
     }
@@ -850,7 +954,8 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
   const errors = []
   const updatesByProfile = new Map()
   const confirmations = []
-  const scopes = ['native', 'routing', 'delegation']
+  // Stored routing and delegation fallbacks are never part of a page save, whatever the drafts hold.
+  const scopes = PAGE_FALLBACK_SCOPES
 
   for (const scope of scopes) {
     const value = fallbackValueForScope(scope, fallbackDrafts?.[scope])
@@ -977,8 +1082,6 @@ export function buildModelSectionPreviewBody(snapshot, storeScope) {
   const baseline = snapshot?.profileBaselines?.[snapshot.profile]
   if (!baseline?.models || !baseline?.routing || !snapshot.draft) return { body: null, errors: ['불러온 기준 설정을 확인할 수 없습니다. 상태를 새로고침하세요.'] }
   const routing = deepClone(snapshot.draft.routing)
-  if (Object.prototype.hasOwnProperty.call(baseline.routing, 'fallback') && baseline.routing.fallback !== undefined) routing.fallback = deepClone(baseline.routing.fallback)
-  else delete routing.fallback
   const body = buildPreviewBody(snapshot.revision, snapshot.profile, { models: deepClone(snapshot.draft.models), routing },
     snapshot.modelTargets, snapshot.routingProfiles, snapshot.routingTargets)
   return { body, errors: snapshot.routingTargetError ? [snapshot.routingTargetError] : [] }
@@ -997,18 +1100,12 @@ export function buildScopedPreviewBody(snapshot, saveScope) {
     .map(([name]) => name)
   const models = saveScope === 'models' ? snapshot.draft.models : baseline.models
   const routing = saveScope === 'routing' ? snapshot.draft.routing : baseline.routing
-  const routingWithSavedFallback = deepClone(routing)
-  if (Object.prototype.hasOwnProperty.call(baseline.routing, 'fallback') && baseline.routing.fallback !== undefined) {
-    routingWithSavedFallback.fallback = deepClone(baseline.routing.fallback)
-  } else {
-    delete routingWithSavedFallback.fallback
-  }
   const routingProfiles = saveScope === 'routing' ? snapshot.routingProfiles : baselineMembership
   const modelTargets = saveScope === 'models' ? snapshot.modelTargets : []
   const routingTargets = saveScope === 'routing' ? snapshot.routingTargets : []
   const body = buildPreviewBody(snapshot.revision, snapshot.profile, {
     models: deepClone(models),
-    routing: routingWithSavedFallback
+    routing: deepClone(routing)
   }, modelTargets, routingProfiles, routingTargets)
   body.save_scope = saveScope
   if (saveScope !== 'timeouts') return { body, errors: [] }
@@ -1034,22 +1131,22 @@ export function projectedRoutingFallbackErrors(profiles, projection, updatedFall
     )
     if (!primaryChanged) continue
     const error = routingFallbackValidation(value, [row], projection)
-    if (error) errors.push(`프로필 ${row.name}의 저장된 작업·검증 라우팅 폴백: ${error}`)
+    if (error) errors.push(`프로필 ${row.name}에 보관된 이전 작업 방식의 예비 모델과 겹칩니다(이 화면에서는 바꾸지 않는 값입니다): ${error}`)
   }
   return errors
 }
 
 export function previewFieldLabel(field) {
   const labels = {
-    native_fallback: '일반 대화 폴백',
-    fallback_providers: '일반 대화 폴백 목록',
-    fallback_model: '이전 대화 폴백 설정',
-    'routing.fallback': '작업·검증 라우팅 폴백',
-    delegation_fallback: '기본 위임 방식의 예비 모델',
-    'delegation.fallback_providers': '기본 위임 방식의 예비 모델 목록',
-    'fallback_consent.native': '일반 대화 폴백 승인 기록',
-    'fallback_consent.routing': '작업·검증 라우팅 폴백 승인 기록',
-    'fallback_consent.delegation': '기본 위임 방식의 예비 모델 승인 기록'
+    native_fallback: '대화 예비 모델',
+    fallback_providers: '대화 예비 모델 목록',
+    fallback_model: '이전 대화 예비 모델 설정',
+    'routing.fallback': '이전 작업 방식의 보관된 예비 모델',
+    delegation_fallback: '이전 기본 위임 방식의 보관된 예비 모델',
+    'delegation.fallback_providers': '이전 기본 위임 방식의 보관된 예비 모델 목록',
+    'fallback_consent.native': '대화 예비 모델 승인 기록',
+    'fallback_consent.routing': '이전 작업 방식 예비 모델 승인 기록',
+    'fallback_consent.delegation': '이전 기본 위임 방식 예비 모델 승인 기록'
   }
   return labels[field] || field || '설정 항목'
 }
@@ -1279,7 +1376,7 @@ function ChoiceField({ id, label, value, onChange, options, disabled, placeholde
           jsx(SelectTrigger, { id, 'aria-label': label,
             style: { width: '100%', minWidth: 0, height: 'auto', minHeight: '2.15rem', whiteSpace: 'normal', textAlign: 'left' },
             children: jsx(SelectValue, { placeholder, style: { whiteSpace: 'normal', overflowWrap: 'anywhere', minWidth: 0, textAlign: 'left' } }) }),
-          jsx(SelectContent, { children: options.map(option => jsx(SelectItem, { value: option.value, children: option.label }, option.value)) })
+          jsx(SelectContent, { children: options.map(option => jsx(SelectItem, { value: option.value, ...(option.disabled === true ? { disabled: true } : {}), children: option.label }, option.value)) })
         ]
       }),
       hint ? jsx('span', { style: styles.hint, children: hint }) : null
@@ -1957,12 +2054,15 @@ function ProfilePreparationCard({ pluginContext, data, scopeKey, settingsBusy, b
     ] }) : null
   ] })
 }
+// The methods the page offers. Hermes's own 'default' delegation is no longer offered: a profile
+// still stored on it is shown read-only (see NATIVE_DELEGATION_LEGACY_LABELS) and never rewritten.
 export const NATIVE_DELEGATION_BACKENDS = freezeDeep([
-  { value: 'default', label: '기본 위임 모델 사용' },
   { value: 'model-router', label: '작업 종류에 맞는 슬롯 모델 사용' },
   { value: 'model-router-auto', label: '에이전트가 모델 / 전문 프로필 중 선택' },
   { value: 'model-router-profiles', label: '전문 프로필에 맡기기' }
 ])
+export const NATIVE_DELEGATION_LEGACY_LABELS = freezeDeep({ default: '기본 위임 모델 사용 (이전 방식)' })
+export const nativeBackendSelectable = backend => NATIVE_DELEGATION_BACKENDS.some(item => item.value === backend)
 
 const nativeModelMode = backend => ['model-router', 'model-router-auto'].includes(backend)
 const nativeProfileMode = backend => ['model-router-profiles', 'model-router-auto'].includes(backend)
@@ -1996,9 +2096,13 @@ export function copyNativeDelegationDraft(dto) {
     profile_routes: deepClone(dto.profile_routes), allowProfileAccess: false, descriptionEdits: {} }
 }
 
-export function nativeDelegationValidation(draft, profileNames) {
+// `part` limits the check to what an update carries: 'native' sends no allow-list (the stored one,
+// which may still name a deleted profile, is left as it is), 'profiles' sends no spare policy.
+export function nativeDelegationValidation(draft, profileNames, part = 'all') {
   if (!draft || !NATIVE_DELEGATION_BACKENDS.some(item => item.value === draft.backend)) return '작업을 맡기는 방식을 선택하세요.'
-  if (draft.sendSlotPolicy === true) {
+  if (part === 'profiles' || draft.sendPolicy === false) {
+    // No spare policy in this update.
+  } else if (draft.sendSlotPolicy === true) {
     for (const slot of TASK_SLOTS) {
       const issue = nativePolicyEntryError(nativeDraftSlotPolicy(draft)?.[slot.id])
       if (issue) return `${slot.label}: ${issue}`
@@ -2009,6 +2113,7 @@ export function nativeDelegationValidation(draft, profileNames) {
       if (issue) return issue
     }
   }
+  if (part === 'native') return ''
   const settings = draft.profile_routes
   if (!settings || !Array.isArray(settings.profiles) || settings.profiles.length > 32) return '프로필 허용 목록을 확인하세요.'
   const seen = new Set()
@@ -2020,18 +2125,25 @@ export function nativeDelegationValidation(draft, profileNames) {
   return ''
 }
 
-export function buildNativeDelegationPreviewBody(revision, profile, draft, dto, profileNames) {
-  const error = nativeDelegationValidation(draft, profileNames)
+// The part an update leaves out is kept by the writer exactly as stored, including a key that is
+// absent: 'native' omits `profile_routes`; 'profiles' omits the spare policy; a 'native' update
+// whose spare models are not on screen (`sendPolicy: false`) omits the policy as well.
+export function buildNativeDelegationPreviewBody(revision, profile, draft, dto, profileNames, part = 'all') {
+  const error = nativeDelegationValidation(draft, profileNames, part)
   if (error) throw new Error(error)
   if (draft.expectedDigest !== dto?.digest) throw new Error('다른 곳에서 작업 분담 설정이 바뀌었습니다. 입력 내용을 확인하고 상태를 다시 불러오세요.')
   if (dto?.editable !== true || dto.supported !== true || typeof dto.digest !== 'string') throw new Error('이 프로필의 작업 분담 설정은 현재 바꿀 수 없습니다.')
-  // Exactly one policy shape per update: one entry per task slot, or the two stored roles.
-  const bySlot = draft.sendSlotPolicy === true
-  const policy = deepClone(bySlot ? nativeDraftSlotPolicy(draft) : nativeDraftPolicy(draft))
-  return { expected_revision: revision, updates: [{ profile, expected_digest: dto.digest,
-    backend: draft.backend, [bySlot ? 'slot_policy' : 'policy']: policy, profile_routes: deepClone(draft.profile_routes),
-    allow_additional_cost: Object.values(policy).some(entry => entry.mode === 'custom'),
-    allow_profile_access: draft.allowProfileAccess === true }] }
+  const update = { profile, expected_digest: dto.digest, backend: draft.backend,
+    allow_profile_access: part !== 'native' && draft.allowProfileAccess === true }
+  if (part !== 'profiles' && draft.sendPolicy !== false) {
+    // Exactly one policy shape per update: one entry per task slot, or the two stored roles.
+    const bySlot = draft.sendSlotPolicy === true
+    const policy = deepClone(bySlot ? nativeDraftSlotPolicy(draft) : nativeDraftPolicy(draft))
+    update[bySlot ? 'slot_policy' : 'policy'] = policy
+    update.allow_additional_cost = Object.values(policy).some(entry => entry.mode === 'custom')
+  }
+  if (part !== 'native') update.profile_routes = deepClone(draft.profile_routes)
+  return { expected_revision: revision, updates: [update] }
 }
 
 export function copyNativeDelegationBaselines(profiles) {
@@ -2040,65 +2152,101 @@ export function copyNativeDelegationBaselines(profiles) {
     .map(row => [row.name, deepClone(row.native_delegation)]))
 }
 
-export function nativeDelegationTargetReason(row, backend, slotCopy = false) {
+// `origin` is the loaded profile of a model-section copy. Another profile stored on a method the page
+// does not offer (Hermes 'default' or an advanced value) keeps it: only loading that profile and
+// choosing a method there changes it.
+export function nativeDelegationTargetReason(row, backend, slotCopy = false, origin = undefined) {
   if (!row || row.native_delegation?.supported !== true || row.native_delegation.editable !== true) return '이 프로필은 설정을 변경할 수 없습니다.'
+  if (origin !== undefined && row.name !== origin && !nativeBackendSelectable(row.native_delegation.backend)) return `이 프로필은 ‘${nativeBackendLabel(row.native_delegation.backend)}’ 방식으로 저장되어 있어 그대로 둡니다. 바꾸려면 이 프로필을 불러와 방식을 고르세요.`
   if (backend === 'model-router-auto' && row.native_delegation.auto_supported !== true) return '설치된 플러그인이 모델 / 프로필 통합 선택을 지원하지 않습니다. 먼저 플러그인을 업데이트하세요.'
-  if (nativeModelMode(backend) && row.routing?.enabled !== true) return '이 프로필의 작업 분담이 꺼져 있습니다. 먼저 다시 켜서 저장하세요.'
+  // Effective routing needs BOTH switches on: the canonical flag and the routing skill's own switch
+  // (skills.disabled). The service refuses the method for a profile with either one off.
+  if (nativeModelMode(backend) && !routingEffectivelyOn(row)) return '이 프로필의 작업 분담이 꺼져 있습니다. 먼저 다시 켜서 저장하세요.'
   if (slotCopy && row.native_delegation.slot_policy_supported !== true) return '이 프로필의 플러그인은 슬롯별 예비 모델을 지원하지 않습니다. 먼저 업데이트하세요.'
   return ''
 }
 
-// Whether the operator changed anything this card saves, compared with what was loaded.
-export function nativeDelegationDraftChanged(draft, dto) {
+// Whether the operator changed anything one part saves, compared with what was loaded.
+// 'native' is the model section's method and spare models, 'profiles' the profile delegation section.
+const NATIVE_PART_KEYS = { native: ['backend', 'slotPolicy', 'autoSlotPolicy'], profiles: ['profile_routes'], all: ['backend', 'slotPolicy', 'autoSlotPolicy', 'profile_routes'] }
+export function nativeDelegationDraftChanged(draft, dto, part = 'all') {
   const loaded = copyNativeDelegationDraft(dto)
-  if (!draft || !loaded) return false
-  return ['backend', 'slotPolicy', 'autoSlotPolicy', 'profile_routes'].some(key => !sameValue(draft[key] ?? null, loaded[key] ?? null))
+  if (!draft || !loaded || !NATIVE_PART_KEYS[part]) return false
+  return NATIVE_PART_KEYS[part].some(key => !sameValue(draft[key] ?? null, loaded[key] ?? null))
 }
 
-export function buildNativeDelegationBatchBody(revision, origin, targets, draft, baselines, profiles) {
+// Why a profile cannot take the profile delegation section's save: it saves only to profiles whose
+// stored method already uses profiles, and it never changes that method.
+export function nativeProfileTargetReason(row) {
+  const stored = row?.native_delegation?.backend
+  const issue = nativeDelegationTargetReason(row, stored)
+  if (issue) return issue
+  return nativeProfileMode(stored) ? '' : `이 프로필은 전문 프로필에 맡기는 방식이 아닙니다(현재: ${nativeBackendLabel(stored)}). 먼저 ‘모델’ 섹션에서 맡기는 방식을 바꿔 저장하세요.`
+}
+
+// One '/delegation-preview' body for one part of the shared draft. `part` decides which fields
+// come from the draft; every other field is each target's own stored (baseline) value:
+//  'native'   - method and spare models from the draft, each target keeps its stored profile access;
+//  'profiles' - allow-list, descriptions and consent from the draft, each target keeps its stored
+//               method and spare models (only profiles already on a profile method can take it);
+//  'all'      - the earlier one-card save, kept for compatibility.
+export function buildNativeDelegationBatchBody(revision, origin, targets, draft, baselines, profiles, part = 'all') {
   const rows = Array.isArray(profiles) ? profiles : []
   const names = rows.map(row => row.name)
+  if (!['native', 'profiles', 'all'].includes(part)) throw new Error('저장 범위를 확인할 수 없습니다.')
   if (!Array.isArray(targets) || targets.length < 1 || targets.length > 32 || uniqueProfileNames(targets).length !== targets.length) throw new Error('적용할 프로필을 1개 이상, 최대 32개까지 선택하세요.')
-  if (!draft || !NATIVE_DELEGATION_BACKENDS.some(item => item.value === draft.backend)) throw new Error('작업을 맡기는 방식을 선택하세요.')
+  if (!draft || (part !== 'profiles' && !nativeBackendSelectable(draft.backend))) throw new Error('작업을 맡기는 방식을 선택하세요.')
   const source = rows.find(row => row.name === origin)?.native_delegation
   if (source?.supported !== true || source.editable !== true || !baselines?.[origin] ||
       source.digest !== baselines[origin].digest || draft.expectedDigest !== baselines[origin].digest) throw new Error('불러온 프로필의 설정이 바뀌었습니다. 입력한 내용을 확인하고 상태를 다시 불러오세요.')
+  if (part === 'profiles' && !nativeProfileMode(source.backend)) throw new Error('불러온 프로필은 전문 프로필에 맡기는 방식이 아닙니다. 먼저 ‘모델’ 섹션에서 맡기는 방식을 저장하세요.')
   return { expected_revision: revision, updates: targets.map(name => {
     const row = rows.find(item => item.name === name)
     const baseline = baselines[name]
+    const backend = part === 'profiles' ? baseline?.backend : draft.backend
     // Spare models are visible only as slot entries in a model mode on a slot-capable loaded
     // profile; in every other case each target keeps its own stored policy in its stored shape.
-    const copySlots = nativeModelMode(draft.backend) && nativeSlotDraftReady(draft, source)
-    const issue = nativeDelegationTargetReason(row, draft.backend, copySlots)
+    const copySlots = part !== 'profiles' && nativeModelMode(draft.backend) && nativeSlotDraftReady(draft, source)
+    const issue = part === 'profiles' ? nativeProfileTargetReason(row)
+      : nativeDelegationTargetReason(row, draft.backend, copySlots, part === 'native' ? origin : undefined)
     if (issue) throw new Error(`${name}: ${issue}`)
     if (!baseline || baseline.supported !== true || baseline.editable !== true || baseline.digest !== row.native_delegation.digest) throw new Error(`${name}의 설정이 바뀌었습니다. 상태를 다시 불러온 뒤 저장하세요.`)
     // Copy visible fields only. A mode change must never overwrite hidden permissions/policies.
-    const storedBySlot = (draft.backend === 'model-router-auto' ? baseline.auto_policy_schema : baseline.policy_schema) === 2
-    const next = { ...deepClone(draft), expectedDigest: baseline.digest,
+    const storedBySlot = (backend === 'model-router-auto' ? baseline.auto_policy_schema : baseline.policy_schema) === 2
+    const routesFromDraft = part === 'profiles' || (part === 'all' && nativeProfileMode(draft.backend))
+    const next = { ...deepClone(draft), backend, expectedDigest: baseline.digest,
+      // Only the 'native' part with slot cards on screen carries spare models; otherwise the
+      // stored policy (or its absence) is left to the writer untouched.
+      sendPolicy: part === 'all' || copySlots,
       sendSlotPolicy: copySlots || storedBySlot,
       policy: deepClone(baseline.policy),
       autoPolicy: deepClone(baseline.auto_policy || nativeEmptyPolicy()),
       slotPolicy: deepClone(copySlots && draft.backend === 'model-router' ? draft.slotPolicy : baseline.slot_policy || null),
       autoSlotPolicy: deepClone(copySlots && draft.backend === 'model-router-auto' ? draft.autoSlotPolicy : baseline.auto_slot_policy || null),
-      profile_routes: deepClone(nativeProfileMode(draft.backend) ? draft.profile_routes : baseline.profile_routes),
-      allowProfileAccess: nativeProfileMode(draft.backend) && draft.allowProfileAccess === true }
-    if (nativeProfileMode(draft.backend) && draft.descriptionEdits) {
+      profile_routes: deepClone(routesFromDraft ? draft.profile_routes : baseline.profile_routes),
+      allowProfileAccess: routesFromDraft && draft.allowProfileAccess === true }
+    if (routesFromDraft && draft.descriptionEdits) {
       next.profile_routes.profiles = next.profile_routes.profiles.map(entry => ({ ...entry, description: draft.descriptionEdits[entry.name] === true
         ? entry.description : baseline.profile_routes.profiles.find(old => old.name === entry.name)?.description ?? '' }))
     }
-    if (nativeProfileMode(draft.backend)) {
+    if (routesFromDraft) {
       const inheritanceIssue = profileRoleInheritanceIssue(next.profile_routes, baseline.profile_routes, row.native_delegation)
       if (inheritanceIssue) throw new Error(`${name}: ${inheritanceIssue}`)
     }
-    if (draft.backend === 'model-router-auto') {
-      // The default is hidden here: only explicit per-task profile choices are supported.
+    // The default profile is edited only on a profile-only source ('model-router-profiles'), and only
+    // a profile-only target uses it. Otherwise each target keeps its stored default unless that
+    // profile left the allow-list.
+    const defaultEdited = part === 'profiles' ? source.backend === 'model-router-profiles' : true
+    if (routesFromDraft && (backend === 'model-router-auto' || !defaultEdited)) {
       next.profile_routes.default = next.profile_routes.profiles.some(item => item.name === baseline.profile_routes.default) ? baseline.profile_routes.default : null
     }
-    const beforeNames = new Set(baseline.profile_routes.profiles.map(item => item.name))
-    const addsAccess = next.profile_routes.profiles.some(item => !beforeNames.has(item.name)) ||
-      (next.profile_routes.default !== null && next.profile_routes.default !== baseline.profile_routes.default)
-    if (addsAccess && !next.allowProfileAccess) throw new Error('허용할 프로필의 계정과 기능을 확인한 뒤, 아래 사용 허용에 체크하세요.')
-    return buildNativeDelegationPreviewBody(revision, name, next, row.native_delegation, names).updates[0]
+    if (routesFromDraft) {
+      const beforeNames = new Set(baseline.profile_routes.profiles.map(item => item.name))
+      const addsAccess = next.profile_routes.profiles.some(item => !beforeNames.has(item.name)) ||
+        (next.profile_routes.default !== null && next.profile_routes.default !== baseline.profile_routes.default)
+      if (addsAccess && !next.allowProfileAccess) throw new Error('허용할 프로필의 계정과 기능을 확인한 뒤, 아래 사용 허용에 체크하세요.')
+    }
+    return buildNativeDelegationPreviewBody(revision, name, next, row.native_delegation, names, part).updates[0]
   }) }
 }
 
@@ -2106,9 +2254,67 @@ export function nativeDelegationSnapshotCurrent(snapshot, status) {
   if (status?.revision !== snapshot.revision) return false
   try {
     buildNativeDelegationBatchBody(snapshot.revision, snapshot.profile, snapshot.nativeTargets,
-      snapshot.nativeDraft, snapshot.nativeBaselines, status.profiles)
+      snapshot.nativeDraft, snapshot.nativeBaselines, status.profiles, snapshot.nativePart || 'all')
     return true
   } catch { return false }
+}
+
+// Which unsaved edits the submitted request bodies saved, field by field. `view` holds the drafted
+// value of every edit at the start of the save; `sent` lists each body that was previewed and applied
+// ({ operation, part, body }). An edit counts as saved only when the request wrote the drafted value
+// to every target it wrote that field to, and to at least one (the default profile, kept per target,
+// also counts when the loaded profile received it). Anything else stays unsaved, so the page is not
+// reloaded over it.
+export function submittedEditCoverage(view, sent) {
+  const covered = new Set()
+  const every = (list, test) => Array.isArray(list) && list.length > 0 && list.every(test)
+  const routeNames = routes => (routes?.profiles || []).map(entry => entry?.name)
+  for (const { operation, part, body } of Array.isArray(sent) ? sent : []) {
+    if (!body || typeof body !== 'object') continue
+    if (operation === '/preview') {
+      const scope = body.save_scope ?? null
+      if ((scope === null || scope === 'models') && Array.isArray(body.model_targets) && body.model_targets.length) {
+        covered.add('copy.models')
+        if (sameValue(body.models, view.models)) covered.add('models')
+      }
+      if ((scope === null || scope === 'routing') && body.routing) {
+        const routingTargets = Array.isArray(body.routing_targets) ? body.routing_targets : [body.profile]
+        if (routingTargets.length) {
+          if (sameValue(body.routing.heavy, view.routing?.heavy) && sameValue(body.routing.light, view.routing?.light)) covered.add('routing.roles')
+          if (Object.prototype.hasOwnProperty.call(body.routing, 'slots')) {
+            covered.add('copy.slots')
+            if (sameValue(body.routing.slots ?? null, view.slots ?? null)) covered.add('routing.slots')
+          }
+        }
+        // Saved only by a request that names it as an explicit re-enable (membership alone is not).
+        if ((view.reenable || []).every(name => Array.isArray(body.reenable_profiles) && body.reenable_profiles.includes(name))) covered.add('reenable')
+      }
+      if (Array.isArray(body.timeout_updates) && body.timeout_updates.length) covered.add('timeouts')
+      const fallbackUpdates = (body.fallback_updates || []).filter(update => Object.prototype.hasOwnProperty.call(update, 'native_fallback'))
+      if (every(fallbackUpdates, update => sameValue(update.native_fallback, view.nativeFallback))) covered.add('fallback:native')
+    } else if (operation === '/fallback-preview') {
+      const updates = body.updates
+      if (every(updates, update => Object.prototype.hasOwnProperty.call(update, 'native_fallback') && sameValue(update.native_fallback, view.nativeFallback))) covered.add('fallback:native')
+    } else if (operation === '/delegation-preview' && view.native) {
+      const updates = body.updates
+      if (part === 'native') {
+        if (every(updates, update => update.backend === view.native.backend)) { covered.add('native.backend'); covered.add('native.copy') }
+        if (every(updates, update => update.backend === 'model-router' && sameValue(update.slot_policy, view.native.slotPolicy))) covered.add('native.slotPolicy')
+        if (every(updates, update => update.backend === 'model-router-auto' && sameValue(update.slot_policy, view.native.autoSlotPolicy))) covered.add('native.autoSlotPolicy')
+      } else if (part === 'profiles') {
+        const drafted = view.native.profile_routes || { profiles: [], default: null }
+        if (every(updates, update => update.profile_routes)) covered.add('profiles.targets')
+        if (every(updates, update => sameValue(routeNames(update.profile_routes), routeNames(drafted)) &&
+          drafted.profiles.every(entry => (update.profile !== view.profile && view.native.descriptionEdits?.[entry.name] !== true) ||
+            update.profile_routes.profiles.find(item => item.name === entry.name)?.description === entry.description))) covered.add('profiles.list')
+        // The default is kept per target unless the source edits it; it is saved when the loaded
+        // profile itself received the drafted value, or every target did.
+        const takesDefault = update => update.profile_routes && (update.profile_routes.default ?? null) === (drafted.default ?? null)
+        if ((Array.isArray(updates) && updates.some(update => update.profile === view.profile && takesDefault(update))) || every(updates, takesDefault)) covered.add('profiles.default')
+      }
+    }
+  }
+  return covered
 }
 
 export function nativePrimaryModel(row, role) {
@@ -2117,7 +2323,7 @@ export function nativePrimaryModel(row, role) {
   return route && typeof route.model === 'string' && route.model ? route : null
 }
 
-const nativeBackendLabel = value => NATIVE_DELEGATION_BACKENDS.find(item => item.value === value)?.label || '별도 고급 설정'
+const nativeBackendLabel = value => NATIVE_DELEGATION_BACKENDS.find(item => item.value === value)?.label || NATIVE_DELEGATION_LEGACY_LABELS[value] || '별도 고급 설정'
 const NATIVE_SAVE_FENCE_KEY = 'native-settings-save-fences-v1'
 
 export function readNativeSaveFence(storage, scopeKey, baseIdentity = null) {
@@ -2313,43 +2519,7 @@ function RoleProposalDialog({ view, onCancel, onGenerate, onUse }) {
   return jsx(DesktopSDK.Dialog, { open: true, onOpenChange: open => { if (!open) onCancel() }, children: jsx(DesktopSDK.DialogContent, { style: { maxWidth: 'min(44rem, calc(100vw - 2rem))', maxHeight: '85vh', overflowY: 'auto', overflowWrap: 'anywhere' }, children: content }) })
 }
 
-function NativeDelegationCard({ dto, draft, profiles, origin, targets, disabled, onChange, roleScope, catalog = null, slots }) {
-  const [roleEditors, setRoleEditors] = useState({})
-  const [rolePreview, setRolePreview] = useState(null)
-  const roleInputs = useRef(null)
-  const roleMounted = useRef(true)
-  const roleController = useRef(null)
-  roleInputs.current = { dto, draft, profiles, origin, targets, disabled, roleScope, onChange }
-  if (!roleController.current) roleController.current = createRoleProposalController({
-    transport: { profileRoutes: () => host.profileRoutes(), requestProfile: (...args) => host.requestProfile(...args) },
-    readState: target => {
-      const value = roleInputs.current
-      const liveProfile = host.state?.profile?.get?.() || value.roleScope?.ownerProfile
-      const liveConnection = host.state?.connectionId?.get?.() || null
-      const liveScope = host.state?.gateway?.get ? scopeFingerprint(liveConnection, liveProfile, host.state.gateway.get()) : value.roleScope?.scopeKey
-      const entry = value.draft?.profile_routes?.profiles.find(row => row.name === target)
-      return { ownerProfile: value.roleScope?.ownerProfile, connectionId: value.roleScope?.connectionId,
-        scopeKey: liveScope, expectedScope: value.roleScope?.scopeKey, baseIdentity: value.roleScope?.baseIdentity,
-        template: value.origin, generation: value.roleScope?.generation, draft: JSON.stringify(value.draft), targets: value.targets,
-        metadataDigest: value.profiles.find(row => row.name === target)?.role_intro?.digest,
-        blocked: !roleMounted.current || value.disabled || value.roleScope?.available !== true || liveProfile !== value.roleScope?.ownerProfile ||
-          liveScope !== value.roleScope?.scopeKey || !entry || !nativeProfileMode(value.draft?.backend) }
-    },
-    onUpdate: view => { if (roleMounted.current) setRolePreview(view) },
-    onUse: (name, description) => {
-      if (!roleMounted.current) return
-      roleInputs.current.onChange(current => editProfileRoleDescription(current, name, description))
-      setRoleEditors(current => ({ ...current, [name]: true }))
-    }
-  })
-  useEffect(() => {
-    roleMounted.current = true
-    const disposers = [host.state?.profile, host.state?.connectionId, host.state?.gateway]
-      .filter(atom => typeof atom?.listen === 'function').map(atom => atom.listen(() => roleController.current.cancel()))
-    return () => { roleMounted.current = false; for (const dispose of disposers) dispose(); roleController.current.cancel() }
-  }, [])
-  useEffect(() => { roleController.current.invalidate() })
-
+function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog = null, slots }) {
   const stale = Boolean(draft && draft.expectedDigest !== dto?.digest)
   const locked = disabled || dto?.editable !== true || !draft || stale
   const selected = Array.isArray(targets) ? targets : []
@@ -2358,12 +2528,12 @@ function NativeDelegationCard({ dto, draft, profiles, origin, targets, disabled,
     const key = nativeSlotPolicyKey(current.backend)
     return { ...current, [key]: { ...current[key], [slot]: updater(current[key][slot]) } }
   })
-  const profileSettings = draft?.profile_routes
-  const configured = profileSettings?.profiles || []
-  const setProfile = (name, checked) => onChange(current => {
-    const profiles = checked ? [...current.profile_routes.profiles, { name, description: dto?.profile_routes?.profiles.find(entry => entry.name === name)?.description ?? '' }] : current.profile_routes.profiles.filter(entry => entry.name !== name)
-    return { ...current, allowProfileAccess: false, profile_routes: { profiles, default: profiles.some(entry => entry.name === current.profile_routes.default) ? current.profile_routes.default : null } }
-  })
+  // A stored method the page no longer offers is shown as the current value only: its item is
+  // disabled and a pick of it is ignored. Going back to it is the explicit revert button below.
+  const unlisted = [...new Set([dto?.backend, draft?.backend])].filter(value => typeof value === 'string' && !nativeBackendSelectable(value))
+  const backendOptions = [...unlisted.map(value => ({ value, label: NATIVE_DELEGATION_LEGACY_LABELS[value] || '현재 별도 고급 설정', disabled: true })), ...NATIVE_DELEGATION_BACKENDS]
+  const canRevertBackend = Boolean(draft && typeof dto?.backend === 'string' && !nativeBackendSelectable(dto.backend) && draft.backend !== dto.backend)
+  const otherWarnings = Array.isArray(dto?.warnings) ? dto.warnings.filter(code => code !== 'profile_target_missing_remove_from_allowlist') : []
   const slotCard = slot => {
     const declaration = slots.draft[slot.id]
     if (!declaration) return null  // a draft seeded from an incomplete status shows no card rather than failing the page
@@ -2413,13 +2583,15 @@ function NativeDelegationCard({ dto, draft, profiles, origin, targets, disabled,
     jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '작업 모델' }), jsx(Badge, { variant: 'muted', style: { maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere' }, children: `저장된 방식: ${nativeBackendLabel(dto?.backend)}` })] }),
     jsx('p', { style: styles.hint, children: '간단한 작업은 메인 모델이 직접 처리합니다. 나눠 맡기는 편이 유리한 작업만 아래 방식으로 맡기며, 저장한 내용은 새 대화부터 적용됩니다. 진행 중인 대화나 작업은 중단하지 않습니다.' }),
     stale ? jsx('p', { role: 'alert', style: styles.warning, children: '다른 곳에서 설정이 바뀌었습니다. 입력한 내용은 남겨 두었으니 상태를 다시 불러온 뒤 저장하세요.' }) : null,
-    jsx(RoleProposalDialog, { view: rolePreview, onCancel: () => roleController.current.cancel(), onGenerate: () => void roleController.current.generate(), onUse: () => void roleController.current.use() }),
     !draft ? jsx('p', { role: 'note', style: styles.warning, children: '이 기능의 설정을 불러오지 못했습니다. Hermes와 플러그인 설치 상태를 확인한 뒤 다시 불러오세요. 기존 값은 바꾸지 않습니다.' }) : jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [
       jsx(ChoiceField, { id: 'native-delegation-backend', label: '작업을 맡기는 방식', value: draft.backend, disabled: locked,
-        options: NATIVE_DELEGATION_BACKENDS.some(item => item.value === draft.backend) ? NATIVE_DELEGATION_BACKENDS : [{ value: draft.backend, label: '현재 별도 고급 설정' }, ...NATIVE_DELEGATION_BACKENDS],
-        onChange: backend => onChange(current => ({ ...current, backend, allowProfileAccess: false })) }),
+        options: backendOptions,
+        onChange: backend => { if (nativeBackendSelectable(backend)) onChange(current => ({ ...current, backend })) } }),
+      canRevertBackend ? jsx(Button, { id: 'native-backend-revert', size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start', whiteSpace: 'normal', height: 'auto', minHeight: '2rem' }, disabled: locked,
+        onClick: () => onChange(current => ({ ...current, backend: dto.backend })), children: `저장된 방식(${nativeBackendLabel(dto.backend)})으로 되돌리기` }) : null,
       draft.backend === 'model-router-auto' ? jsx('p', { id: 'native-auto-explanation', role: 'note', style: styles.hint, children: '같은 대화에서 에이전트가 작업마다 아래 작업 슬롯의 모델 또는 허용한 전문 프로필을 고릅니다. 전문 프로필은 그 프로필의 기존 기본 모델·추론 설정을 사용하며 슬롯 모델을 쓰지 않습니다. 필수 검수는 슬롯 모델로 수행합니다. 이 방식의 예비 모델은 모델 전용 방식과 따로 저장됩니다.' }) : null,
-      draft.backend === 'default' ? jsx('p', { id: 'native-default-explanation', role: 'note', style: styles.hint, children: '맡기는 작업은 모두 위의 ‘작업 위임’ 모델을 사용합니다. 작업 종류별로 모델을 나누려면 다른 방식을 고르세요.' }) : null,
+      draft.backend === 'default' ? jsx('p', { id: 'native-default-explanation', role: 'note', style: styles.warning, children: '이 프로필은 이전의 ‘기본 위임 모델 사용’ 방식으로 저장되어 있습니다. 이 방식은 더 이상 고를 수 없지만, 저장된 값은 그대로 두며 맡기는 작업도 지금처럼 위의 ‘작업 위임’ 모델을 사용합니다. 작업 종류별 슬롯이나 전문 프로필을 쓰려면 위에서 다른 방식을 고른 뒤 저장하세요. 적용 대상을 넓혀 저장해도 이 방식은 다른 프로필에 복사하지 않습니다.' }) : null,
+      !nativeBackendSelectable(draft.backend) && draft.backend !== 'default' ? jsx('p', { id: 'native-unlisted-explanation', role: 'note', style: styles.hint, children: '이 프로필에는 이 화면에서 다루지 않는 방식이 저장되어 있습니다. 저장된 값은 그대로 두며, 적용 대상을 넓혀 저장해도 다른 프로필에 복사하지 않습니다. 바꾸려면 위에서 방식을 고른 뒤 저장하세요.' }) : null,
       nativeModelMode(draft.backend) ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { style: styles.hint, children: '에이전트가 작업 종류에 맞는 슬롯을 고르고, 각 슬롯은 아래에서 정한 모델로 실행합니다. 코드뿐 아니라 복잡한 조사·문서 작업도 같은 슬롯으로 맡기며, 단순 글쓰기·번역·요약은 맡기지 않고 메인 모델이 처리합니다. 슬롯마다 다른 모델을 지정할 수 있고, 다른 프로필에는 적용 대상으로 고른 경우에만 복사합니다.' }),
         !slots.support.available ? jsx('p', { id: 'slot-update-note', role: 'note', style: styles.warning, children: '이 프로필에 설치된 플러그인은 작업 슬롯을 지원하지 않습니다. 플러그인을 업데이트하면 슬롯별 모델과 예비 모델을 설정할 수 있습니다. 지금 저장해도 기존 모델과 예비 모델 설정은 그대로 유지합니다.' }) : null,
@@ -2430,7 +2602,71 @@ function NativeDelegationCard({ dto, draft, profiles, origin, targets, disabled,
         spareReady && TASK_SLOTS.some(slot => nativeDraftSlotPolicy(draft)[slot.id].mode === 'custom') ? jsx('p', { id: 'slot-spare-cost-note', role: 'note', style: styles.warning, children: `예비 모델을 저장하면 선택한 ${selected.length}개 프로필에서 필요할 때 그 모델로 이어서 실행합니다. 제공자의 요금제에 따라 사용량이나 비용이 늘 수 있습니다.` }) : null
       ] }) : null,
 
-      nativeProfileMode(draft.backend) ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
+      otherWarnings.length ? jsx('p', { style: styles.warning, children: '이 설정을 변경할 수 있는지 확인이 필요합니다. 설치 상태를 확인한 뒤 다시 불러오세요.' }) : null,
+    ] })
+  ] })
+}
+
+// The profile delegation section: which specialist profiles the agent may hand work to, their
+// per-delegation descriptions and the account-use consent. It edits only `profile_routes` and
+// consent in the shared draft, and it is editable only while the loaded profile's stored method
+// already uses profiles; otherwise it shows the stored allow-list read-only.
+function ProfileDelegationCard({ dto, draft, profiles, origin, targets, disabled, onChange, roleScope }) {
+  const [roleEditors, setRoleEditors] = useState({})
+  const [rolePreview, setRolePreview] = useState(null)
+  const roleInputs = useRef(null)
+  const roleMounted = useRef(true)
+  const roleController = useRef(null)
+  roleInputs.current = { dto, draft, profiles, origin, targets, disabled, roleScope, onChange }
+  if (!roleController.current) roleController.current = createRoleProposalController({
+    transport: { profileRoutes: () => host.profileRoutes(), requestProfile: (...args) => host.requestProfile(...args) },
+    readState: target => {
+      const value = roleInputs.current
+      const liveProfile = host.state?.profile?.get?.() || value.roleScope?.ownerProfile
+      const liveConnection = host.state?.connectionId?.get?.() || null
+      const liveScope = host.state?.gateway?.get ? scopeFingerprint(liveConnection, liveProfile, host.state.gateway.get()) : value.roleScope?.scopeKey
+      const entry = value.draft?.profile_routes?.profiles.find(row => row.name === target)
+      return { ownerProfile: value.roleScope?.ownerProfile, connectionId: value.roleScope?.connectionId,
+        scopeKey: liveScope, expectedScope: value.roleScope?.scopeKey, baseIdentity: value.roleScope?.baseIdentity,
+        template: value.origin, generation: value.roleScope?.generation, draft: JSON.stringify(value.draft), targets: value.targets,
+        metadataDigest: value.profiles.find(row => row.name === target)?.role_intro?.digest,
+        blocked: !roleMounted.current || value.disabled || value.roleScope?.available !== true || liveProfile !== value.roleScope?.ownerProfile ||
+          liveScope !== value.roleScope?.scopeKey || !entry || !nativeProfileMode(value.dto?.backend) }
+    },
+    onUpdate: view => { if (roleMounted.current) setRolePreview(view) },
+    onUse: (name, description) => {
+      if (!roleMounted.current) return
+      roleInputs.current.onChange(current => editProfileRoleDescription(current, name, description))
+      setRoleEditors(current => ({ ...current, [name]: true }))
+    }
+  })
+  useEffect(() => {
+    roleMounted.current = true
+    const disposers = [host.state?.profile, host.state?.connectionId, host.state?.gateway]
+      .filter(atom => typeof atom?.listen === 'function').map(atom => atom.listen(() => roleController.current.cancel()))
+    return () => { roleMounted.current = false; for (const dispose of disposers) dispose(); roleController.current.cancel() }
+  }, [])
+  useEffect(() => { roleController.current.invalidate() })
+
+  const stale = Boolean(draft && draft.expectedDigest !== dto?.digest)
+  const locked = disabled || dto?.editable !== true || !draft || stale
+  const selected = Array.isArray(targets) ? targets : []
+  const profileSettings = draft?.profile_routes
+  const configured = profileSettings?.profiles || []
+  const setProfile = (name, checked) => onChange(current => {
+    const profiles = checked ? [...current.profile_routes.profiles, { name, description: dto?.profile_routes?.profiles.find(entry => entry.name === name)?.description ?? '' }] : current.profile_routes.profiles.filter(entry => entry.name !== name)
+    return { ...current, allowProfileAccess: false, profile_routes: { profiles, default: profiles.some(entry => entry.name === current.profile_routes.default) ? current.profile_routes.default : null } }
+  })
+  return jsxs('div', { id: 'profile-delegation-settings', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem', minWidth: 0 }, children: [
+    stale ? jsx('p', { role: 'alert', style: styles.warning, children: '다른 곳에서 설정이 바뀌었습니다. 입력한 내용은 남겨 두었으니 상태를 다시 불러온 뒤 저장하세요.' }) : null,
+    jsx(RoleProposalDialog, { view: rolePreview, onCancel: () => roleController.current.cancel(), onGenerate: () => void roleController.current.generate(), onUse: () => void roleController.current.use() }),
+    !draft ? jsx('p', { role: 'note', style: styles.warning, children: '이 기능의 설정을 불러오지 못했습니다. Hermes와 플러그인 설치 상태를 확인한 뒤 다시 불러오세요. 기존 값은 바꾸지 않습니다.' })
+    : !nativeProfileMode(dto?.backend) ? jsxs('div', { id: 'profile-delegation-readonly', role: 'note', style: { ...styles.cardSection, display: 'flex', flexDirection: 'column', gap: '0.45rem', overflowWrap: 'anywhere' }, children: [
+      jsx('p', { style: { ...styles.hint, margin: 0 }, children: `불러온 프로필(${origin || '선택 안 됨'})은 전문 프로필에 맡기는 방식을 쓰지 않습니다. 현재 방식: ${nativeBackendLabel(dto?.backend)}.` }),
+      jsx('p', { style: { ...styles.hint, margin: 0 }, children: '위 ‘모델’ 섹션의 ‘작업을 맡기는 방식’에서 ‘전문 프로필에 맡기기’나 ‘에이전트가 모델 / 전문 프로필 중 선택’을 골라 저장하면, 여기서 맡길 수 있는 프로필을 정할 수 있습니다.' }),
+      jsx('p', { style: { ...styles.hint, margin: 0 }, children: `저장된 허용 프로필: ${(dto?.profile_routes?.profiles || []).map(entry => entry.name).join(', ') || '없음'} · 이 값은 바꾸지 않습니다.` })
+    ] })
+    : jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
         jsx('p', { role: 'note', style: styles.warning, children: '선택한 전문 프로필의 모델과 연결된 계정으로 새 작업을 맡깁니다. 해당 계정의 사용량이나 요금이 발생할 수 있습니다. 기존 대화에 이어 쓰는 기능은 아닙니다. 신뢰할 수 있는 프로필만 허용하세요.' }),
         ...profiles.map(row => {
           const entry = configured.find(item => item.name === row.name)
@@ -2455,14 +2691,13 @@ function NativeDelegationCard({ dto, draft, profiles, origin, targets, disabled,
           ] }, row.name)
         }),
         ...configured.filter(entry => !profiles.some(row => row.name === entry.name)).map(entry => jsxs('div', { style: styles.warning, children: [jsx('span', { children: `더 이상 없는 프로필: ${entry.name}` }), jsx(Button, { size: 'sm', variant: 'secondary', disabled: locked, onClick: () => setProfile(entry.name, false), children: '허용 목록에서 제거' })] }, entry.name)),
-        draft.backend === 'model-router-profiles' ? jsx(ChoiceField, { id: 'native-profile-default', label: '맡길 프로필을 따로 고르지 않으면', value: profileSettings.default || '__parent__', disabled: locked,
+        dto.backend === 'model-router-profiles' ? jsx(ChoiceField, { id: 'native-profile-default', label: '맡길 프로필을 따로 고르지 않으면', value: profileSettings.default || '__parent__', disabled: locked,
           options: [{ value: '__parent__', label: '현재 대화의 모델 사용' }, ...configured.map(entry => ({ value: entry.name, label: entry.name }))],
           onChange: value => onChange(current => ({ ...current, allowProfileAccess: false, profile_routes: { ...current.profile_routes, default: value === '__parent__' ? null : value } })) }) : jsx('p', { style: styles.hint, children: '통합 방식에서는 맡길 프로필을 작업마다 명시적으로 선택합니다. 기존 프로필 전용 방식의 기본 대상은 유지하며, 그 대상을 허용 목록에서 제거하면 기본 선택도 해제됩니다. 허용 프로필이 없으면 모델 경로만 사용할 수 있습니다.' }),
         jsx(CheckRow, { id: 'native-profile-access-consent', label: `선택한 ${selected.length}개 저장 대상에서 위 프로필의 계정과 기능 사용을 허용합니다`, detail: '허용 대상을 새로 추가하거나 기본 프로필을 바꿀 때 필요합니다. 새로 만드는 프로필은 자동으로 허용되지 않습니다.', checked: draft.allowProfileAccess, disabled: locked,
           onChange: checked => onChange(current => ({ ...current, allowProfileAccess: checked })) })
-      ] }) : null,
-      Array.isArray(dto?.warnings) && dto.warnings.length ? jsx('p', { style: styles.warning, children: dto.warnings.includes('profile_target_missing_remove_from_allowlist') ? '허용 목록에 더 이상 없는 프로필이 있습니다. 목록을 확인하고 제거하세요.' : '이 설정을 변경할 수 있는지 확인이 필요합니다. 설치 상태를 확인한 뒤 다시 불러오세요.' }) : null,
-    ] })
+    ] }),
+    Array.isArray(dto?.warnings) && dto.warnings.includes('profile_target_missing_remove_from_allowlist') ? jsx('p', { style: styles.warning, children: '허용 목록에 더 이상 없는 프로필이 있습니다. 목록을 확인하고 제거하세요.' }) : null
   ] })
 }
 
@@ -2510,7 +2745,7 @@ async function nativeBackendCallOnce(path, options = {}) {
   let data
   try { data = JSON.parse(line.slice('MODEL_ROUTER_JSON:'.length)) }
   catch { throw new Error('플러그인 응답이 잘렸거나 손상됐습니다. 상태를 다시 확인하세요.') }
-  if (reply.code !== 0 || data.error) throw Object.assign(new Error(data.message || '요청이 완료되지 않았습니다.'), { backendError: data.error })
+  if (reply.code !== 0 || data.error) throw Object.assign(new Error(data.message || '요청이 완료되지 않았습니다.'), { backendError: data.error, conflict: data.conflict })
   return data
 }
 
@@ -2555,16 +2790,32 @@ function RouterPage({ ctx: pluginContext }) {
   const [draftRevision, setDraftRevision] = useState(null)
   const [nativeDelegationDraft, setNativeDelegationDraft] = useState(null)
   const [nativeDelegationBaselines, setNativeDelegationBaselines] = useState({})
-  const [nativeDelegationTargets, setNativeDelegationTargets] = useState([])
+  // The profile delegation section's own target list and copy intent (see the model section's pair).
+  const [profileDelegationTargets, setProfileDelegationTargets] = useState([])
+  const [profileTargetEdited, setProfileTargetEdited] = useState(false)
+  // Profile-save targets the fresh pre-apply status no longer listed, while the cached page data still
+  // does; they block that save like any other vanished target until unticked or a full reload.
+  const [freshMissingProfileTargets, setFreshMissingProfileTargets] = useState([])
+  const profileTargetsManualRef = useRef(false)
   const nativeTargetsManualRef = useRef(false)
   const [nativeRecoveryConfirmed, setNativeRecoveryConfirmed] = useState(false)
   const [timeoutBaseline, setTimeoutBaseline] = useState(null)
   const [timeoutTargets, setTimeoutTargets] = useState(null)
   const [timeoutTargetEdited, setTimeoutTargetEdited] = useState(false)
   const [profileBaselines, setProfileBaselines] = useState(null)
-  const [sectionErrors, setSectionErrors] = useState({ models: '', routing: '', timeouts: '' })
+  // Per profile, the status values a store save may overwrite, frozen when first seen (`expected`).
+  const [expectationBaselines, setExpectationBaselines] = useState(null)
+  // A compare-and-set refusal from the service: blocks saving until a reload.
+  const [serverConflict, setServerConflict] = useState(null)
+  const serverConflictRef = useRef(null)
+  const [sectionErrors, setSectionErrors] = useState({ models: '', routing: '', timeouts: '', profiles: '' })
   const [modelTargets, setModelTargets] = useState(null)
   const [routingProfiles, setRoutingProfiles] = useState([])
+  // Profiles the operator explicitly ticked to turn task routing back on (sent as reenable_profiles).
+  const [reenableChosen, setReenableChosen] = useState([])
+  // Hand-picked conversation spare-model targets, kept apart from the pending copy intent
+  // (fallbackTargetEdits) that a source switch ends.
+  const fallbackTargetsManualRef = useRef(false)
   const [routingTargets, setRoutingTargets] = useState(null)
   const [routingBaseline, setRoutingBaseline] = useState(null)
   const [routingTargetEdited, setRoutingTargetEdited] = useState(false)
@@ -2596,6 +2847,7 @@ function RouterPage({ ctx: pluginContext }) {
   const refreshPendingRef = useRef(false)
   // Which parts of the page hold unsaved edits, as of the latest render (read when a save starts).
   const dirtyPartsRef = useRef({})
+  const editViewRef = useRef(null)
   const needsReloadRef = useRef(false)
   const applyScopeRef = useRef(null)
   const applyPhaseRef = useRef(null)
@@ -2635,6 +2887,13 @@ function RouterPage({ ctx: pluginContext }) {
   const timeoutWriteRequested = timeoutChanged || timeoutTargetEdited
   const timeoutBaselineMap = timeoutBaselinesFromProfiles(profileBaselines)
   const selectedTimeoutTargets = reconcileTimeoutTargets(timeoutTargets, profiles)
+  // Ticked names a same-revision refresh no longer lists. A list the operator chose is never narrowed
+  // quietly: it keeps them ticked and its save is blocked by name until they are unticked. A default
+  // selection the page made by itself simply follows the live list.
+  const liveProfileNames = profiles.map(item => item.name)
+  const vanishedFrom = (list, chosen) => chosen && statusQuery.data && Array.isArray(list) ? uniqueProfileNames(list).filter(name => !liveProfileNames.includes(name)) : []
+  const vanishedMessage = names => `다음 프로필을 더 이상 찾을 수 없어 저장하지 않습니다. 적용 대상에서 체크를 해제하세요. ${names.join(', ')}`
+  const missingTimeoutTargets = vanishedFrom(timeoutTargets, timeoutTargetsManualRef.current)
   const timeoutSourceRevisionChanged = Boolean(timeoutBaseline && (
     !validTimeoutsDto(loadedTimeoutRow?.timeouts) ||
     timeoutBaselineMap[selectedProfile]?.editable !== loadedTimeoutRow?.timeouts?.editable ||
@@ -2673,7 +2932,10 @@ function RouterPage({ ctx: pluginContext }) {
     setDraft(null)
     setNativeDelegationDraft(null)
     setNativeDelegationBaselines({})
-    setNativeDelegationTargets([])
+    setProfileDelegationTargets([])
+    setProfileTargetEdited(false)
+    setFreshMissingProfileTargets([])
+    profileTargetsManualRef.current = false
     nativeTargetsManualRef.current = false
     setNativeRecoveryConfirmed(false)
     setDraftRevision(null)
@@ -2682,9 +2944,14 @@ function RouterPage({ ctx: pluginContext }) {
     setTimeoutTargetEdited(false)
     timeoutTargetsManualRef.current = false
     setProfileBaselines(null)
-    setSectionErrors({ models: '', routing: '', timeouts: '' })
+    setExpectationBaselines(null)
+    setServerConflict(null)
+    serverConflictRef.current = null
+    setSectionErrors({ models: '', routing: '', timeouts: '', profiles: '' })
     setModelTargets(null)
     setRoutingProfiles([])
+    setReenableChosen([])
+    fallbackTargetsManualRef.current = false
     setRoutingTargets(null)
     setRoutingBaseline(null)
     setRoutingTargetEdited(false)
@@ -2726,12 +2993,18 @@ function RouterPage({ ctx: pluginContext }) {
     setDraft(nextDraft)
     setNativeDelegationDraft(copyNativeDelegationDraft(row.native_delegation))
     setNativeDelegationBaselines(copyNativeDelegationBaselines(profiles))
-    setNativeDelegationTargets([row.name])
+    setProfileDelegationTargets([row.name])
+    setProfileTargetEdited(false)
+    setFreshMissingProfileTargets([])
+    profileTargetsManualRef.current = false
     nativeTargetsManualRef.current = false
     setTimeoutBaseline(copyTimeoutBaseline(row.timeouts))
     setProfileBaselines(copyProfileBaselines(profiles))
+    setExpectationBaselines(copyPageExpectations(profiles))
     timeoutTargetsManualRef.current = false
-    setTimeoutTargets(current => reconcileTimeoutTargets(current, profiles))
+    // Page-made defaults stay symbolic (null = every eligible profile, following the live list)
+    // until the operator edits the list by hand.
+    setTimeoutTargets(null)
     setTimeoutTargetEdited(false)
     setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
     setRoutingTargetEdited(false)
@@ -2742,8 +3015,10 @@ function RouterPage({ ctx: pluginContext }) {
     setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
     setFallbackTargetEdits({ native: false, routing: false, delegation: false })
     setModelTargets([row.name])
-    setFallbackTargets(current => Object.fromEntries(['native', 'routing', 'delegation'].map(scope => [scope, selectFallbackTargets(current[scope], row.name, profiles.map(item => item.name), editableFallbackTargets(scope, profiles))])))
+    fallbackTargetsManualRef.current = false
+    setFallbackTargets({ native: null, routing: null, delegation: null })
     setRoutingProfiles(profiles.filter(item => item.routing?.enabled === true).map(item => item.name))
+    setReenableChosen([])
     setRoutingTargets(current => reconcileModelTargets(current, profiles.map(item => item.name)))
   }, [readyScope, scopeKey, statusQuery.data, selectedProfile, profiles])
 
@@ -2756,7 +3031,7 @@ function RouterPage({ ctx: pluginContext }) {
     setFallbackPreview(null)
     setFallbackPreviewPending(false)
     setFallbackError('')
-    setSectionErrors({ models: '', routing: '', timeouts: '' })
+    setSectionErrors({ models: '', routing: '', timeouts: '', profiles: '' })
     setPageError('')
   }
   // A catalog choice edits provider and model in one turn, and the first edit already moves the
@@ -2783,6 +3058,7 @@ function RouterPage({ ctx: pluginContext }) {
   const nativeFallbackTargets = selectFallbackTargets(fallbackTargets.native, selectedProfile, profileNames, editableFallbackTargets('native', profiles))
   const routingFallbackTargets = selectFallbackTargets(fallbackTargets.routing, selectedProfile, profileNames, editableFallbackTargets('routing', profiles))
   const delegationFallbackTargets = selectFallbackTargets(fallbackTargets.delegation, selectedProfile, profileNames, editableFallbackTargets('delegation', profiles))
+  const missingFallbackTargets = vanishedFrom(fallbackTargets.native, fallbackTargetsManualRef.current)
   const nativeFallbackRows = nativeFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
   const routingFallbackRows = routingFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
   const delegationFallbackRows = delegationFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
@@ -2795,13 +3071,19 @@ function RouterPage({ ctx: pluginContext }) {
   const routingFallbackDraftChanged = Boolean(routingFallbackDraft && fallbackBaselines.routing && !sameValue(routingFallbackDraft, fallbackBaselines.routing))
   const delegationFallbackDraftChanged = Boolean(delegationFallbackDraft && fallbackBaselines.delegation && !sameValue(delegationFallbackDraft, fallbackBaselines.delegation))
   const nativeFallbackError = nativeFallbackDraft ? nativeFallbackValidation(nativeFallbackDraft) : '이 프로필의 대화 fallback 상태를 지원하지 않습니다.'
-  const routingFallbackError = routingFallbackDraft ? routingFallbackValidation(routingFallbackDraft, routingFallbackRows) : '이 프로필의 작업 라우팅 폴백 상태를 지원하지 않습니다.'
-  const delegationFallbackError = delegationFallbackDraft ? delegationFallbackValidation(delegationFallbackDraft) : '기본 위임 방식의 예비 모델 설정을 확인할 수 없습니다. 상태를 새로고침하세요.'
+  const routingFallbackError = routingFallbackDraft ? routingFallbackValidation(routingFallbackDraft, routingFallbackRows) : '이 프로필의 이전 작업 방식 예비 모델 상태를 확인할 수 없습니다.'
+  const delegationFallbackError = delegationFallbackDraft ? delegationFallbackValidation(delegationFallbackDraft) : '이전 기본 위임 방식의 예비 모델 설정을 확인할 수 없습니다.'
   // One target list for the whole model section: role models, slot models, delegation method and spare models.
   const selectedTargets = reconcileModelTargets(modelTargets, profileNames)
+  const missingModelTargets = vanishedFrom(modelTargets, nativeTargetsManualRef.current)
   const slotInfo = slotSupport(statusQuery.data, currentRow)
-  const slotDraftChanged = Boolean(slotInfo.editable && draft?.slots && !sameValue(draft.slots, currentRow?.slots?.declarations))
-  const modelDraftChanged = Boolean(draft && currentRow && !sameValue(draft.models, currentRow.models))
+  // Write intent is the draft against the baseline frozen when the profile was loaded. Live status
+  // rows only say whether a value can be written; a live value that moved away from the baseline is a
+  // conflict (`liveDrift` below), never an edit.
+  const frozenProfile = profileBaselines?.[selectedProfile] || null
+  const frozenNativeDto = nativeDelegationBaselines[selectedProfile] || null
+  const slotDraftChanged = Boolean(slotInfo.editable && draft?.slots && frozenProfile && !sameValue(draft.slots, frozenProfile.slots ?? null))
+  const modelDraftChanged = Boolean(draft && frozenProfile && !sameValue(draft.models, frozenProfile.models))
   const slotDraftIssue = slotInfo.editable && draft?.slots ? slotDraftError(draft.slots) : ''
   // `routingTargetEdited` is the section's copy intent: the operator picked targets by hand.
   // Slot models are copied on fresh intent only while their cards are on screen (a model mode).
@@ -2816,43 +3098,140 @@ function RouterPage({ ctx: pluginContext }) {
   // Bodies are built from this view so every store save carries the same slot declarations.
   const saveDraft = draft ? { ...draft, routing: slotRoutingForSave(draft, slotInfo.editable) } : draft
   const loadedRoutingProfiles = profiles.filter(item => item.routing?.enabled === true).map(item => item.name)
-  const routingOffProfiles = profiles.filter(item => item.routing?.enabled === false).map(item => item.name)
-  const reenableProfiles = routingOffProfiles.filter(name => routingProfiles.includes(name))
+  // Turning routing back on is intent only for a profile that was off when loaded.
+  // Effectively off when the page loaded it: the canonical flag is off, or the routing skill is
+  // disabled in the profile's own config. Only an explicit tick here turns either back on.
+  const frozenRoutingOff = name => profileBaselines?.[name]?.routing?.enabled === false || expectationBaselines?.[name]?.routing?.skill_enabled === false
+  const routingOffProfiles = profileNames.filter(frozenRoutingOff)
+  const reenableProfiles = routingOffProfiles.filter(name => reenableChosen.includes(name))
+  // A ticked re-enable stays an unsaved edit even when its profile drops out of a refreshed status:
+  // it is tracked from the ticks and the frozen baseline, not from the live list, and blocks the
+  // re-enable save by name until it is unticked.
+  // Only offered names can be ticked, so any ticked name the status no longer lists is missing,
+  // also after a reload replaced the baseline it was offered from.
+  const missingReenable = reenableChosen.filter(name => !profileNames.includes(name))
+  const reenableTicks = [...reenableProfiles, ...missingReenable]
+  // Values that changed somewhere else since the profile was loaded, at the same store revision (for
+  // example a profile without a stored plugin entry whose models are read from its own config).
+  // Saving would write the old draft over them, so each save that writes such a part is blocked.
+  // Values changed elsewhere since they were frozen (early feedback; the service refuses such a save
+  // by itself through `expected`), plus a refusal the service already reported for this page.
+  const serverDrift = serverConflict ? [{ profile: serverConflict.profile, part: externalChangeLabel(serverConflict), fallback: serverConflict.field === 'native_fallback' }] : []
+  const driftItems = [...pageLiveDrift(profiles, selectedProfile, profileBaselines, expectationBaselines), ...serverDrift]
+  const storeDrift = driftItems.filter(item => !item.fallback)
+  const fallbackDrift = driftItems.some(item => item.fallback)
+  const liveDrift = driftItems
+  // Re-checked when a save is dispatched, against the newest status, so a callback kept from an
+  // earlier render never sends while the current state is blocked.
+  const driftNow = kind => {
+    const items = [...pageLiveDrift(statusDataRef.current?.profiles || [], selectedProfile, profileBaselines, expectationBaselines),
+      ...(serverConflictRef.current ? [{ fallback: serverConflictRef.current.field === 'native_fallback' }] : [])]
+    return items.some(item => kind === 'all' || (kind === 'fallback') === Boolean(item.fallback))
+  }
+  const storeDriftError = storeDrift.length ? liveDriftMessage(storeDrift) : ''
   const nativeSectionEditable = Boolean(nativeDelegationDraft && currentRow?.native_delegation?.editable === true)
   const nativeSlotCopy = Boolean(nativeSectionEditable && nativeModelMode(nativeDelegationDraft.backend) && nativeSlotDraftReady(nativeDelegationDraft, currentRow.native_delegation))
-  const nativeTargetReasons = Object.fromEntries(profiles.map(row => [row.name, nativeSectionEditable ? nativeDelegationTargetReason(row, nativeDelegationDraft.backend, nativeSlotCopy) : '']))
+  const nativeTargetReasons = Object.fromEntries(profiles.map(row => [row.name, nativeSectionEditable ? nativeDelegationTargetReason(row, nativeDelegationDraft.backend, nativeSlotCopy, selectedProfile) : '']))
   // A profile that cannot take the delegation method or spare models still receives the model values.
   const nativeWriteTargets = nativeSectionEditable ? selectedTargets.filter(name => !nativeTargetReasons[name]) : []
-  const nativeDraftChanged = nativeSectionEditable && nativeDelegationDraftChanged(nativeDelegationDraft, currentRow.native_delegation)
-  const nativeWriteNeeded = nativeSectionEditable && !revisionChanged && nativeWriteTargets.length > 0 && (nativeDraftChanged || routingTargetEdited)
+  // The model section saves the method and spare models only; profile access is its own section.
+  const nativeDraftChanged = nativeSectionEditable && nativeDelegationDraftChanged(nativeDelegationDraft, frozenNativeDto, 'native')
+  // A stored method the page no longer offers (Hermes 'default' or an advanced value) is never copied.
+  const nativeBackendCopyable = Boolean(nativeDelegationDraft && nativeBackendSelectable(nativeDelegationDraft.backend))
+  const nativeWriteNeeded = nativeSectionEditable && nativeBackendCopyable && !revisionChanged && nativeWriteTargets.length > 0 && (nativeDraftChanged || routingTargetEdited)
   let nativeDelegationError = ''
   if (nativeDraftChanged && selectedTargets.includes(selectedProfile) && nativeTargetReasons[selectedProfile]) {
     // The loaded profile's own change must never be dropped silently.
     nativeDelegationError = `${selectedProfile}: ${nativeTargetReasons[selectedProfile]}`
   } else if (nativeWriteNeeded) {
-    try { buildNativeDelegationBatchBody(draftRevision, selectedProfile, nativeWriteTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles) }
+    try { buildNativeDelegationBatchBody(draftRevision, selectedProfile, nativeWriteTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles, 'native') }
     catch (error) { nativeDelegationError = error.message }
   }
   const sectionWriteNeeded = modelWriteNeeded || routingCopyPending || nativeWriteNeeded
-  dirtyPartsRef.current = { models: modelDraftChanged, routing: slotDraftChanged || routingTargetEdited, native: Boolean(nativeDraftChanged),
+  // The profile delegation section: editable only while the loaded profile's stored method uses
+  // profiles. It saves to its own targets, each keeping its stored method and spare models.
+  const profileSectionEditable = Boolean(nativeSectionEditable && nativeProfileMode(currentRow?.native_delegation?.backend))
+  const selectedProfileTargets = reconcileModelTargets(profileDelegationTargets, profileNames)
+  // A ticked target that disappeared from a refreshed status is never dropped quietly: it blocks the
+  // save by name until it is unticked, and the account-use consent given for the old list is reset.
+  const profileTargetList = uniqueProfileNames(Array.isArray(profileDelegationTargets) ? profileDelegationTargets : [])
+  const missingProfileTargets = statusQuery.data ? profileTargetList.filter(name => !profileNames.includes(name) || freshMissingProfileTargets.includes(name)) : []
+  const missingProfileTargetKey = missingProfileTargets.join('\n')
+  useEffect(() => {
+    if (!missingProfileTargetKey) return
+    setNativeDelegationDraft(current => current?.allowProfileAccess ? { ...current, allowProfileAccess: false } : current)
+  }, [missingProfileTargetKey])
+  const profileTargetReasons = Object.fromEntries(profiles.map(row => [row.name, freshMissingProfileTargets.includes(row.name)
+    ? '저장 직전에 확인한 최신 상태에서 이 프로필을 찾을 수 없습니다. 체크를 해제하세요.' : nativeProfileTargetReason(row)]))
+  const profilesDraftChanged = profileSectionEditable && nativeDelegationDraftChanged(nativeDelegationDraft, frozenNativeDto, 'profiles')
+  const profilesWriteRequested = profileSectionEditable && (profilesDraftChanged || profileTargetEdited)
+  const profilesWriteNeeded = profilesWriteRequested && !revisionChanged && selectedProfileTargets.length > 0
+  const profileBlockedTargets = selectedProfileTargets.filter(name => profileTargetReasons[name])
+  let profileSaveError = ''
+  if (missingProfileTargets.length) {
+    profileSaveError = `다음 프로필을 더 이상 찾을 수 없어 전문 프로필 설정을 저장할 수 없습니다. 적용 대상에서 빼 주세요. ${missingProfileTargets.join(', ')}`
+  } else if (profilesWriteRequested && !selectedProfileTargets.length) {
+    profileSaveError = '‘전문 프로필 위임’의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.'
+  } else if (profilesWriteRequested && profileBlockedTargets.length) {
+    // Nothing is skipped quietly here: a target that cannot take the allow-list must be unticked.
+    profileSaveError = `다음 프로필에는 전문 프로필 설정을 저장할 수 없습니다. 적용 대상에서 빼 주세요. ${profileBlockedTargets.map(name => `${name}: ${profileTargetReasons[name]}`).join(' ')}`
+  } else if (profilesWriteNeeded) {
+    try { buildNativeDelegationBatchBody(draftRevision, selectedProfile, selectedProfileTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles, 'profiles') }
+    catch (error) { profileSaveError = error.message }
+  }
+  if (!profileSaveError && profilesWriteNeeded && !nativeStorageAvailable) profileSaveError = '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.'
+  // Unsaved edits, compared with the frozen baseline of the loaded profile and independent of whether
+  // a section is editable right now. A save clears only the parts whose fields it actually sends.
+  // Nothing here reads the live status rows or whether a control is editable right now: an edit made
+  // while a section was editable stays unsaved after a refresh makes it read-only.
+  const frozenNative = copyNativeDelegationDraft(nativeDelegationBaselines[selectedProfile])
+  const differs = (value, loaded) => !sameValue(value ?? null, loaded ?? null)
+  const nativeFieldDirty = key => Boolean(nativeDelegationDraft && frozenNative && differs(nativeDelegationDraft[key], frozenNative[key]))
+  const draftRoutes = nativeDelegationDraft?.profile_routes || null
+  const frozenRoutes = frozenNative?.profile_routes || null
+  const frozenReenable = reenableTicks
+  dirtyPartsRef.current = {
+    // Without a frozen baseline an edit can never be shown as saved.
+    models: Boolean(draft && (!frozenProfile || differs(draft.models, frozenProfile.models))),
+    'routing.roles': Boolean(draft && frozenProfile && (differs(draft.routing?.heavy, frozenProfile.routing?.heavy) || differs(draft.routing?.light, frozenProfile.routing?.light))),
+    'routing.slots': Boolean(draft && frozenProfile && differs(draft.slots, frozenProfile.slots)),
+    // A hand-picked model target list is a pending copy of the role models, of the slot models while
+    // their cards are on screen, and of the delegation method to profiles stored on a plugin method.
+    'copy.models': Boolean(routingTargetEdited),
+    'copy.slots': Boolean(routingTargetEdited && slotCardsVisible && draft?.slots),
+    'native.copy': Boolean(routingTargetEdited && nativeBackendCopyable && selectedTargets.some(name => nativeBackendSelectable(nativeDelegationBaselines[name]?.backend))),
+    'native.backend': nativeFieldDirty('backend'), 'native.slotPolicy': nativeFieldDirty('slotPolicy'), 'native.autoSlotPolicy': nativeFieldDirty('autoSlotPolicy'),
+    'profiles.list': Boolean(draftRoutes && frozenRoutes && differs(draftRoutes.profiles, frozenRoutes.profiles)),
+    'profiles.default': Boolean(draftRoutes && frozenRoutes && differs(draftRoutes.default, frozenRoutes.default)),
+    'profiles.targets': Boolean(profileTargetEdited),
     timeouts: Boolean(timeoutWriteRequested), 'fallback:native': nativeFallbackDraftChanged || Boolean(fallbackTargetEdits.native),
-    'fallback:routing': routingFallbackDraftChanged || Boolean(fallbackTargetEdits.routing), 'fallback:delegation': delegationFallbackDraftChanged || Boolean(fallbackTargetEdits.delegation),
-    reenable: reenableProfiles.length > 0 }
+    reenable: frozenReenable.length > 0 }
+  // The drafted value of each edit, for checking what a save actually sent.
+  editViewRef.current = { profile: selectedProfile, models: draft?.models ?? null,
+    routing: draft ? { heavy: draft.routing?.heavy, light: draft.routing?.light } : null, slots: draft?.slots ?? null,
+    native: nativeDelegationDraft ? { backend: nativeDelegationDraft.backend, slotPolicy: nativeDelegationDraft.slotPolicy ?? null,
+      autoSlotPolicy: nativeDelegationDraft.autoSlotPolicy ?? null, profile_routes: nativeDelegationDraft.profile_routes,
+      descriptionEdits: nativeDelegationDraft.descriptionEdits || {} } : null,
+    nativeFallback: fallbackValueForScope('native', nativeFallbackDraft), reenable: frozenReenable }
   const noTargetError = (modelDraftChanged || slotDraftChanged || nativeDraftChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
   // A changed delegation method or spare model that no selected profile can take is never dropped silently.
   const noNativeTargetError = nativeDraftChanged && selectedTargets.length && !nativeWriteTargets.length
     ? '바꾼 ‘맡기는 방식·예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다. 받을 수 있는 프로필을 선택하거나 그 변경을 되돌리세요.' : ''
-  const sectionSaveError = nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
+  const sectionSaveError = (missingModelTargets.length && (sectionWriteNeeded || routingTargetEdited) ? vanishedMessage(missingModelTargets) : '') ||
+    ((modelWriteNeeded || routingCopyPending) ? storeDriftError : '') || nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
     (nativeWriteNeeded && !nativeStorageAvailable ? '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.' : '')
   const customSlotCount = draft?.slots ? TASK_SLOTS.filter(slot => draft.slots[slot.id]?.follow === 'custom').length : 0
   const spareSlotCount = nativeSlotCopy ? TASK_SLOTS.filter(slot => nativeDraftSlotPolicy(nativeDelegationDraft)[slot.id].mode === 'custom').length : 0
   const sectionSaveSummary = [
     modelWriteNeeded ? '대화 모델' : null,
     routingCopyPending ? `작업 슬롯 모델(직접 지정 ${customSlotCount}개)` : null,
-    nativeWriteNeeded ? `맡기는 방식: ${nativeBackendLabel(nativeDelegationDraft.backend)}${nativeSlotCopy ? ` · 예비 모델을 둔 슬롯 ${spareSlotCount}개` : ''}` : null,
-    nativeWriteNeeded && nativeProfileMode(nativeDelegationDraft.backend) ? `허용할 전문 프로필: ${nativeDelegationDraft.profile_routes.profiles.map(entry => entry.name).join(', ') || '없음'} · 기본: ${nativeDelegationDraft.profile_routes.default || '없음'}` : null
+    nativeWriteNeeded ? `맡기는 방식: ${nativeBackendLabel(nativeDelegationDraft.backend)}${nativeSlotCopy ? ` · 예비 모델을 둔 슬롯 ${spareSlotCount}개` : ''}` : null
   ].filter(Boolean).join(' · ') || '바뀐 내용이 없어 저장할 것이 없습니다. 값을 고치면 그 내용을, 적용 대상을 직접 고르면 현재 값을 그 프로필에 저장합니다.'
-  const nativeSkippedTargets = nativeDraftChanged || (nativeSectionEditable && routingTargetEdited) ? selectedTargets.filter(name => nativeTargetReasons[name]) : []
+  const nativeSkippedTargets = nativeDraftChanged || (nativeSectionEditable && nativeBackendCopyable && routingTargetEdited) ? selectedTargets.filter(name => nativeTargetReasons[name]) : []
+  const profileRoutesSummary = nativeDelegationDraft?.profile_routes
+  const profileSaveSummary = profilesWriteNeeded
+    ? `허용할 전문 프로필: ${profileRoutesSummary.profiles.map(entry => entry.name).join(', ') || '없음'}${currentRow?.native_delegation?.backend === 'model-router-profiles' ? ` · 기본: ${profileRoutesSummary.default || '없음'}` : ''}`
+    : '바뀐 내용이 없어 저장할 것이 없습니다. 허용 목록이나 설명을 고치면 그 내용을, 적용 대상을 직접 고르면 현재 허용 목록을 그 프로필에 저장합니다.'
   const allTargetsSelected = allModelTargetsSelected(selectedTargets, profileNames)
   const targetSummary = allTargetsSelected ? `전체 ${profileNames.length}개 프로필` : `${selectedTargets.length}/${profileNames.length}개 프로필`
   const timeoutDraftResult = buildTimeoutUpdate(selectedProfile, draft?.timeouts, timeoutBaseline, currentRow?.timeouts)
@@ -2861,26 +3240,44 @@ function RouterPage({ ctx: pluginContext }) {
   const timeoutSettingsEditable = timeoutSettingsSupported && timeoutRoleSupported && currentRow?.timeouts?.editable === true && Boolean(draft?.timeouts)
   const disabled = setupPending || profilePreparationLocked() || Boolean(nativeFence) || applyPending || needsReload || revisionChanged || statusQuery.isFetching || !selectedProfile || !draft
   const timeoutSaveValuesValid = Boolean(timeoutPayloadValues(draft?.timeouts, timeoutBaseline))
-  const timeoutSaveDisabled = disabled || !timeoutSettingsEditable || !selectedTimeoutTargets.length ||
+  const timeoutSaveDisabled = disabled || !timeoutSettingsEditable || !selectedTimeoutTargets.length || missingTimeoutTargets.length > 0 ||
     timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged || !timeoutSaveValuesValid
   const validPreview = previewMatchesScope(preview, scopeKey, generationRef.current, selectedProfile)
   const renderGeneration = generationRef.current
+
+  const installFirstSeenBaselines = rows => {
+    const fresh = rows.filter(row => typeof row?.name === 'string' && !Object.prototype.hasOwnProperty.call(expectationBaselines || {}, row.name))
+    if (!fresh.length || !profileBaselines) return
+    setProfileBaselines(current => current ? { ...copyProfileBaselines(fresh), ...current } : current)
+    setNativeDelegationBaselines(current => ({ ...copyNativeDelegationBaselines(fresh), ...current }))
+    setExpectationBaselines(current => current ? { ...copyPageExpectations(fresh), ...current } : current)
+  }
+  // Freeze a newly discovered profile when it is first seen, before it can be edited or copied to.
+  const unseenProfileKey = profileBaselines && expectationBaselines ? profiles.filter(row => !Object.prototype.hasOwnProperty.call(expectationBaselines, row.name)).map(row => row.name).join('\n') : ''
+  useEffect(() => {
+    if (unseenProfileKey) installFirstSeenBaselines(profiles)
+  }, [unseenProfileKey])
 
   const selectProfile = name => {
     if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     const row = profiles.find(item => item.name === name)
     if (!row) return
-    const loadedBaseline = profileBaselines?.[name] || copyProfileDraft(row)
+    const loadedBaseline = profileBaselines?.[name] || copyProfileBaselines([row])[name]
     if (!loadedBaseline) return
     invalidatePlan()
+    // A profile first seen after the page loaded gets its frozen baseline from the status it is
+    // selected in, so its edits are compared, saved and guarded like any other.
+    installFirstSeenBaselines([row])
     const nextDraft = deepClone(loadedBaseline)
     const timeoutDraft = timeoutDraftFromSettings(loadedBaseline.timeouts)
     if (timeoutDraft) nextDraft.timeouts = timeoutDraft
     else delete nextDraft.timeouts
     setSelectedProfile(name)
     setDraft(nextDraft)
-    setNativeDelegationDraft(copyNativeDelegationDraft(nativeDelegationBaselines[name]))
-    if (!nativeTargetsManualRef.current) setNativeDelegationTargets([name])
+    setNativeDelegationDraft(copyNativeDelegationDraft(nativeDelegationBaselines[name] || row.native_delegation))
+    // A ticked profile target that is gone stays listed and blocks that save until it is unticked.
+    setProfileDelegationTargets(current => profileTargetsManualRef.current ? uniqueProfileNames(current || []) : [name])
+    setProfileTargetEdited(false)
     setTimeoutBaseline(copyTimeoutBaselineShape(loadedBaseline.timeouts))
     setTimeoutTargetEdited(false)
     setRoutingBaseline(deepClone({ heavy: loadedBaseline.routing.heavy, light: loadedBaseline.routing.light }))
@@ -2891,7 +3288,9 @@ function RouterPage({ ctx: pluginContext }) {
     setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
     setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
     setFallbackTargetEdits({ native: false, routing: false, delegation: false })
-    setModelTargets(current => nativeTargetsManualRef.current ? reconcileModelTargets(current, profileNames) : [name])
+    // A hand-picked list survives a source switch as picked, vanished names included; only the
+    // pending copy intent ends here.
+    setModelTargets(current => nativeTargetsManualRef.current ? uniqueProfileNames(current || []) : [name])
     setRoutingTargets(current => reconcileModelTargets(current, profileNames))
   }
 
@@ -2903,22 +3302,38 @@ function RouterPage({ ctx: pluginContext }) {
     nativeTargetsManualRef.current = true
     setModelTargets(next)
     setRoutingTargetEdited(next.length > 0)
-    // Access consent was given for a specific target list.
-    setNativeDelegationDraft(current => current ? { ...current, allowProfileAccess: false } : current)
   }
-  const toggleModelTarget = (name, checked) => setSectionTargets(toggleName(selectedTargets, name, checked))
+  // Toggle on the list as ticked, so unticking one name never drops a vanished one quietly.
+  const toggleModelTarget = (name, checked) => setSectionTargets(toggleName([...selectedTargets, ...missingModelTargets], name, checked))
   const selectAllTargets = () => setSectionTargets(selectAllModelTargets(profileNames))
   const selectNoTargets = () => setSectionTargets(selectNoModelTargets())
   const selectSourceTargets = () => setSectionTargets(selectedProfile ? [selectedProfile] : [])
 
+  const setProfileTargets = next => {
+    if (renderGeneration !== generationRef.current || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
+    invalidatePlan()
+    profileTargetsManualRef.current = true
+    setProfileDelegationTargets(next)
+    setProfileTargetEdited(next.length > 0)
+    // Access consent was given for a specific target list.
+    setNativeDelegationDraft(current => current ? { ...current, allowProfileAccess: false } : current)
+  }
+  const chooseProfileTargets = (mode, name = null, checked = false) => {
+    if (mode === 'all') return setProfileTargets(selectAllModelTargets(profileNames.filter(item => !profileTargetReasons[item])))
+    if (mode === 'source') return setProfileTargets(selectedProfile ? [selectedProfile] : [])
+    if (mode === 'none') return setProfileTargets(selectNoModelTargets())
+    // Toggle on the list as ticked, so unticking one name never drops another missing one silently.
+    return setProfileTargets(toggleName(profileTargetList, name, checked))
+  }
+
   const chooseTimeoutTargets = (mode, name = null, checked = false) => {
     if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
     const eligible = eligibleTimeoutTargets(profiles)
-    let next = selectedTimeoutTargets
+    let next = [...selectedTimeoutTargets, ...missingTimeoutTargets]
     if (mode === 'all') next = eligible
     else if (mode === 'source') next = eligible.includes(selectedProfile) ? [selectedProfile] : []
     else if (mode === 'none') next = []
-    else if (eligible.includes(name)) next = toggleName(selectedTimeoutTargets, name, checked)
+    else if (eligible.includes(name) || (missingTimeoutTargets.includes(name) && !checked)) next = toggleName(next, name, checked)
     invalidatePlan()
     timeoutTargetsManualRef.current = true
     setTimeoutTargets([...next])
@@ -2928,8 +3343,8 @@ function RouterPage({ ctx: pluginContext }) {
   const toggleRoutingProfile = (name, checked) => {
     if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
-    setRoutingProfiles(current => toggleName(current, name, checked))
-    if (name === selectedProfile) {
+    setReenableChosen(current => toggleName(current, name, checked))
+    if (name === selectedProfile && profileBaselines?.[name]?.routing?.enabled === false) {
       setDraft(current => current ? { ...current, routing: { ...current.routing, enabled: checked } } : current)
     }
   }
@@ -2958,10 +3373,11 @@ function RouterPage({ ctx: pluginContext }) {
 
   const updateFallbackTarget = (scope, name, checked) => {
     if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
-    const selected = scope === 'native' ? nativeFallbackTargets : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
+    const selected = scope === 'native' ? [...nativeFallbackTargets, ...missingFallbackTargets] : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
     invalidatePlan()
     setFallbackTargets(current => ({ ...current, [scope]: toggleName(selected, name, checked) }))
     setFallbackTargetEdits(current => ({ ...current, [scope]: true }))
+    if (scope === 'native') fallbackTargetsManualRef.current = true
   }
 
   const chooseFallbackTargets = (scope, mode) => {
@@ -2976,6 +3392,7 @@ function RouterPage({ ctx: pluginContext }) {
     invalidatePlan()
     setFallbackTargets(current => ({ ...current, [scope]: [...selected] }))
     setFallbackTargetEdits(current => ({ ...current, [scope]: true }))
+    if (scope === 'native') fallbackTargetsManualRef.current = true
   }
 
   const canPreviewFallback = scope => {
@@ -2983,8 +3400,9 @@ function RouterPage({ ctx: pluginContext }) {
     const targets = scope === 'native' ? nativeFallbackTargets : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
     const rows = scope === 'native' ? nativeFallbackRows : scope === 'routing' ? routingFallbackRows : delegationFallbackRows
     if (targets.length === 0 || rows.length !== targets.length) return false
+    if (scope === 'native' && missingFallbackTargets.length) return false
     if (scope === 'native') {
-      if (!nativeFallbackDraft || currentRow?.fallbacks?.native?.editable !== true || rows.some(row => row.fallbacks?.native?.editable !== true)) return false
+      if (!nativeFallbackDraft || fallbackDrift || currentRow?.fallbacks?.native?.editable !== true || rows.some(row => row.fallbacks?.native?.editable !== true)) return false
       return !nativeFallbackError
     }
     if (scope === 'routing') {
@@ -3020,6 +3438,8 @@ function RouterPage({ ctx: pluginContext }) {
     fallbackTargets: deepClone(fallbackTargets),
     fallbackTargetEdits: { ...fallbackTargetEdits },
     profiles: deepClone(profiles),
+    // Frozen at load (never re-read after a write): what each store body expects to overwrite.
+    pageExpectations: deepClone(expectationBaselines || {}),
     fallbackSupported
   })
 
@@ -3069,7 +3489,7 @@ function RouterPage({ ctx: pluginContext }) {
     setNeedsReload(true)
   }
 
-  const runSave = async ({ operation, scope = null, snapshot, prepare, beforeApply = null, nativeWrite = false, followUp = null, covers = [] }) => {
+  const runSave = async ({ operation, scope = null, snapshot, prepare, beforeApply = null, nativeWrite = false, followUp = null }) => {
     if (!snapshot || setupPendingRef.current || profilePreparationLocked() || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity) || applyPendingRef.current || needsReloadRef.current) return
     const token = ++generationRef.current
     applyPendingRef.current = true
@@ -3085,12 +3505,27 @@ function RouterPage({ ctx: pluginContext }) {
     }
     let applyStarted = false
     let cleanSave = false
-    // Reloading replaces every draft, so it runs by itself only when this save covers every edit.
-    const otherEdits = Object.entries(dirtyPartsRef.current || {}).some(([part, dirty]) => dirty && !covers.includes(part))
+    // Reloading replaces every draft, so it runs by itself only when the bodies this save actually
+    // applied carried every unsaved edit (see submittedEditCoverage).
+    const dirtyAtStart = { ...(dirtyPartsRef.current || {}) }
+    const viewAtStart = editViewRef.current
+    const sent = []
     let nativeFenceRecord = null
     const skippedNote = followUp ? `‘${followUp.secondLabel}’ 저장은 시작하지 않았습니다. 새로고침하면 저장하지 않은 편집은 사라지므로 다시 입력해 저장하세요.` : ''
+    // Every store body carries the frozen expectations of the profiles and fields it writes. The
+    // follow-up of a combined save uses the same frozen values: its first write (the delegation
+    // method) touches none of them, so nothing is advanced.
+    const liveNames = (Array.isArray(snapshot.profiles) ? snapshot.profiles : []).map(row => row.name)
+    const withExpected = (op, body) => ['/preview', '/fallback-preview'].includes(op) && snapshot.pageExpectations && body
+      ? { ...body, expected: pageExpectationsFor(op, body, snapshot.pageExpectations, liveNames) } : body
+    const noteConflict = error => {
+      const conflict = externalChangeFromError(error)
+      if (conflict && isSaveCurrent(snapshot, token)) { serverConflictRef.current = conflict; setServerConflict(conflict) }
+      return conflict
+    }
     try {
-      const prepared = prepare()
+      const rawPrepared = prepare()
+      const prepared = { ...rawPrepared, body: rawPrepared.errors?.length ? rawPrepared.body : withExpected(operation, rawPrepared.body) }
       if (prepared.errors?.length) throw new Error(prepared.errors.join(' '))
       if (previewBodyTooLarge(prepared.body)) throw new Error(BODY_TOO_LARGE_MESSAGE)
       const timeoutUpdates = Array.isArray(prepared.body?.timeout_updates) ? prepared.body.timeout_updates : []
@@ -3110,8 +3545,9 @@ function RouterPage({ ctx: pluginContext }) {
       if (beforeApply && !beforeApply()) throw new Error('선택한 프로필의 설정이 저장 준비 중에 바뀌었습니다. 상태를 다시 불러온 뒤 저장하세요.')
       if (followUp) {
         // Validate the second transaction before the first one writes anything.
-        const check = followUp.prepare()
-        if (check.errors?.length) throw new Error(check.errors.join(' '))
+        const checkRaw = followUp.prepare()
+        if (checkRaw.errors?.length) throw new Error(checkRaw.errors.join(' '))
+        const check = { ...checkRaw, body: withExpected(followUp.operation, checkRaw.body) }
         if (previewBodyTooLarge(check.body)) throw new Error(BODY_TOO_LARGE_MESSAGE)
         const checked = await ctx.rest(followUp.operation, { method: 'POST', body: check.body })
         if (!isSaveCurrent(snapshot, token)) return
@@ -3122,6 +3558,17 @@ function RouterPage({ ctx: pluginContext }) {
         // cannot detect an excluded source changing behind the query cache.
         const freshStatus = await ctx.rest('/status')
         if (!isSaveCurrent(snapshot, token)) return
+        // A target that vanished since the page data was cached is named, never dropped quietly.
+        const freshNames = new Set((Array.isArray(freshStatus?.profiles) ? freshStatus.profiles : []).map(row => row?.name))
+        const vanished = snapshot.nativeTargets.filter(name => !freshNames.has(name))
+        if (vanished.length) {
+          if (snapshot.nativePart === 'profiles') {
+            setFreshMissingProfileTargets(current => uniqueProfileNames([...current, ...vanished]))
+            // The account-use consent was given for the old target list.
+            setNativeDelegationDraft(current => current ? { ...current, allowProfileAccess: false } : current)
+          }
+          throw new Error(`다음 프로필을 더 이상 찾을 수 없어 저장하지 않았습니다. 적용 대상에서 빼 주세요. ${vanished.join(', ')}`)
+        }
         if (freshStatus?.readiness_context?.base_identity !== snapshot.nativeBaseIdentity ||
             !nativeDelegationSnapshotCurrent(snapshot, freshStatus) || (beforeApply && !beforeApply())) {
           throw new Error('원본 또는 선택한 프로필의 설정이 바뀌었습니다. 상태를 다시 불러온 뒤 저장하세요.')
@@ -3134,6 +3581,7 @@ function RouterPage({ ctx: pluginContext }) {
       }
       applyStarted = true
       applyPhaseRef.current = 'apply'
+      sent.push({ operation, part: snapshot.nativePart || null, body: prepared.body })
       const receipt = await ctx.rest('/apply', { method: 'POST', body: { plan_id: planId }, timeoutMs: 180000 })
       if (nativeFenceRecord) writeNativeSaveFence(pluginContext.storage, snapshot.scopeKey,
         { ...nativeFenceRecord, state: isPartialReceipt(receipt) || ['applied', 'no_change'].includes(receipt?.status) ? 'settled' : 'unknown' }, nativeFenceRecord.id)
@@ -3150,12 +3598,14 @@ function RouterPage({ ctx: pluginContext }) {
       // The first apply does not move the store revision, but a plan made before it is not reused.
       let secondStarted = false
       try {
-        const next = followUp.prepare()
-        if (next.errors?.length) throw new Error(next.errors.join(' '))
+        const nextRaw = followUp.prepare()
+        if (nextRaw.errors?.length) throw new Error(nextRaw.errors.join(' '))
+        const next = { ...nextRaw, body: withExpected(followUp.operation, nextRaw.body) }
         const plan = await ctx.rest(followUp.operation, { method: 'POST', body: next.body })
         if (!isSaveCurrent(snapshot, token)) throw new Error('저장 도중 연결 또는 프로필이 바뀌었습니다.')
         if (!plan || typeof plan.plan_id !== 'string' || !Array.isArray(plan.changes)) throw new Error('저장 계획 응답이 올바르지 않습니다.')
         secondStarted = true
+        sent.push({ operation: followUp.operation, part: null, body: next.body })
         const second = await ctx.rest('/apply', { method: 'POST', body: { plan_id: plan.plan_id }, timeoutMs: 180000 })
         if (!isSaveCurrent(snapshot, token)) throw new Error('저장 도중 연결 또는 프로필이 바뀌었습니다.')
         if (isPartialReceipt(second) || !['applied', 'no_change'].includes(second?.status)) throw new Error(second?.error || '적용 결과를 확인할 수 없습니다.')
@@ -3163,9 +3613,11 @@ function RouterPage({ ctx: pluginContext }) {
         cleanSave = true
       } catch (error) {
         const firstDone = receipt.status === 'no_change' ? `‘${followUp.firstLabel}’: 바뀐 내용이 없었습니다.` : `‘${followUp.firstLabel}’: 저장했습니다.`
-        const reason = `(사유: ${error?.message || '알 수 없는 오류'})`
+        // A compare-and-set refusal is checked before the second write: nothing of it was written.
+        const conflict = noteConflict(error)
+        const reason = `(사유: ${conflict ? externalChangeMessage(conflict) : error?.message || '알 수 없는 오류'})`
         setApplyOutcome({ kind: 'partial', result: { [followUp.firstLabel]: receipt },
-          message: secondStarted
+          message: secondStarted && !conflict
             ? `${firstDone} ‘${followUp.secondLabel}’: 저장 결과를 확인할 수 없습니다. 다시 저장하지 말고 상태를 새로고침해 실제 반영 여부를 확인하세요. ${reason}`
             : `${firstDone} ‘${followUp.secondLabel}’: 저장하지 않았습니다. 상태를 새로고침한 뒤 저장되지 않은 부분만 다시 편집해 저장하세요. ${reason}` })
       }
@@ -3173,7 +3625,15 @@ function RouterPage({ ctx: pluginContext }) {
       needsReloadRef.current = true
       setNeedsReload(true)
     } catch (error) {
-      if (applyStarted) {
+      // The service checks the frozen expectations before its first write, so a refusal at apply
+      // still means nothing was written.
+      const conflict = !nativeFenceRecord ? noteConflict(error) : null
+      if (conflict && isSaveCurrent(snapshot, token)) {
+        const message = externalChangeMessage(conflict)
+        if (operation === '/fallback-preview') setFallbackError({ scope, message })
+        else if (scope) setSectionErrors(current => ({ ...current, [scope]: message }))
+        else setPageError(message)
+      } else if (applyStarted) {
         if (nativeFenceRecord) writeNativeSaveFence(pluginContext.storage, snapshot.scopeKey, { ...nativeFenceRecord, state: 'unknown' }, nativeFenceRecord.id)
         markApplyUnknown(snapshot, `${error?.message || '저장 결과를 확인할 수 없습니다. 다시 저장하지 말고 실제 상태를 새로고침하세요.'}${skippedNote ? ` ${skippedNote}` : ''}`)
       } else if (isSaveCurrent(snapshot, token)) {
@@ -3188,6 +3648,8 @@ function RouterPage({ ctx: pluginContext }) {
         markApplyUnknown(snapshot, '저장 도중 연결 또는 프로필이 바뀌어 결과를 확인할 수 없습니다. 다시 저장하지 마세요. 원래 연결·프로필로 돌아가 실제 상태를 새로고침하세요.')
       }
       releaseSaveLock(token)
+      const coveredEdits = cleanSave ? submittedEditCoverage(viewAtStart, sent) : new Set()
+      const otherEdits = Object.entries(dirtyAtStart).some(([part, dirty]) => dirty && !coveredEdits.has(part))
       // A confirmed save reloads the saved state by itself so editing can continue; partial or
       // unknown results still wait for an explicit refresh.
       if (cleanSave && !otherEdits && generationRef.current === token) {
@@ -3200,12 +3662,14 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const saveFallback = scope => {
+    // Only the conversation fallback is saved from the page; stored routing/delegation values stay as they are.
+    if (!PAGE_FALLBACK_SCOPES.includes(scope) || (scope === 'native' && driftNow('fallback'))) return
     if (renderGeneration !== generationRef.current || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || !canPreviewFallback(scope)) return
     const snapshot = captureSaveSnapshot()
     const targetNames = scope === 'native' ? [...nativeFallbackTargets] : scope === 'routing' ? [...routingFallbackTargets] : [...delegationFallbackTargets]
     const value = deepClone(scope === 'native' ? nativeFallbackDraft : scope === 'routing' ? routingFallbackDraft : delegationFallbackDraft)
     return runSave({
-      operation: '/fallback-preview', scope, snapshot, covers: [`fallback:${scope}`],
+      operation: '/fallback-preview', scope, snapshot,
       prepare: () => ({ body: buildFallbackPreviewBody(snapshot.revision, scope, targetNames, value, snapshot.profiles), errors: [] })
     })
   }
@@ -3225,31 +3689,55 @@ function RouterPage({ ctx: pluginContext }) {
     const slotsNeeded = routingCopyPending
     const storeScope = modelWriteNeeded && slotsNeeded ? null : slotsNeeded ? 'routing' : 'models'
     if (!sectionWriteNeeded || sectionSaveError) return
-    const snapshot = freezeDeep({ ...captureSaveSnapshot(),
+    // Checked again now, against the newest status: this callback may come from an earlier render.
+    if ((modelWriteNeeded || slotsNeeded) && driftNow('store')) return
+    const snapshot = freezeDeep({ ...captureSaveSnapshot(), nativePart: 'native',
       nativeDraft: nativeDelegationDraft ? deepClone(nativeDelegationDraft) : null,
       nativeTargets: [...nativeWriteTargets], nativeBaselines: deepClone(nativeDelegationBaselines),
       nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
     const store = { operation: '/preview', firstLabel: '맡기는 방식과 예비 모델', secondLabel: '모델 변경',
       prepare: () => buildModelSectionPreviewBody(snapshot, storeScope) }
-    if (!nativeWriteNeeded) return runSave({ operation: '/preview', scope: 'models', snapshot, prepare: store.prepare, covers: ['models', 'routing'] })
+    if (!nativeWriteNeeded) return runSave({ operation: '/preview', scope: 'models', snapshot, prepare: store.prepare })
+    // The method is always sent; spare models only for the method whose slot cards are on screen.
     if (nativeDelegationError || !nativeStorageAvailable || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity) ||
       !nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current)) return
-    return runSave({ operation: '/delegation-preview', scope: 'models', snapshot, nativeWrite: true, covers: ['models', 'routing', 'native'],
+    return runSave({ operation: '/delegation-preview', scope: 'models', snapshot, nativeWrite: true,
       beforeApply: () => nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current),
       prepare: () => ({ body: buildNativeDelegationBatchBody(snapshot.revision, snapshot.profile, snapshot.nativeTargets,
-        snapshot.nativeDraft, snapshot.nativeBaselines, snapshot.profiles), errors: [] }),
+        snapshot.nativeDraft, snapshot.nativeBaselines, snapshot.profiles, 'native'), errors: [] }),
       followUp: modelWriteNeeded || slotsNeeded ? store : null })
+  }
+
+  // The profile delegation section's own save: the same '/delegation-preview' path and save fence,
+  // with only the allow-list, descriptions and consent taken from the draft.
+  const saveProfileSection = () => {
+    if (renderGeneration !== generationRef.current || revisionChanged || !currentRow || !draft || !statusQuery.data ||
+      setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || refreshPendingRef.current) return
+    if (!profilesWriteNeeded || profileSaveError || !nativeStorageAvailable || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity)) return
+    const snapshot = freezeDeep({ ...captureSaveSnapshot(), nativePart: 'profiles',
+      nativeDraft: deepClone(nativeDelegationDraft), nativeTargets: [...selectedProfileTargets],
+      nativeBaselines: deepClone(nativeDelegationBaselines), nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
+    if (!nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current)) return
+    return runSave({ operation: '/delegation-preview', scope: 'profiles', snapshot, nativeWrite: true,
+      beforeApply: () => nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current),
+      prepare: () => ({ body: buildNativeDelegationBatchBody(snapshot.revision, snapshot.profile, snapshot.nativeTargets,
+        snapshot.nativeDraft, snapshot.nativeBaselines, snapshot.profiles, 'profiles'), errors: [] }) })
   }
 
   // Turning task routing back on for a profile that had it off: membership only, nothing copied.
   const saveReenable = () => {
-    if (renderGeneration !== generationRef.current || revisionChanged || !currentRow || !draft || !statusQuery.data || !reenableProfiles.length ||
+    if (renderGeneration !== generationRef.current || revisionChanged || !currentRow || !draft || !statusQuery.data || !reenableProfiles.length || storeDrift.length || missingReenable.length || driftNow('store') ||
       setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || !profileBaselines) return
     const base = captureSaveSnapshot()
     const routing = deepClone(profileBaselines[selectedProfile]?.routing || draft.routing)
     delete routing.slots
-    const snapshot = freezeDeep({ ...base, draft: { ...base.draft, routing }, routingProfiles: uniqueProfileNames([...loadedRoutingProfiles, ...reenableProfiles]), routingTargets: [], routingTargetError: '' })
-    return runSave({ operation: '/preview', scope: 'models', snapshot, covers: ['reenable'], prepare: () => buildScopedPreviewBody(snapshot, 'routing') })
+    const snapshot = freezeDeep({ ...base, draft: { ...base.draft, routing }, routingProfiles: uniqueProfileNames([...loadedRoutingProfiles, ...reenableProfiles]), routingTargets: [], routingTargetError: '',
+      reenableProfiles: [...reenableProfiles] })
+    return runSave({ operation: '/preview', scope: 'models', snapshot, prepare: () => {
+      // The explicit re-enable: the service turns the routing skill back on only for these names.
+      const prepared = buildScopedPreviewBody(snapshot, 'routing')
+      return prepared.body ? { ...prepared, body: { ...prepared.body, reenable_profiles: [...snapshot.reenableProfiles] } } : prepared
+    } })
   }
 
   const saveSection = saveScope => {
@@ -3259,7 +3747,7 @@ function RouterPage({ ctx: pluginContext }) {
     if (!['models', 'routing', 'timeouts'].includes(saveScope)) return
     const snapshot = captureSaveSnapshot()
     return runSave({
-      operation: '/preview', scope: saveScope, snapshot, covers: [saveScope],
+      operation: '/preview', scope: saveScope, snapshot,
       prepare: () => {
         const prepared = buildScopedPreviewBody(snapshot, saveScope)
         if (saveScope === 'routing' && snapshot.routingTargetError) {
@@ -3271,10 +3759,10 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const saveAll = () => {
-    if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || !currentRow || !draft || !statusQuery.data || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
+    if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || liveDrift.length || pageVanished.length || driftNow('all') || !currentRow || !draft || !statusQuery.data || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     const snapshot = captureSaveSnapshot()
     return runSave({
-      operation: '/preview', snapshot, covers: ['models', 'routing', 'timeouts', 'fallback:native', 'fallback:routing', 'fallback:delegation'],
+      operation: '/preview', snapshot,
       prepare: () => {
         const combined = buildCombinedPreviewBody(
           snapshot.revision,
@@ -3355,18 +3843,28 @@ function RouterPage({ ctx: pluginContext }) {
     setReviewed(false)
     setFallbackPreview(null)
     setProfileBaselines(copyProfileBaselines(rows))
+    setExpectationBaselines(copyPageExpectations(rows))
+    setServerConflict(null)
+    serverConflictRef.current = null
     setNativeDelegationBaselines(copyNativeDelegationBaselines(rows))
-    setNativeDelegationTargets(current => nativeTargetsManualRef.current ? current.filter(name => rows.some(row => row.name === name)) : [row?.name].filter(Boolean))
-    setTimeoutTargets(current => timeoutTargetsManualRef.current
-      ? reconcileTimeoutTargets(current, rows)
-      : eligibleTimeoutTargets(rows))
+    // A ticked profile target that is gone stays listed and blocks that save until it is unticked.
+    setProfileDelegationTargets(current => profileTargetsManualRef.current ? uniqueProfileNames(current || []) : [row?.name].filter(Boolean))
+    setProfileTargetEdited(false)
+    setFreshMissingProfileTargets([])
+    setTimeoutTargets(current => timeoutTargetsManualRef.current ? uniqueProfileNames(current || []) : null)
     setTimeoutTargetEdited(false)
-    setSectionErrors({ models: '', routing: '', timeouts: '' })
-    setModelTargets(current => nativeTargetsManualRef.current ? reconcileModelTargets(current, rows.map(item => item.name)) : [row?.name].filter(Boolean))
+    setSectionErrors({ models: '', routing: '', timeouts: '', profiles: '' })
+    setModelTargets(current => nativeTargetsManualRef.current ? uniqueProfileNames(current || []) : [row?.name].filter(Boolean))
     setRoutingProfiles(rows.filter(item => item.routing?.enabled === true).map(item => item.name))
+    // Re-enable ticks are hand-picked: a vanished one stays (and blocks) until it is unticked, and
+    // one still off keeps its tick. One that is now on needs nothing and is dropped.
+    setReenableChosen(current => current.filter(name => {
+      const item = rows.find(entry => entry.name === name)
+      return !item || item.routing?.enabled === false || routingSkillEnabled(item) === false
+    }))
     setRoutingTargets(current => reconcileModelTargets(current, rows.map(item => item.name)))
     setFallbackTargets(current => ({
-      native: reconcileFallbackTargets(current.native, rows.map(item => item.name)),
+      native: fallbackTargetsManualRef.current && Array.isArray(current.native) ? uniqueProfileNames(current.native) : null,
       routing: reconcileFallbackTargets(current.routing, rows.map(item => item.name)),
       delegation: reconcileFallbackTargets(current.delegation, rows.map(item => item.name))
     }))
@@ -3450,7 +3948,7 @@ function RouterPage({ ctx: pluginContext }) {
     children: [
       modelPresetCards,
       modelCatalog && nativeModelMenu() ? jsx('p', { id: 'model-catalog-note', role: 'note', style: styles.hint, children: `각 역할의 모델을 누르면 불러온 프로필(${selectedProfile})에 연결된 서비스의 모델 목록에서 검색해 고를 수 있습니다. 다른 프로필에도 함께 저장한다면 그 프로필에 같은 서비스가 연결되어 있는지 확인하세요.` }) : null,
-      jsx('p', { id: 'fast-inheritance-note', role: 'note', style: styles.hint, children: '메인 세션에서 선택한 Fast 모드는 기본 위임과 작업 슬롯으로 맡기는 새 작업이 시작할 때 상속합니다. 지원하지 않는 모델·제공자에는 Fast 옵션을 보내지 않으며, auto/cold의 남은 시간을 연장하지 않습니다. Fast 요청에는 API 추가 요금이나 Codex 크레딧 사용 증가가 있을 수 있습니다. 요청한 모드와 제공자가 실제 처리한 등급은 다를 수 있으며, 업데이트된 실행 기능은 새 세션에서 확인하세요.' }),
+      jsx('p', { id: 'fast-inheritance-note', role: 'note', style: styles.hint, children: '메인 세션에서 선택한 Fast 모드는 작업 슬롯으로 맡기는 새 작업이 시작할 때 상속합니다. 지원하지 않는 모델·제공자에는 Fast 옵션을 보내지 않으며, auto/cold의 남은 시간을 연장하지 않습니다. Fast 요청에는 API 추가 요금이나 Codex 크레딧 사용 증가가 있을 수 있습니다. 요청한 모드와 제공자가 실제 처리한 등급은 다를 수 있으며, 업데이트된 실행 기능은 새 세션에서 확인하세요.' }),
       jsx('div', {
         style: styles.roleGrid,
         children: ROLES.map(role => jsxs('article', {
@@ -3470,7 +3968,7 @@ function RouterPage({ ctx: pluginContext }) {
     id: 'model-section-targets', style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '적용 대상' }),
-      jsx('p', { style: styles.hint, children: '위에서 정한 대화 모델, 맡기는 방식, 작업 슬롯의 모델과 예비 모델을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 값을 고치거나 대상을 직접 고른 뒤 저장하면 선택한 프로필에 같은 설정을 복사합니다.' }),
+      jsx('p', { style: styles.hint, children: '위에서 정한 대화 모델, 맡기는 방식, 작업 슬롯의 모델과 예비 모델을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 값을 고치거나 대상을 직접 고른 뒤 저장하면 선택한 프로필에 같은 설정을 복사합니다. ‘대화 예비 모델’은 그 카드의 적용 대상과 저장 버튼을 따로 씁니다.' }),
       jsxs('div', { style: styles.selectionToolbar, children: [
         jsxs('div', { style: styles.statusLine, children: [jsx(Badge, { variant: allTargetsSelected && profileNames.length > 1 ? 'warn' : 'muted', children: targetSummary }), jsx('span', { style: styles.hint, children: `${selectedTargets.length}개 선택` })] }),
         jsxs('div', { style: styles.actions, children: [
@@ -3482,7 +3980,9 @@ function RouterPage({ ctx: pluginContext }) {
       allTargetsSelected && profileNames.length > 1 ? jsx('p', { role: 'note', style: styles.warning, children: `모든 ${profileNames.length}개 프로필이 적용 대상입니다. 저장하면 확인 단계 없이 바로 적용됩니다.` }) : null,
       jsx('div', { style: { ...styles.profileList, alignItems: 'start' }, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${row.name}`, label: row.name,
         detail: selectedTargets.includes(row.name) && nativeSkippedTargets.includes(row.name) ? `맡기는 방식과 예비 모델은 적용하지 않습니다. ${nativeTargetReasons[row.name]}` : undefined,
-        checked: selectedTargets.includes(row.name), disabled, onChange: checked => toggleModelTarget(row.name, checked) }) }, row.name)) }),
+        checked: selectedTargets.includes(row.name), disabled, onChange: checked => toggleModelTarget(row.name, checked) }) }, row.name))
+        .concat(missingModelTargets.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${name}`, label: name,
+          detail: '이 프로필을 더 이상 찾을 수 없습니다. 체크를 해제하세요.', checked: true, disabled, onChange: checked => toggleModelTarget(name, checked) }) }, `missing:${name}`))) }),
       jsxs('div', { id: 'model-section-summary', role: 'note', style: { ...styles.cardSection, display: 'flex', flexDirection: 'column', gap: '0.45rem', overflowWrap: 'anywhere' }, children: [
         jsx('strong', { children: '저장할 내용' }),
         jsx('p', { style: styles.hint, children: `적용 대상: ${selectedTargets.join(', ') || '선택 안 됨'}` }),
@@ -3495,13 +3995,16 @@ function RouterPage({ ctx: pluginContext }) {
     ]
   })
 
-  const reenableGroup = routingOffProfiles.length ? jsxs('fieldset', {
+  const reenableGroup = routingOffProfiles.length || missingReenable.length ? jsxs('fieldset', {
     id: 'routing-reenable', style: { ...styles.fieldset, ...styles.cardSection },
     children: [
       jsx('legend', { style: styles.fieldName, children: '작업 분담이 꺼져 있는 프로필' }),
       jsx('p', { style: styles.hint, children: '작업 분담이 꺼져 있는 프로필입니다. 이전에 꺼 두었거나 플러그인이 아직 준비되지 않은 프로필이 여기에 나옵니다. 꺼진 상태에서는 맡기는 방식을 저장할 수 없고, 맡긴 작업도 거절됩니다. 다시 켜려면 프로필을 고르고 아래 버튼으로 먼저 저장하세요. 모델 값은 바뀌지 않습니다. 저장하면 상태를 다시 불러오므로, 아직 저장하지 않은 다른 편집이 있으면 그것부터 저장하세요.' }),
-      jsx('div', { style: styles.profileList, children: routingOffProfiles.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `routing-reenable-${name}`, label: name, checked: reenableProfiles.includes(name), disabled, onChange: checked => toggleRoutingProfile(name, checked) }) }, name)) }),
-      jsx(Button, { id: 'routing-reenable-save', size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start', whiteSpace: 'normal', height: 'auto', minHeight: '2.1rem' }, disabled: disabled || !reenableProfiles.length, onClick: () => void saveReenable(), children: `선택한 ${reenableProfiles.length}개 프로필의 작업 분담 다시 켜기` })
+      jsx('div', { style: styles.profileList, children: routingOffProfiles.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `routing-reenable-${name}`, label: name, checked: reenableProfiles.includes(name), disabled, onChange: checked => toggleRoutingProfile(name, checked) }) }, name))
+        .concat(missingReenable.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `routing-reenable-${name}`, label: name,
+          detail: '이 프로필을 더 이상 찾을 수 없습니다. 체크를 해제하세요.', checked: true, disabled, onChange: checked => toggleRoutingProfile(name, checked) }) }, `missing:${name}`))) }),
+      missingReenable.length ? jsx('p', { id: 'routing-reenable-missing', role: 'alert', style: styles.warning, children: vanishedMessage(missingReenable) }) : null,
+      jsx(Button, { id: 'routing-reenable-save', size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start', whiteSpace: 'normal', height: 'auto', minHeight: '2.1rem' }, disabled: disabled || !reenableProfiles.length || storeDrift.length > 0 || missingReenable.length > 0, onClick: () => void saveReenable(), children: `선택한 ${reenableProfiles.length}개 프로필의 작업 분담 다시 켜기` })
     ]
   }) : null
 
@@ -3570,7 +4073,10 @@ function RouterPage({ ctx: pluginContext }) {
             disabled: disabled || !eligible,
             onChange: checked => chooseTimeoutTargets('toggle', row.name, checked)
           }) }, row.name)
-        }) })
+        }).concat(missingTimeoutTargets.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `timeout-target-${name}`, label: name,
+          detail: '이 프로필을 더 이상 찾을 수 없습니다. 체크를 해제하세요.', checked: true, disabled,
+          onChange: checked => chooseTimeoutTargets('toggle', name, checked) }) }, `missing:${name}`))) }),
+        missingTimeoutTargets.length ? jsx('p', { id: 'timeout-targets-missing', role: 'alert', style: styles.warning, children: vanishedMessage(missingTimeoutTargets) }) : null
       ] }),
       sectionErrors.timeouts ? jsx('p', { role: 'alert', style: styles.warning, children: sectionErrors.timeouts }) : null,
       jsx(Button, { id: 'timeouts-save', size: 'sm', variant: 'secondary', disabled: timeoutSaveDisabled, onClick: () => void saveSection('timeouts'), children: applyPending ? '저장 중…' : '시간 제한 저장' })
@@ -3581,7 +4087,7 @@ function RouterPage({ ctx: pluginContext }) {
     style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: `${fallbackScopeTitle(scope)} 적용 대상` }),
-      jsx('p', { style: styles.hint, children: '처음 열면 편집 가능한 모든 프로필이 선택됩니다. 선택한 프로필에 이 카드 설정을 적용합니다. 체크만으로 저장되지는 않으며, 모델 적용 대상과는 별개입니다. ‘불러온 프로필만’은 위에서 설정을 불러온 프로필 하나만 남깁니다.' }),
+      jsx('p', { style: styles.hint, children: '처음 열면 편집 가능한 모든 프로필이 선택됩니다. 선택한 프로필에 이 카드 설정을 적용합니다. 체크만으로 저장되지는 않으며, 아래 ‘모델’ 적용 대상과는 별개입니다. ‘불러온 프로필만’은 위에서 설정을 불러온 프로필 하나만 남깁니다.' }),
       jsxs('div', { style: styles.selectionToolbar, children: [
         jsx('span', { style: styles.hint, children: `${selected.length}/${profileNames.length}개 프로필 선택` }),
         jsxs('div', { style: styles.actions, children: [
@@ -3605,19 +4111,23 @@ function RouterPage({ ctx: pluginContext }) {
           disabled: disabled || (!supported && !checked),
           onChange: value => updateFallbackTarget(scope, row.name, value)
         }) }, row.name)
-      }) })
+      }).concat(scope !== 'native' ? [] : missingFallbackTargets.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, {
+        id: `${scope}-fallback-target-${name}`, label: name, detail: '이 프로필을 더 이상 찾을 수 없습니다. 체크를 해제하세요.', checked: true, disabled,
+        onChange: value => updateFallbackTarget(scope, name, value) }) }, `missing:${name}`))) }),
+      scope === 'native' && missingFallbackTargets.length
+        ? jsx('p', { id: 'native-fallback-targets-missing', role: 'alert', style: styles.warning, children: vanishedMessage(missingFallbackTargets) }) : null
     ]
   })
 
   const nativeStatus = currentRow?.fallbacks?.native
-  const routingFallbackStatus = currentRow?.fallbacks?.routing
   const nativeEditable = fallbackSupported && nativeStatus?.editable === true && Boolean(nativeFallbackDraft)
-  const routingEditable = fallbackSupported && Boolean(routingFallbackDraft) && routingFallbackStatus?.editable !== false && routingFallbackStatus?.readonly !== true
   const nativeChainText = chain => Array.isArray(chain) && chain.length
     ? chain.map(item => `${item?.provider || '—'}/${item?.model || '—'}`).join(' → ')
     : '없음'
-  const nativeFallbackPanel = jsxs('article', { style: styles.roleCard, children: [
-    jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '일반 대화 폴백' }), jsx(Badge, { variant: nativeStatus?.enabled ? 'warn' : 'muted', children: nativeStatus?.enabled ? '현재 사용' : nativeStatus ? '현재 꺼짐' : '상태 미지원' }), nativeFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null] }),
+  // The main conversation's spare models (native fallback_providers). It sits in the model section
+  // under the conversation models but keeps its own targets, save button and '/fallback-preview' path.
+  const nativeFallbackPanel = jsxs('article', { id: 'conversation-fallback', style: styles.roleCard, children: [
+    jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '대화 예비 모델' }), jsx(Badge, { variant: nativeStatus?.enabled ? 'warn' : 'muted', children: nativeStatus?.enabled ? '현재 사용' : nativeStatus ? '현재 꺼짐' : '상태 미지원' }), nativeFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null] }),
     jsx('p', { style: styles.hint, children: '메인 세션에서 나와 대화하는 모델의 예비입니다. 주 모델을 사용할 수 없을 때, Hermes의 전환 조건에 따라 현재 대화 문맥으로 다른 모델을 사용합니다. 이 설정을 저장한다고 진행 중인 응답이 즉시 바뀌지는 않습니다.' }),
     jsx('p', { id: 'native-fallback-recovery-note', role: 'note', style: styles.hint, children: '사용 제한이 풀리면 다음 응답에서 기본 모델을 다시 시도할 수 있습니다. 복귀 준비 알림은 정상 응답을 확인했다는 뜻은 아닙니다. 아래 목록은 예비 모델 설정이며, 지금 대화 중인 모델을 표시하는 것은 아닙니다.' }),
     jsx('p', { style: styles.warning, children: '대체 모델을 켜거나 경로를 바꾸면 사용량에 따라 추가 비용이 발생할 수 있습니다. 선택한 범위를 저장할 때만 설정에 반영됩니다.' }),
@@ -3655,107 +4165,47 @@ function RouterPage({ ctx: pluginContext }) {
       jsx('p', { role: 'note', style: styles.hint, children: '예비 모델을 사용하면 제공자의 요금제에 따라 추가 비용이 발생할 수 있습니다. 아래 저장을 눌러야 적용됩니다.' }),
       fallbackTargetGroup('native', nativeFallbackTargets, nativeEditable),
       fallbackError?.scope === 'native' ? jsx('p', { role: 'alert', style: styles.warning, children: fallbackError.message }) : null,
-      jsx(Button, { id: 'native-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('native'), onClick: () => void saveFallback('native'), children: applyPending ? '저장 중…' : '저장' })
+      jsx(Button, { id: 'native-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('native'), onClick: () => void saveFallback('native'), children: applyPending ? '저장 중…' : '대화 예비 모델 저장' })
     ] }) : null
   ] })
 
-  const routingFallbackPanel = jsxs('article', { style: styles.roleCard, children: [
-    jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '작업·검증 라우팅 폴백' }), jsx(Badge, { variant: routingFallbackStatus?.enabled ? 'warn' : 'muted', children: routingFallbackStatus?.enabled ? '현재 사용' : routingFallbackStatus ? '현재 꺼짐' : '상태 미지원' }), routingFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null] }),
-    jsx('p', { style: styles.hint, children: '이전 버전 작업의 호환 설정입니다. 현재 작업 슬롯의 예비 모델은 위 ‘모델’ 섹션의 각 슬롯에서 설정하세요. 이 항목은 이전 방식에서 사용량 소진으로 작업을 시작하지 못했을 때만 새 작업을 한 번 시도하는 별도 설정입니다.' }),
-    jsx('p', { id: 'routing-fallback-recovery-note', role: 'note', style: styles.hint, children: '폴백으로 시작한 시도는 작업 도중 기본 모델로 다시 전환하지 않습니다. 다음 새 작업은 설정된 기본 경로부터 시작합니다. 진행 중 작업의 경로나 결과가 불명확하다고 자동으로 다시 실행하지 않습니다.' }),
-    jsx('p', { style: styles.warning, children: '실패 문구만으로는 재시도하지 않습니다. 확인된 한도 초과가 아니거나 이미 도구/부분 출력이 있으면 재시도하지 않습니다. 대체 실행에는 별도 비용이 발생할 수 있습니다.' }),
-    routingFallbackStatus?.enabled && currentRow?.routing?.enabled !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필은 작업 분담이 꺼져 있습니다. 여기서 예비 모델을 저장해도 작업 분담 자체가 켜지지는 않습니다.' }) : null,
-    !fallbackSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '폴백 설정을 안전하게 변경할 수 있는지 확인되지 않아 읽기 전용으로 표시합니다. 플러그인 업데이트 후 상태를 새로고침하세요.' }) : null,
-    jsxs('div', { style: styles.fields, children: [
-      jsx('p', { style: styles.actual, children: `저장 설정: ${routingFallbackStatus?.enabled ? '사용' : '꺼짐'} · Heavy ${readableValue(routingFallbackStatus?.heavy)} · Light ${readableValue(routingFallbackStatus?.light)}` }),
-      jsx('p', { style: styles.actual, children: `Heavy 실행 경로: ${readableValue(primaryRouteForFallback(currentRow, 'heavy'))} → ${routingFallbackStatus?.enabled ? readableValue(routingFallbackStatus.heavy) : '대체 꺼짐'}` }),
-      jsx('p', { style: styles.actual, children: `Light 실행 경로: ${readableValue(primaryRouteForFallback(currentRow, 'light'))} → ${routingFallbackStatus?.enabled ? readableValue(routingFallbackStatus.light) : '대체 꺼짐'}` })
-    ] }),
-    routingEditable ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.85rem' }, children: [
-      jsx(CheckRow, { id: 'routing-fallback-enabled', label: '작업·검증 라우팅의 예비 모델 사용', detail: '템플릿 선택만으로는 켜지지 않습니다.', checked: routingFallbackDraft.enabled, disabled, onChange: checked => updateFallbackDraft('routing', current => ({ ...current, enabled: checked })) }),
-      jsx('div', { style: styles.presetGrid, children: ROUTING_FALLBACK_PRESETS.map(preset => jsx('button', { id: `routing-fallback-preset-${preset.id}`, type: 'button', disabled, onClick: () => updateFallbackDraft('routing', current => applyRoutingFallbackPresetDraft(current, preset.id)), style: styles.presetCard, children: [jsx('strong', { children: preset.name }), jsx('span', { style: styles.hint, children: preset.description }), jsx('span', { style: styles.hint, children: `Heavy ${readableValue(preset.heavy)} · Light ${readableValue(preset.light)} · 사용 여부는 그대로 유지` })] }, preset.id)) }),
-      jsx('div', { style: styles.roleGrid, children: ['heavy', 'light'].map(role => jsxs('article', { style: styles.roleCard, children: [
-        jsx('h4', { style: styles.roleTitle, children: role === 'heavy' ? 'Heavy 작업' : 'Light 작업' }),
-        jsx(RoleRouteFields, { prefix: `routing-fallback-${role}`, route: routingFallbackDraft[role], disabled, catalog: modelCatalog, onChange: (field, value) => updateFallbackDraft('routing', current => ({ ...current, [role]: { ...(current[role] || {}), [field]: value } })) }),
-        jsx('p', { style: styles.actual, children: `주 경로: ${readableValue(primaryRouteForFallback(currentRow, role))}` }),
-        jsx('p', { style: styles.actual, children: `대체 경로: ${readableValue(routingFallbackDraft[role])}` })
-      ] }, role)) }),
-      routingFallbackError ? jsx('p', { role: 'alert', style: styles.warning, children: routingFallbackError }) : null,
-      jsx('p', { role: 'note', style: styles.hint, children: '예비 모델 사용에는 추가 비용이 발생할 수 있습니다. 조건을 만족할 때 같은 Heavy/Light 등급의 새 작업을 최대 한 번 시도하며, 이전 작업의 부분 답변을 이어받지 않습니다.' }),
-      fallbackTargetGroup('routing', routingFallbackTargets, routingEditable),
-      fallbackError?.scope === 'routing' ? jsx('p', { role: 'alert', style: styles.warning, children: fallbackError.message }) : null,
-      jsx(Button, { id: 'routing-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('routing'), onClick: () => void saveFallback('routing'), children: applyPending ? '저장 중…' : '저장' })
-    ] }) : jsx('div', { role: 'note', style: styles.warning, children: routingFallbackStatus ? '현재 작업 라우팅 대체 정책은 표시만 가능합니다.' : '이 프로필의 작업 라우팅 폴백 상태를 사용할 수 없습니다. 기존 설정은 변경되지 않습니다.' })
-  ] })
-
-  const delegationStatus = currentRow?.fallbacks?.delegation
-  const delegationStatusValid = validDelegationFallbackState(delegationStatus)
-  const delegationEditable = fallbackSupported && delegationStatusValid && delegationStatus.editable === true && Boolean(delegationFallbackDraft)
-  const delegationModeLabel = mode => DELEGATION_FALLBACK_MODES.find(item => item.value === mode)?.label || '확인할 수 없음'
-  const delegationChainText = chain => Array.isArray(chain) && chain.length
-    ? chain.map(item => `${item.provider}/${item.model}`).join(' → ')
-    : '없음'
-  const delegationFallbackPanel = jsxs('article', { style: styles.roleCard, children: [
-    jsxs('div', { style: styles.statusLine, children: [
-      jsx('h3', { style: styles.roleTitle, children: '기본 위임 방식의 예비 모델' }),
-      jsx(Badge, { variant: delegationStatusValid && delegationStatus.mode !== 'off' ? 'warn' : 'muted', children: delegationStatusValid ? delegationModeLabel(delegationStatus.mode) : '상태 미지원' }),
-      delegationFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null
-    ] }),
-    jsx('p', { style: styles.hint, children: '작업을 맡기는 방식에서 ‘기본 위임 모델 사용’을 골랐을 때의 예비 모델입니다. 작업 슬롯 방식의 예비 모델은 위 ‘모델’ 섹션의 각 슬롯에서 설정합니다.' }),
-    jsx('p', { style: styles.warning, children: '기본 규칙에서는 모델·제공자를 따로 지정하지 않은 서브 에이전트만 메인 대화의 예비 목록을 물려받습니다. 특정 모델을 지정한 서브 에이전트도 전환하려면 위임 전용 목록을 선택하세요. 이미 진행 중인 위임 작업을 다시 시작하거나 즉시 바꾸지는 않습니다.' }),
-    jsxs('div', { style: styles.fields, children: [
-      jsx('p', { style: styles.actual, children: `저장 정책: ${delegationStatusValid ? delegationModeLabel(fallbackBaselines.delegation?.mode) : '확인할 수 없음'} · 목록 ${delegationChainText(fallbackBaselines.delegation?.chain)}` }),
-      jsx('p', { style: styles.actual, children: `실제 선언 정책: ${delegationStatusValid ? delegationModeLabel(delegationStatus.actual_mode) : '확인할 수 없음'} · 선언 체인 ${delegationChainText(delegationStatus?.actual_chain)}` }),
-      jsx('p', { style: styles.hint, children: '여기에 표시한 목록은 위임 전용 선언입니다. 실제 상속 여부는 각 위임 작업에서 지정한 모델·제공자에 따라 달라집니다.' })
-    ] }),
-    delegationStatus?.drift ? jsx('p', { role: 'status', style: styles.warning, children: '저장된 위임 정책과 실제 선언 설정이 다릅니다. 적용 경로를 확인하세요.' }) : null,
-    delegationStatusValid && delegationStatus.warnings.length ? jsx('div', { role: 'note', style: styles.warning, children: delegationStatus.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: readableValue(warning) }, index)) }) : null,
-    !fallbackSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '폴백 설정 정보를 확인할 수 없어 읽기 전용으로 표시합니다. 상태를 새로고침하세요.' }) : null,
-    fallbackSupported && !delegationStatusValid ? jsx('p', { role: 'alert', style: styles.warning, children: '위임 폴백 설정을 확인할 수 없어 편집을 잠갔습니다. 기존 설정은 그대로 보존됩니다. 상태를 새로고침하세요.' }) : null,
-    delegationStatusValid && delegationStatus.editable !== true ? jsx('p', { role: 'note', style: styles.warning, children: '관리자 고정·고급 옵션·설정 읽기 실패 등으로 안전한 편집을 확인할 수 없습니다. 원본을 보존하기 위해 편집을 잠갔습니다.' }) : null,
-    delegationEditable ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.85rem' }, children: [
-      jsx(ChoiceField, { id: 'delegation-fallback-mode', label: '네이티브 서브 에이전트의 예비 모델 사용 방식', value: delegationFallbackDraft.mode, disabled, onChange: mode => updateFallbackDraft('delegation', current => ({ mode, chain: mode === 'custom' ? current.chain : [] })), options: DELEGATION_FALLBACK_MODES }),
-      delegationFallbackDraft.mode === 'default' ? jsx('p', { style: styles.hint, children: '모델·제공자·접속 주소를 따로 지정하지 않은 서브 에이전트만 메인 대화의 예비 목록을 물려받습니다. 따로 지정한 서브 에이전트는 예비 모델 없이 실행됩니다.' }) : null,
-      delegationFallbackDraft.mode === 'off' ? jsx('p', { style: styles.hint, children: '기본 위임 모델은 그대로 사용하고, 다른 모델로 전환하지 않습니다. 일반 대화에 설정한 예비 모델도 사용하지 않습니다.' }) : null,
-      delegationFallbackDraft.mode === 'custom' ? jsxs('div', { style: styles.fieldset, children: [
-        jsx('strong', { style: styles.fieldName, children: '순서가 있는 위임 전용 목록' }),
-        jsx('p', { style: styles.hint, children: '기본 위임 방식의 예비 모델을 위에서 아래 순서로 시도합니다. 일반 대화와 작업 슬롯의 예비 모델은 바꾸지 않습니다.' }),
-        jsx('button', { id: 'delegation-fallback-template-non-openai', type: 'button', disabled, onClick: () => updateFallbackDraft('delegation', current => ({ ...current, chain: deepClone(NATIVE_FALLBACK_PRESETS[0].chain) })), style: styles.presetCard, children: [jsx('strong', { children: 'Non-OpenAI 예비 목록 채우기' }), jsx('span', { style: styles.hint, children: '예비 모델 입력값만 채웁니다. 저장을 눌러야 적용됩니다.' }), jsx('span', { style: styles.hint, children: NATIVE_FALLBACK_PRESETS[0].chain.map(item => `${item.provider}/${item.model}`).join(' → ') })] }),
-        ...delegationFallbackDraft.chain.map((entry, index) => jsxs('div', { style: styles.roleCard, children: [
-          jsx('strong', { style: styles.roleTitle, children: `우선순위 ${index + 1}` }),
-          jsx(ModelRouteField, {
-            ids: { picker: `delegation-chain-${index}-picker`, provider: `delegation-chain-${index}-provider`, model: `delegation-chain-${index}-model` },
-            labels: { picker: `위임 우선순위 ${index + 1} 모델`, provider: `위임 우선순위 ${index + 1} 공급자 ID`, model: `위임 우선순위 ${index + 1} 모델 ID` },
-            route: entry, disabled, catalog: modelCatalog,
-            onChange: (field, value) => updateFallbackDraft('delegation', current => ({ ...current, chain: current.chain.map((item, at) => at === index ? { ...item, [field]: value } : item) })) }),
-          jsxs('div', { style: styles.actions, children: [
-            jsx(Button, { id: `delegation-chain-${index}-up`, size: 'sm', variant: 'secondary', disabled: disabled || index === 0, onClick: () => updateFallbackDraft('delegation', current => { const chain = [...current.chain]; [chain[index - 1], chain[index]] = [chain[index], chain[index - 1]]; return { ...current, chain } }), children: '위로' }),
-            jsx(Button, { id: `delegation-chain-${index}-down`, size: 'sm', variant: 'secondary', disabled: disabled || index === delegationFallbackDraft.chain.length - 1, onClick: () => updateFallbackDraft('delegation', current => { const chain = [...current.chain]; [chain[index + 1], chain[index]] = [chain[index], chain[index + 1]]; return { ...current, chain } }), children: '아래로' }),
-            jsx(Button, { id: `delegation-chain-${index}-remove`, size: 'sm', variant: 'secondary', disabled, onClick: () => updateFallbackDraft('delegation', current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })), children: '삭제' })
-          ] })
-        ] }, `delegation-chain-${index}`)),
-        jsx(Button, { id: 'delegation-chain-add', size: 'sm', variant: 'secondary', disabled: disabled || delegationFallbackDraft.chain.length >= 5, onClick: () => updateFallbackDraft('delegation', current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })), children: '모델 추가' }),
-        delegationFallbackError ? jsx('p', { role: 'alert', style: styles.warning, children: delegationFallbackError }) : null
-      ] }) : null,
-      jsx('p', { role: 'note', style: styles.hint, children: '서브 에이전트의 예비 모델 사용에도 추가 비용이 발생할 수 있습니다. 기본 규칙을 사용하면 메인 대화의 이후 폴백 변경이 모델을 따로 지정하지 않은 서브 에이전트에도 반영될 수 있습니다.' }),
-      fallbackTargetGroup('delegation', delegationFallbackTargets, delegationEditable),
-      fallbackError?.scope === 'delegation' ? jsx('p', { role: 'alert', style: styles.warning, children: fallbackError.message }) : null,
-      jsx(Button, { id: 'delegation-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('delegation'), onClick: () => void saveFallback('delegation'), children: applyPending ? '저장 중…' : '저장' })
-    ] }) : null
-  ] })
-
-  const fallbackManagement = section('예비 모델(폴백) 설정', '주 모델을 사용할 수 없을 때 대신 쓸 모델입니다. 메인 대화, 이전 버전 작업, 기본 위임 방식을 따로 설정합니다. 작업 슬롯의 예비 모델은 위 ‘모델’ 섹션에서 설정합니다. 수정한 폴백은 아래 전체 미리보기·저장에도 포함됩니다.', jsxs('div', { id: 'fallback-management', style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [
-    !fallbackSupported ? jsx('div', { role: 'alert', style: styles.warning, children: '폴백 편집 기능을 확인할 수 없어 기존 설정을 읽기 전용으로 표시합니다. 플러그인 업데이트 후 상태를 새로고침하세요.' }) : null,
-    jsxs('div', { style: styles.fields, children: [
-      jsx('p', { style: styles.hint, children: `대상 원본 프로필: ${selectedProfile || '선택 안 됨'} · 대화 대상 ${nativeFallbackTargets.length}개 · 작업·검증 대상 ${routingFallbackTargets.length}개 · 위임 대상 ${delegationFallbackTargets.length}개` }),
-      jsx('p', { style: styles.hint, children: '프리셋은 초안만 채웁니다. 자동 활성화나 승인 저장을 하지 않습니다. 모델 역할 프리셋, ‘모델’ 섹션의 적용 대상과도 분리되어 있습니다.' })
-    ] }),
-    jsx('div', { style: styles.roleGrid, children: nativeFallbackPanel }),
-    jsxs('details', { style: styles.cardSection, children: [
-      jsx('summary', { style: { cursor: 'pointer' }, children: '다른 작업 방식의 예비 모델 · 고급' }),
-      jsx('p', { style: { ...styles.hint, marginBlock: '0.7rem' }, children: '기본 위임 방식이나 이전 버전의 호환 설정입니다. 현재 작업 슬롯의 예비 모델은 위 ‘모델’ 섹션의 각 슬롯에서 설정하세요.' }),
-      jsx('div', { style: styles.roleGrid, children: [delegationFallbackPanel, routingFallbackPanel] })
-    ] })
+  const profileSectionDisabled = disabled || !nativeStorageAvailable
+  const profileTargetGroup = profileSectionEditable ? jsxs('fieldset', {
+    id: 'profile-section-targets', style: styles.fieldset,
+    children: [
+      jsx('legend', { style: styles.fieldName, children: '전문 프로필 위임 적용 대상' }),
+      jsx('p', { style: styles.hint, children: '위의 허용 목록·설명·사용 허용을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 전문 프로필에 맡기는 방식으로 저장된 프로필만 고를 수 있으며, 각 프로필의 맡기는 방식과 예비 모델은 바꾸지 않습니다. ‘모델’ 섹션의 적용 대상과는 별개입니다.' }),
+      jsxs('div', { style: styles.selectionToolbar, children: [
+        jsx('span', { style: styles.hint, children: `${selectedProfileTargets.length}개 선택` }),
+        jsxs('div', { style: styles.actions, children: [
+          jsx(Button, { id: 'profile-target-source', size: 'sm', variant: 'secondary', disabled: profileSectionDisabled, onClick: () => chooseProfileTargets('source'), children: '불러온 프로필만' }),
+          jsx(Button, { id: 'profile-target-all', size: 'sm', variant: 'secondary', disabled: profileSectionDisabled, onClick: () => chooseProfileTargets('all'), children: '가능한 프로필 모두' }),
+          jsx(Button, { id: 'profile-target-none', size: 'sm', variant: 'secondary', disabled: profileSectionDisabled, onClick: () => chooseProfileTargets('none'), children: '모두 해제' })
+        ] })
+      ] }),
+      jsx('div', { style: { ...styles.profileList, alignItems: 'start' }, children: profiles.map(row => {
+        const checked = selectedProfileTargets.includes(row.name)
+        return jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `profile-target-${row.name}`, label: row.name,
+          detail: profileTargetReasons[row.name] || undefined, checked,
+          disabled: profileSectionDisabled || (Boolean(profileTargetReasons[row.name]) && !checked), onChange: value => chooseProfileTargets('toggle', row.name, value) }) }, row.name)
+      }).concat(missingProfileTargets.filter(name => !profileNames.includes(name)).map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `profile-target-${name}`, label: name,
+        detail: '이 프로필을 더 이상 찾을 수 없습니다. 체크를 해제하세요.', checked: true,
+        disabled: profileSectionDisabled, onChange: value => chooseProfileTargets('toggle', name, value) }) }, `missing:${name}`))) }),
+      jsxs('div', { id: 'profile-section-summary', role: 'note', style: { ...styles.cardSection, display: 'flex', flexDirection: 'column', gap: '0.45rem', overflowWrap: 'anywhere' }, children: [
+        jsx('strong', { children: '저장할 내용' }),
+        jsx('p', { style: styles.hint, children: `적용 대상: ${selectedProfileTargets.join(', ') || '선택 안 됨'}` }),
+        jsx('p', { style: styles.hint, children: profileSaveSummary })
+      ] }),
+      profileSaveError ? jsx('p', { role: 'alert', style: styles.warning, children: profileSaveError }) : null,
+      sectionErrors.profiles ? jsx('p', { role: 'alert', style: styles.warning, children: sectionErrors.profiles }) : null,
+      jsx(Button, { id: 'profile-section-save', size: 'sm', variant: 'secondary', style: { whiteSpace: 'normal', height: 'auto', minHeight: '2.1rem' }, disabled: profileSectionDisabled || Boolean(profileSaveError) || !profilesWriteNeeded, onClick: () => void saveProfileSection(), children: applyPending ? '저장 중…' : `선택한 ${selectedProfileTargets.length}개 프로필에 전문 프로필 설정 저장` })
+    ]
+  }) : null
+  const profileDelegationSection = section('전문 프로필 위임', '에이전트가 작업을 다른 전문 프로필에 맡길 수 있게 허용합니다. 맡길 수 있는 프로필과 위임용 설명을 정하고, 아래 적용 대상에서 고른 프로필에 따로 저장합니다. 모델 설정과는 별도로 저장합니다.', jsxs('div', { id: 'profile-delegation', style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [
+    jsx(ProfileDelegationCard, { dto: currentRow?.native_delegation, draft: nativeDelegationDraft, profiles, origin: selectedProfile,
+      roleScope: { scopeKey, ownerProfile: activeProfile || 'default', connectionId, baseIdentity: statusQuery.data?.readiness_context?.base_identity, available: statusQuery.data?.role_proposal?.available === true, generation: renderGeneration },
+      targets: selectedProfileTargets, disabled: profileSectionDisabled || !profileSectionEditable, onChange: updateNativeDelegationDraft }),
+    profileTargetGroup
   ] }))
 
   const localCombinedSummary = currentRow && draft && statusQuery.data
@@ -3783,9 +4233,7 @@ function RouterPage({ ctx: pluginContext }) {
     routing_targets: localCombinedSummary.body.routing_targets
   }, summaryRoutingUpdates) : []
   const modifiedFallbackSummary = [
-    { scope: 'native', label: '일반 대화', changed: nativeFallbackDraftChanged || fallbackTargetEdits.native, count: nativeFallbackTargets.length },
-    { scope: 'routing', label: '작업·검증', changed: routingFallbackDraftChanged || fallbackTargetEdits.routing, count: routingFallbackTargets.length },
-    { scope: 'delegation', label: '네이티브 위임', changed: delegationFallbackDraftChanged || fallbackTargetEdits.delegation, count: delegationFallbackTargets.length }
+    { scope: 'native', label: '대화 예비 모델', changed: nativeFallbackDraftChanged || fallbackTargetEdits.native, count: nativeFallbackTargets.length }
   ].filter(item => item.changed)
   const timeoutSummary = !timeoutSettingsSupported
     ? '시간 제한을 확인할 수 없어 변경하지 않습니다'
@@ -3797,12 +4245,16 @@ function RouterPage({ ctx: pluginContext }) {
           ? '시간 제한의 입력값과 대상 프로필 상태를 다시 확인하세요.'
           : `전체 실행 시간 변경 없음 · 시간 제한 대상 ${selectedTimeoutTargets.length}개 선택 · 불러온 ${selectedProfile} 프로필 값 일반 ${draft?.timeouts?.delegate_total_minutes}분 / 짧은 작업 ${draft?.timeouts?.routed_light_total_minutes}분 / 긴 작업 ${draft?.timeouts?.routed_heavy_total_minutes}분`
   const scopeDraftErrors = [
-    [nativeFallbackDraftChanged || fallbackTargetEdits.native, nativeFallbackError],
-    [routingFallbackDraftChanged || fallbackTargetEdits.routing, routingFallbackError],
-    [delegationFallbackDraftChanged || fallbackTargetEdits.delegation, delegationFallbackError]
+    [nativeFallbackDraftChanged || fallbackTargetEdits.native, nativeFallbackError]
   ].filter(([changed, error]) => changed && error).map(([, error]) => error)
   const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors, ...(routingTargetError ? [routingTargetError] : []), ...(noTargetError ? [noTargetError] : [])])]
-  const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled && !timeoutRevisionChanged)
+  // The whole-page save writes the model targets, the time-limit targets and the conversation spare
+  // models' targets; a vanished ticked name in any list it would write blocks it by name.
+  const pageVanished = [...new Set([
+    ...((modelWriteNeeded || routingCopyPending) ? missingModelTargets : []),
+    ...(timeoutWriteRequested ? missingTimeoutTargets : []),
+    ...((nativeFallbackDraftChanged || fallbackTargetEdits.native) ? missingFallbackTargets : [])])]
+  const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled && !timeoutRevisionChanged && !liveDrift.length && !pageVanished.length)
 
   return jsxs('main', {
     style: styles.page,
@@ -3813,10 +4265,10 @@ function RouterPage({ ctx: pluginContext }) {
       jsx(ProfilePreparationCard, { pluginContext, data: statusQuery.data, scopeKey, settingsBusy: applyPending || setupPending || statusQuery.isFetching, begin: beginProfilePreparation, finish: finishProfilePreparation, onPrepared: profilePreparationChanged }),
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
       profiles.length ? section('불러올 프로필', '아래에 불러올 설정을 고릅니다. 실제로 바꿀 프로필은 각 카드의 적용 대상에서 따로 선택하세요.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `지금 사용 중인 프로필: ${activeProfile || '확인 중'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
-      profiles.length ? section('모델', '대화에 쓸 모델과, 나눠 맡기는 작업에 쓸 모델을 한곳에서 정합니다. 아래 적용 대상에서 고른 프로필에만 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' }, children: [
+      profiles.length ? section('모델', '대화에 쓸 모델과 그 예비 모델, 나눠 맡기는 작업에 쓸 모델을 한곳에서 정합니다. 대화 예비 모델은 그 카드의 적용 대상과 저장 버튼을 쓰고, 나머지는 맨 아래 적용 대상에서 고른 프로필에만 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' }, children: [
         jsxs('div', { id: 'conversation-models', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [jsx('h3', { style: styles.roleTitle, children: '대화 모델' }), modelFields] }),
-        jsx(NativeDelegationCard, { dto: currentRow?.native_delegation, draft: nativeDelegationDraft, profiles, origin: selectedProfile, catalog: modelCatalog,
-          roleScope: { scopeKey, ownerProfile: activeProfile || 'default', connectionId, baseIdentity: statusQuery.data?.readiness_context?.base_identity, available: statusQuery.data?.role_proposal?.available === true, generation: renderGeneration },
+        nativeFallbackPanel,
+        jsx(NativeDelegationCard, { dto: currentRow?.native_delegation, draft: nativeDelegationDraft, catalog: modelCatalog,
           targets: nativeWriteTargets, disabled: disabled || !nativeStorageAvailable,
           slots: { support: slotInfo, draft: draft?.slots || null, models: draft?.models || null, disabled, onFollow: changeSlotFollow, onRoute: updateSlotRoute,
             firstSave: profiles.every(row => !(row.slots?.stored || []).length && row.native_delegation?.policy_schema !== 2 && row.native_delegation?.auto_policy_schema !== 2) },
@@ -3824,8 +4276,10 @@ function RouterPage({ ctx: pluginContext }) {
         reenableGroup,
         modelTargetGroup
       ] })) : null,
+      profiles.length ? profileDelegationSection : null,
       profiles.length ? timeoutSettingsSection : null,
-      profiles.length ? fallbackManagement : null,
+      pageVanished.length ? jsx('div', { id: 'page-vanished-alert', role: 'alert', style: styles.warning, children: `전체 저장: ${vanishedMessage(pageVanished)}` }) : null,
+      !revisionChanged && liveDrift.length ? jsx('div', { id: 'live-drift-alert', role: 'alert', style: styles.warning, children: liveDriftMessage(liveDrift) }) : null,
       revisionChanged ? jsx('div', { role: 'alert', style: styles.warning, children: '다른 화면에서 설정이 변경되어 저장을 잠갔습니다. 편집값은 아직 보존되어 있습니다. 필요한 값을 확인한 뒤 상태 새로고침으로 최신 설정을 불러와 다시 편집하세요.' }) : null,
       pageError ? jsx('div', { role: 'alert', style: styles.warning, children: pageError }) : null,
       applyOutcome ? jsxs('div', { role: 'status', 'aria-live': 'polite', style: applyOutcome.kind === 'success' ? styles.message : styles.warning, children: [jsx('strong', { children: applyOutcome.kind === 'prepared' ? '플러그인 준비 상태가 달라졌습니다.' : applyOutcome.kind === 'success' ? '적용 요청이 완료되었습니다.' : applyOutcome.kind === 'partial' ? '일부 설정만 적용되었을 수 있습니다.' : '적용 결과를 확인할 수 없습니다.' }), jsx('p', { style: styles.hint, children: applyOutcome.message || (applyOutcome.kind === 'success' ? (autoReloading ? '저장한 상태를 다시 불러오고 있습니다. 끝나면 바로 편집을 이어갈 수 있습니다.' : needsReload ? '저장했습니다. 저장한 상태를 자동으로 다시 불러오지 못했습니다. 아래 버튼으로 다시 불러오세요.' : '저장한 상태를 다시 불러왔습니다. 편집을 이어가세요.') : '다시 적용하지 마세요. 상태를 새로고침해 실제 반영 여부를 확인하세요.') }), applyOutcome.result ? jsxs('details', { children: [jsx('summary', { style: { cursor: 'pointer', fontSize: '0.8rem' }, children: '세부 결과 보기 · 고급' }), jsx('pre', { style: styles.value, children: readableValue(applyOutcome.result) })] }) : null] }) : null,
@@ -3837,13 +4291,13 @@ function RouterPage({ ctx: pluginContext }) {
         ] }) : null
       ] }) : null,
       needsReload || nativeFence ? jsx('div', { style: styles.actions, children: jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching || nativeFence?.state === 'pending', onClick: () => void reloadStatus(), children: statusQuery.isFetching ? '상태 확인 중…' : '실제 상태 확인 후 편집 재개' }) }) : null,
-      profiles.length && !needsReload ? section('기본 모델·시간·기타 설정 함께 저장', '위에서 편집한 대화 모델·작업 슬롯 모델·시간 제한·폴백 설정을 한 번에 저장합니다. 각 카드에서 고른 적용 대상은 그대로 따릅니다. 맡기는 방식, 슬롯별 예비 모델, 작업 분담 다시 켜기는 여기 포함되지 않으며 ‘모델’ 섹션의 각 버튼으로 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
+      profiles.length && !needsReload ? section('기본 모델·시간·기타 설정 함께 저장', '위에서 편집한 대화 모델·작업 슬롯 모델·대화 예비 모델·시간 제한을 한 번에 저장합니다. 각 카드에서 고른 적용 대상은 그대로 따릅니다. 맡기는 방식, 슬롯별 예비 모델, 작업 분담 다시 켜기, 전문 프로필 위임은 여기 포함되지 않으며 각 섹션의 버튼으로 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
         jsx('div', { id: 'draft-reference-summary', role: 'note', style: styles.section, children: [
           jsx('strong', { children: '현재 초안 요약 · 참고 정보' }),
           jsx('p', { style: styles.hint, children: `대화 모델 적용 ${modelWriteTargets.length}개 (${modelWriteTargets.join(', ') || '바뀐 내용 없음 · 기존 설정 유지'}) · 작업 슬롯 모델 적용 ${routingWriteTargets.length}개 (${routingWriteTargets.join(', ') || '기존 설정 유지'})` }),
           jsx('p', { style: styles.hint, children: modifiedFallbackSummary.length
-            ? `수정한 폴백: ${modifiedFallbackSummary.map(item => `${item.label} ${item.count}개 대상`).join(' · ')}`
-            : '수정한 폴백 없음' }),
+            ? `수정한 예비 모델: ${modifiedFallbackSummary.map(item => `${item.label} ${item.count}개 대상`).join(' · ')}`
+            : '수정한 대화 예비 모델 없음' }),
           jsx('p', { style: styles.hint, children: timeoutSummary }),
           jsx('p', { style: styles.hint, children: '저장 전 변경 내용을 요약한 참고 정보입니다. 실제 반영 결과는 저장 후 상태를 다시 불러와 확인하세요.' }),
           summaryValidationErrors.length ? jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '확인할 항목' }), jsx('ul', { children: summaryValidationErrors.map((error, index) => jsx('li', { children: error }, index)) })] }) : jsx('p', { role: 'status', style: styles.hint, children: '입력한 내용을 확인했습니다. 저장할 때 최신 설정과 다시 비교합니다.' })
@@ -5023,7 +5477,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.11.4',
+  version: '0.12.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

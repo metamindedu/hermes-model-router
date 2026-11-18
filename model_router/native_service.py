@@ -242,6 +242,21 @@ def status(service, profile: str) -> dict[str, Any]:
     return result
 
 
+def new_profile_authority(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """The profile execution authority a submitted allow-list adds over the stored one.
+
+    Consent protects NEW authority only. A literal ``allow_profile_access: True`` is required to
+    add a profile to the allow-list, or to change the default profile to a different non-null
+    profile. Nothing else needs it: description-only edits, removing profiles, clearing the
+    default, and re-writing the unchanged stored default inside a block write (for example a
+    description edit on a profile-only method) only keep or narrow authority that was granted
+    before.
+    """
+    added = sorted({row["name"] for row in new["profiles"]} - {row["name"] for row in old["profiles"]})
+    default = new["default"] if new["default"] is not None and new["default"] != old["default"] else None
+    return {"added": added, "default": default}
+
+
 def preview(service, body: dict[str, Any]) -> dict[str, Any]:
     from .service import _digest, _json_bytes, _atomic_write, _FileLock, _now, RevisionConflict
     if not isinstance(body, dict) or set(body) != {"expected_revision", "updates"}:
@@ -258,10 +273,17 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
             raise RevisionConflict("settings revision changed")
         names = inventory(service)
         records, changes, seen = [], [], set()
-        fields = {"profile", "expected_digest", "backend", "profile_routes", "allow_additional_cost", "allow_profile_access"}
+        required = {"profile", "expected_digest", "backend", "allow_profile_access"}
         for update in updates:
-            # Exactly one policy shape: the two roles an older page sends, or one entry per task slot.
-            if not isinstance(update, dict) or set(update) not in (fields | {"policy"}, fields | {"slot_policy"}):
+            # At most one policy shape: the two roles an older page sends, or one entry per task slot.
+            # A part an update leaves out (the spare policy with its cost confirmation, or the
+            # profile routes) is kept exactly as stored, including a key that is absent; an update
+            # with neither is an explicit backend-only change.
+            keys = set(update) if isinstance(update, dict) else set()
+            policy_keys = keys & {"policy", "slot_policy"}
+            if (not isinstance(update, dict) or not required <= keys or
+                    keys - required - {"policy", "slot_policy", "allow_additional_cost", "profile_routes"} or
+                    len(policy_keys) > 1 or ("allow_additional_cost" in keys) != bool(policy_keys)):
                 raise ValueError("invalid native delegation update fields")
             profile = service._require_profile(update["profile"], names)
             if profile in seen:
@@ -277,11 +299,14 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("unsupported native delegation backend")
             if backend == 'model-router-auto' and dto['auto_supported'] is not True:
                 raise ValueError('automatic routing is unsupported by this installed profile; update it first')
+            # Must be a literal bool; only `True` counts as consent (see new_profile_authority).
             if type(update["allow_profile_access"]) is not bool:
                 raise ValueError("profile execution confirmation must be boolean")
             policy_backend = "model-router-auto" if backend == "model-router-auto" else "model-router"
             policy_key = ns.KEY_AUTO_POLICY if backend == "model-router-auto" else ns.KEY_POLICY
-            if "slot_policy" in update:
+            if not policy_keys:
+                policy = None
+            elif "slot_policy" in update:
                 if dto["slot_policy_supported"] is not True:
                     raise ValueError("task slots are unsupported by this installed profile; update it first")
                 policy = ns.build_slot_policy_block(profile, update["slot_policy"], update["allow_additional_cost"], backend=policy_backend)
@@ -289,16 +314,23 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                 if dto["auto_policy_schema" if backend == "model-router-auto" else "policy_schema"] == ns.SLOT_SCHEMA:
                     raise ValueError("spare models are stored per task slot; a two-role policy cannot replace them")
                 policy = ns.build_policy_block(profile, update["policy"], update["allow_additional_cost"], backend=policy_backend)
-            profiles = ns.validate_profiles(update["profile_routes"], names)
-            validate_native_targets(service, profiles)
-            old_profiles = dto["profile_routes"]
-            old_descriptions = {row['name']: row['description'] for row in old_profiles['profiles']}
-            if not dto['role_intro_inheritance']['supported'] and any(row['description'] == '' and (row['name'] not in old_descriptions or old_descriptions[row['name']] != '') for row in profiles['profiles']):
-                raise ValueError('role inheritance is unsupported by this installed profile')
-            added = {row["name"] for row in profiles["profiles"]} - {row["name"] for row in old_profiles["profiles"]}
-            default_grant = profiles["default"] is not None and profiles["default"] != old_profiles["default"]
-            if (added or default_grant) and update["allow_profile_access"] is not True:
-                raise ValueError("adding profile execution authority requires explicit permission")
+            profiles = None
+            if "profile_routes" in update:
+                profiles = ns.validate_profiles(update["profile_routes"], names)
+                validate_native_targets(service, profiles)
+                old_profiles = dto["profile_routes"]
+                old_descriptions = {row['name']: row['description'] for row in old_profiles['profiles']}
+                if not dto['role_intro_inheritance']['supported'] and any(row['description'] == '' and (row['name'] not in old_descriptions or old_descriptions[row['name']] != '') for row in profiles['profiles']):
+                    raise ValueError('role inheritance is unsupported by this installed profile')
+                # Consent protects new authority only: an added profile or a new non-null default.
+                # Descriptions, removals, a cleared default and the unchanged stored default
+                # re-written with the block need no consent.
+                granted = new_profile_authority(old_profiles, profiles)
+                if (granted["added"] or granted["default"] is not None) and update["allow_profile_access"] is not True:
+                    raise ValueError("adding profile execution authority requires explicit permission")
+            elif update["allow_profile_access"] is not False:
+                # Without submitted routes there is nothing the consent could apply to.
+                raise ValueError("profile execution permission needs submitted profile routes")
             if backend in ("model-router", "model-router-auto") and service.routing_config(profile).get("enabled") is not True:
                 raise ValueError("purpose routing is disabled; preserve the explicit opt-out")
             snapshot = service._read_native_delegation_snapshot(profile)
@@ -311,11 +343,19 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
             if backend == 'model-router-auto' and auto_code is None:
                 raise RevisionConflict('automatic routing support changed during preview')
             before = {key: snapshot.raw(key) for key in ns.KEYS}
-            desired = {**before, policy_key: policy, ns.KEY_PROFILES: {"schema": 1, **profiles}, ns.KEY_BACKEND: backend}
+            desired = {**before, ns.KEY_BACKEND: backend}
+            if policy is not None:
+                desired[policy_key] = policy
+            if profiles is not None:
+                desired[ns.KEY_PROFILES] = {"schema": 1, **profiles}
             for key in (ns.KEY_POLICY, ns.KEY_AUTO_POLICY, ns.KEY_PROFILES, ns.KEY_BACKEND):
                 if before[key] != desired[key]:
                     changes.append({"profile": profile, "field": key, "before": copy.deepcopy(before[key]), "after": copy.deepcopy(desired[key])})
-            records.append({"profile": profile, "before": before, "after": desired,
+            # Submitted routes are authorized again at apply even when unchanged; only routes the
+            # update left out keep the stored list as it is (which may name a deleted profile).
+            # The consent decision above was made against `before`; apply refuses any record whose
+            # stored config moved since (cas), so the authority it added cannot grow in between.
+            records.append({"profile": profile, "before": before, "after": desired, "routes_submitted": profiles is not None,
                             "cas": snapshot.cas_digest, "provenance": snapshot.provenance_digest, "code": code, "auto_code": auto_code, "role_code": role_code})
         plan_id = uuid.uuid4().hex
         expires = time.time() + 300
@@ -349,7 +389,10 @@ def apply_consumed(service, plan, plan_id):
         _plain(snapshot, profile, names)
         if snapshot.cas_digest != record["cas"]:
             raise RevisionConflict("native delegation configuration changed")
-        validate_native_targets(service, ns.validate_profiles_block(record["after"][ns.KEY_PROFILES], names))
+        # Profile routes the update left out (possibly absent or naming a deleted profile) are not
+        # re-authorized; a submitted allow-list, changed or not, must resolve to live targets.
+        if record.get("routes_submitted", True):
+            validate_native_targets(service, ns.validate_profiles_block(record["after"][ns.KEY_PROFILES], names))
         for key, backend in ((ns.KEY_POLICY, "model-router"), (ns.KEY_AUTO_POLICY, "model-router-auto")):
             if record["after"][key] is not None:
                 ns.read_policy(profile, record["after"][key], backend=backend)
@@ -390,7 +433,8 @@ def apply_consumed(service, plan, plan_id):
             _check_role_record(service, record)
             observed = service._read_native_delegation_snapshot(profile)
             _plain(observed, profile, current_names)
-            validate_native_targets(service, ns.validate_profiles_block(record["after"][ns.KEY_PROFILES], current_names))
+            if record.get("routes_submitted", True):
+                validate_native_targets(service, ns.validate_profiles_block(record["after"][ns.KEY_PROFILES], current_names))
             if (service._native_delegation_code_signature(profile) != record["code"] or
                     observed.provenance_digest != record["provenance"] or
                     {key: observed.raw(key) for key in ns.KEYS} != snapshots[profile]):

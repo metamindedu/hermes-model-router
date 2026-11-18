@@ -81,6 +81,35 @@ class RevisionConflict(ServiceError):
     """The canonical revision or a projected config value changed since preview."""
 
 
+class ExternalChange(RevisionConflict):
+    """A value the page froze at load changed elsewhere before the save (see `expected`).
+
+    The CLI bridge (cli_error_payload) reports it as ``{"error": "ExternalChange", "conflict":
+    {"profile", "field"}}``, which the page maps to its reload state (desktop/plugin.js
+    externalChangeFromError). Python callers catch ExternalChange or RevisionConflict and read
+    ``profile`` and ``field``.
+    """
+
+    def __init__(self, profile: str, field: str):
+        super().__init__(f"EXTERNAL_CHANGE profile={profile} field={field}: changed since the page loaded it; reload")
+        self.profile, self.field = profile, field
+
+
+def _external_change(profile: str, field: str) -> ExternalChange:
+    return ExternalChange(profile, field)
+
+
+def cli_error_payload(exc: BaseException) -> dict[str, Any]:
+    """The MODEL_ROUTER_JSON error frame for an exception escaping a CLI operation."""
+    payload: dict[str, Any] = {
+        "error": type(exc).__name__,
+        "message": "작업이 완료되지 않았습니다. 상태를 확인한 후 다시 미리보기 하세요.",
+    }
+    if isinstance(exc, ExternalChange):
+        payload["conflict"] = {"profile": str(exc.profile), "field": str(exc.field)}
+    return payload
+
+
 def _hermes_home() -> Path:
     try:
         from hermes_constants import get_hermes_home
@@ -118,7 +147,12 @@ def _secure_dir(path: Path) -> None:
         os.chmod(path, 0o700)
 
 
-def _atomic_write(path: Path, payload: bytes) -> None:
+def _atomic_write(path: Path, payload: bytes, before_replace: Callable[[], None] | None = None) -> None:
+    """Write `payload` to a synced temporary file, then replace `path` with it.
+
+    `before_replace` runs after the temporary file is written and synced, immediately before the
+    replace; an exception there leaves `path` untouched and removes the temporary file.
+    """
     _secure_dir(path.parent)
     tmp: str | None = None
     try:
@@ -129,6 +163,8 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(tmp, path)
         tmp = None
     finally:
@@ -175,6 +211,16 @@ def _models(value: Any, *, allow_empty_model: bool = False) -> dict[str, dict[st
     return {role: _route(value[role], allow_empty_model=allow_empty_model) for role in MODEL_ROLES}
 
 
+def _routing_fallback(fallback: Any) -> dict[str, Any]:
+    if not isinstance(fallback, dict) or set(fallback) != {"enabled", "heavy", "light"} or not isinstance(fallback["enabled"], bool):
+        raise ValueError("routing.fallback must define enabled, heavy, and light")
+    fb_heavy = None if fallback["heavy"] is None else _route(fallback["heavy"])
+    fb_light = None if fallback["light"] is None else _route(fallback["light"])
+    if fallback["enabled"] and (fb_heavy is None or fb_light is None):
+        raise ValueError("enabled fallback requires explicit Heavy and Light routes")
+    return {"enabled": fallback["enabled"], "heavy": fb_heavy, "light": fb_light}
+
+
 def _routing(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) - {"slots"} != {"enabled", "heavy", "light", "fallback"}:
         raise ValueError("routing must define enabled, heavy, light, and fallback")
@@ -194,19 +240,30 @@ def _routing(value: Any) -> dict[str, Any]:
         if follow != "custom" and custom is not None:
             raise ValueError(f"routing.{key}.custom must be null when following {expected}")
         resolved[key] = {"follow": follow, "custom": custom}
-    fallback = value["fallback"]
-    if not isinstance(fallback, dict) or set(fallback) != {"enabled", "heavy", "light"} or not isinstance(fallback["enabled"], bool):
-        raise ValueError("routing.fallback must define enabled, heavy, and light")
-    fb_heavy = None if fallback["heavy"] is None else _route(fallback["heavy"])
-    fb_light = None if fallback["light"] is None else _route(fallback["light"])
-    if fallback["enabled"] and (fb_heavy is None or fb_light is None):
-        raise ValueError("enabled fallback requires explicit Heavy and Light routes")
-    result = {"enabled": value["enabled"], **resolved, "fallback": {"enabled": fallback["enabled"], "heavy": fb_heavy, "light": fb_light}}
+    result = {"enabled": value["enabled"], **resolved, "fallback": _routing_fallback(value["fallback"])}
     # Canonical form: the key exists only while at least one slot is declared.
     declared = slot_model.validate_slots(value["slots"], _route) if "slots" in value else {}
     if declared:
         result["slots"] = declared
     return result
+
+
+def _keep_absent_keys(entry: Any, raw: Any, loaded: Any) -> Any:
+    """`entry` without the keys the stored `raw` entry did not have and the plan left unchanged.
+
+    Loading adds those keys with their defaults; leaving them out again reads back the same way.
+    """
+    if not (isinstance(entry, dict) and isinstance(raw, dict) and isinstance(loaded, dict)):
+        return entry
+    out: dict[str, Any] = {}
+    for key, value in entry.items():
+        if key not in raw:
+            if key in loaded and loaded[key] == value:
+                continue
+            out[key] = value
+        else:
+            out[key] = _keep_absent_keys(value, raw[key], loaded.get(key))
+    return out
 
 
 def _store_schema(entries: dict[str, Any]) -> int:
@@ -348,6 +405,52 @@ class Service:
         if name not in available:
             raise ValueError("profile is not an existing config-backed profile")
         return name
+
+    def _store_file_digest(self) -> str:
+        """SHA-256 of the canonical store file's exact bytes ("absent" when there is none).
+
+        Apply replaces the whole store with the plan's `after`, which was computed from the store
+        as preview read it. A plan records this digest and apply refuses when it differs, so a
+        change to any profile's entry since preview (even one that left the revision alone) is
+        never reverted by a save that did not target it.
+        """
+        try:
+            return hashlib.sha256(self.store_path.read_bytes()).hexdigest()
+        except FileNotFoundError:
+            return "absent"
+
+    def _preserve_untouched_entries(self, after: dict[str, Any], loaded: dict[str, Any], expected_digest: str) -> dict[str, Any]:
+        """The plan's entries, with every entry the plan leaves unchanged kept exactly as stored.
+
+        Loading normalizes entries in memory (for example adding `delegation_fallback: null`).
+        An entry the plan does not change is written back as it is in the file, so a save never
+        rewrites another profile's entry. A schema change (migration) writes normalized entries.
+        """
+        try:
+            data = self.store_path.read_bytes()
+        except FileNotFoundError:
+            return after
+        # The entries kept must come from the very bytes the plan was computed from.
+        if hashlib.sha256(data).hexdigest() != expected_digest:
+            raise RevisionConflict("settings changed since preview; preview again")
+        try:
+            raw = json.loads(data)
+        except ValueError:
+            return after
+        if not isinstance(raw, dict) or raw.get("schema") != _store_schema(after) or not isinstance(raw.get("profiles"), dict):
+            return after
+        stored = raw["profiles"]
+        kept: dict[str, Any] = {}
+        for name, entry in after.items():
+            if name in stored and name in loaded and loaded[name] == entry:
+                kept[name] = copy.deepcopy(stored[name])
+            elif name in stored and name in loaded:
+                # A changed entry keeps every key it did not have and this save did not change
+                # (for example the retired `delegation_fallback` or `fallback_consent.delegation`).
+                kept[name] = _keep_absent_keys(entry, stored[name], loaded[name])
+            else:
+                kept[name] = entry
+        return kept
 
     def _load_store(self) -> dict[str, Any] | None:
         data = _read_json(self.store_path)
@@ -1363,9 +1466,126 @@ class Service:
         if timeouts.timeout_digest(home) != item["before"] or timeouts.read_timeouts(home)["revision"] != item["expected_revision"]:
             raise RevisionConflict("timeout settings changed since preview")
 
+    # Compare-and-set against what the page showed. A page sends, per profile it writes, the status
+    # values it froze when it loaded them (`expected`); preview and apply compare each one with the
+    # current value and refuse the whole save, writing nothing, on any difference. The error carries a
+    # stable code the page maps to its "changed elsewhere, reload" state. Clients that send no
+    # `expected` keep the previous behaviour (revision, preview snapshots and apply CAS only).
+    PAGE_EXPECTATION_FIELDS = ("models", "actual_models", "routing", "native_fallback")
+
+    @staticmethod
+    def _valid_page_expectation(field: str, value: Any) -> bool:
+        """Strict schema of one expected value: real bools, bounded strings, no unknown keys.
+
+        Python compares 1 == True, so a loose value could match a different stored one; every leaf
+        must have exactly the type the status row reports.
+        """
+        def text(item: Any, limit: int = 512) -> bool:
+            return type(item) is str and len(item) <= limit
+
+        def route(item: Any) -> bool:
+            return type(item) is dict and set(item) == {"provider", "model", "reasoning"} and all(text(item[key]) for key in item)
+
+        def declaration(item: Any) -> bool:
+            return (type(item) is dict and set(item) == {"follow", "custom"} and text(item["follow"], 32) and
+                    (item["custom"] is None or route(item["custom"])))
+
+        def chain(item: Any) -> bool:
+            return (type(item) is list and len(item) <= 16 and
+                    all(type(entry) is dict and set(entry) == {"provider", "model"} and text(entry["provider"]) and text(entry["model"]) for entry in item))
+
+        if field in {"models", "actual_models"}:
+            return type(value) is dict and set(value) <= set(MODEL_ROLES) and all(route(item) for item in value.values())
+        if field == "routing":
+            return (type(value) is dict and set(value) == {"enabled", "heavy", "light", "slots", "skill_enabled"} and
+                    type(value["enabled"]) is bool and value["skill_enabled"] in (True, False, None) and
+                    (value["skill_enabled"] is None or type(value["skill_enabled"]) is bool) and
+                    all(value[key] is None or declaration(value[key]) for key in ("heavy", "light")) and
+                    (value["slots"] is None or (type(value["slots"]) is dict and len(value["slots"]) <= 32 and
+                                                all(text(key, 64) and declaration(item) for key, item in value["slots"].items()))))
+        if field == "native_fallback":
+            return (type(value) is dict and set(value) == {"enabled", "chain", "actual_chain"} and
+                    (value["enabled"] is None or type(value["enabled"]) is bool) and chain(value["chain"]) and chain(value["actual_chain"]))
+        return False
+
+    def _parse_page_expectations(self, raw: Any, discovered: list[str]) -> list[dict[str, Any]]:
+        """Parse a present `expected` (an absent key, not null, is the legacy behaviour).
+
+        One entry per discovered profile at most, so the bound is never lower than the number of
+        profiles a status can report. Extra entries only add checks; they never grant a write.
+        """
+        if type(raw) is not list or len(raw) > len(discovered):
+            raise ValueError("expected must be a list with at most one entry per profile")
+        items, seen = [], set()
+        for item in raw:
+            if (type(item) is not dict or "profile" not in item or len(item) < 2 or
+                    set(item) - {"profile", *self.PAGE_EXPECTATION_FIELDS}):
+                raise ValueError("each expectation names a profile and known fields")
+            profile = self._require_profile(item["profile"], discovered)
+            if profile in seen:
+                raise ValueError("expected must not contain duplicate profiles")
+            for field, value in item.items():
+                if field != "profile" and not self._valid_page_expectation(field, value):
+                    raise ValueError(f"expected {field} of {profile} is malformed")
+            if len(json.dumps(item)) > 65536:
+                raise ValueError(f"expected entry of {profile} is too large")
+            seen.add(profile)
+            items.append(copy.deepcopy(item))
+        return items
+
+    def _page_expectation_current(self, profile: str, field: str, entries: dict[str, Any]) -> Any:
+        """The current value of one expectation field, in the shape the status row reports it."""
+        entry = entries.get(profile)
+        if field == "actual_models" or (field == "models" and entry is None):
+            try:
+                return self._actual_models(profile, tolerate=True)
+            except ServiceError:
+                return {}
+        if field == "models":
+            return entry["models"]
+        if field == "routing":
+            routing = entry["routing"] if entry is not None else self._initial_routing(profile)
+            # The effective switch is the canonical flag and the routing skill's own state in the
+            # profile's skills.disabled (None when unreadable); a save may rewrite either.
+            try:
+                skill_enabled: bool | None = not ROUTING_SKILL_IDS.intersection(self._read_disabled(profile))
+            except ServiceError:
+                skill_enabled = None
+            return {"enabled": bool(routing.get("enabled")), "heavy": routing.get("heavy"),
+                    "light": routing.get("light"), "slots": routing.get("slots"), "skill_enabled": skill_enabled}
+        view = entry if entry is not None else {"native_fallback": None, "fallback_consent": {}}
+        native = self._native_status(profile, view)
+        return {"enabled": native["enabled"], "chain": native["chain"], "actual_chain": native["actual_chain"]}
+
+    def _check_page_expectations(self, items: list[dict[str, Any]] | None, entries: dict[str, Any],
+                                 required: dict[str, set[str]] | None = None) -> None:
+        if items is None:
+            return
+        by_profile = {item["profile"]: item for item in items}
+        for profile, fields in sorted((required or {}).items()):
+            for field in sorted(fields):
+                if field not in by_profile.get(profile, {}):
+                    raise ValueError(f"expected must cover {field} of {profile}")
+        for item in items:
+            profile = item["profile"]
+            for field in self.PAGE_EXPECTATION_FIELDS:
+                if field not in item:
+                    continue
+                current = json.loads(json.dumps(self._page_expectation_current(profile, field, entries)))
+                if current == item[field]:
+                    continue
+                detail = field
+                if isinstance(current, dict) and isinstance(item[field], dict):
+                    order = {role: index for index, role in enumerate(MODEL_ROLES)}
+                    differing = sorted((key for key in set(current) | set(item[field]) if current.get(key) != item[field].get(key)),
+                                       key=lambda key: (order.get(key, len(order)), key))
+                    if differing and field in {"models", "actual_models"}:
+                        detail = f"{field}.{differing[0]}"
+                raise _external_change(profile, detail)
+
     def preview(self, body: dict) -> dict[str, Any]:
         required = {"expected_revision", "profile", "models", "model_targets", "routing", "routing_profiles"}
-        optional = {"fallback_updates", "fallback_confirmations", "routing_targets", "timeout_updates", "save_scope"}
+        optional = {"fallback_updates", "fallback_confirmations", "routing_targets", "timeout_updates", "save_scope", "expected", "reenable_profiles"}
         if not isinstance(body, dict) or not required <= set(body) or set(body) - required - optional:
             raise ValueError("preview body has unknown or missing fields")
         scope = body.get("save_scope")
@@ -1384,6 +1604,9 @@ class Service:
             raise ValueError("expected_revision must be a non-negative integer")
         discovered = self._discover_profiles()
         profile = self._require_profile(body["profile"], discovered)
+        page_expected = self._parse_page_expectations(body["expected"], discovered) if "expected" in body else None
+        if page_expected is not None and any(isinstance(update, dict) and set(update) & {"routing_fallback", "delegation_fallback"} for update in fallback_updates):
+            raise ValueError("expected covers the conversation fallback only")
         raw_timeout_updates = body.get("timeout_updates", [])
         if not isinstance(raw_timeout_updates, list):
             raise ValueError("timeout_updates must be a list")
@@ -1403,6 +1626,16 @@ class Service:
         if not isinstance(raw_routing_targets, list):
             raise ValueError("routing_targets must be a list")
         routing_targets = [self._require_profile(name, discovered) for name in raw_routing_targets]
+        # Profiles the request explicitly turns routing back on for, including one whose canonical flag
+        # is on but whose routing skill is disabled in its own config. Each must also be selected.
+        raw_reenable = body.get("reenable_profiles", [])
+        if not isinstance(raw_reenable, list) or len(set(map(str, raw_reenable))) != len(raw_reenable):
+            raise ValueError("reenable_profiles must be a list of distinct profiles")
+        reenable_set = {self._require_profile(name, discovered) for name in raw_reenable}
+        if reenable_set - set(selected):
+            raise ValueError("reenable_profiles must also be in routing_profiles")
+        if reenable_set and scope not in {None, "routing"}:
+            raise ValueError("reenable_profiles are outside the selected save scope")
         if len(set(targets)) != len(targets) or len(set(selected)) != len(selected) or len(set(routing_targets)) != len(routing_targets):
             raise ValueError("profile lists must not contain duplicates")
         if scope in {"routing", "timeouts"} and targets:
@@ -1410,14 +1643,20 @@ class Service:
         if scope in {"models", "timeouts"} and "routing_targets" in body and routing_targets:
             raise ValueError("routing targets are outside the selected save scope")
         submitted_models = _models(body["models"]) if scope in {None, "models"} else None
+        # The retired routed-job fallback is written only by fallback_preview. A client may omit
+        # routing.fallback; the stored value is then kept as it is. One that sends it must send the
+        # stored value unchanged (older pages), in every save scope.
+        routing_body = body["routing"]
+        fallback_submitted = isinstance(routing_body, dict) and "fallback" in routing_body
+        if isinstance(routing_body, dict) and not fallback_submitted:
+            routing_body = {**routing_body, "fallback": {"enabled": False, "heavy": None, "light": None}}
         if scope is None:
-            submitted_routing = _routing(body["routing"])
+            submitted_routing = _routing(routing_body)
         elif scope == "routing":
-            routing_body = body["routing"]
             if not isinstance(routing_body, dict) or set(routing_body) - {"slots"} != {"enabled", "heavy", "light", "fallback"}:
                 raise ValueError("routing must define enabled, heavy, light, and fallback")
-            # Fallback is a separate save scope. Validate only membership and
-            # Heavy/Light declarations; the submitted fallback draft is inert.
+            # Validate membership and Heavy/Light declarations here; a submitted fallback is only
+            # checked to equal the stored value below (it is never written by this request).
             submitted_routing = _routing({
                 "enabled": routing_body["enabled"],
                 "heavy": routing_body["heavy"],
@@ -1433,11 +1672,15 @@ class Service:
         # stored slot declarations alone instead of clearing what it cannot see.
         slots_submitted = submitted_routing is not None and isinstance(body["routing"], dict) and "slots" in body["routing"]
 
+        store_digest = self._store_file_digest()
         stored = self._load_store()
         revision = stored["revision"] if stored else 0
         if expected != revision:
             raise RevisionConflict("settings revision changed; reload before preview")
         entries = dict(stored["profiles"]) if stored else {}
+        # Compare the frozen values before projecting anything: a value changed elsewhere (even one
+        # that leaves a model unresolvable) is that profile's ExternalChange, not a later error.
+        self._check_page_expectations(page_expected, entries)
         if scope == "timeouts":
             # Timeout plans do not project or initialize canonical model/routing state.
             all_names = []
@@ -1452,9 +1695,15 @@ class Service:
                     after[name] = self._fresh_profile_entry(name, entries)
         else:
             all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
-            after = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
-        if scope is None and submitted_routing["fallback"] != after[profile]["routing"]["fallback"]:
-            raise ValueError("routing.fallback can only be changed by fallback_preview")
+            projected = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
+            after = copy.deepcopy(projected)
+        if fallback_submitted:
+            # Compare with the stored value, or the initial one for a profile without a stored entry
+            # (the initial routing fallback is always the disabled default). Never resolve the
+            # profile's models for this: a timeout-only save must not fail on an unrelated model.
+            stored_fallback = entries[profile]["routing"]["fallback"] if profile in entries else self._default_routing()["fallback"]
+            if _routing_fallback(routing_body["fallback"]) != stored_fallback:
+                raise ValueError("routing.fallback can only be changed by fallback_preview")
         if submitted_routing is not None and submitted_routing.get("slots"):
             blocking = self._slot_blocking_profiles(discovered)
             if blocking:
@@ -1519,9 +1768,16 @@ class Service:
                 changes.append({"profile": name, "field": "routing.enabled", "before": old_enabled, "after": new_enabled})
             raw_disabled = self._read_key(name, "skills.disabled")
             disabled = self._read_disabled(name)
-            if old_enabled != new_enabled or (not ROUTING_SKILL_IDS.intersection(disabled)) != new_enabled:
+            skill_on = not ROUTING_SKILL_IDS.intersection(disabled)
+            # The routing skill is removed from skills.disabled (switched on) only for an explicit
+            # re-enable: the canonical flag goes off -> on in this request (the re-enable list), or
+            # the profile is named in reenable_profiles. Membership alone never undoes an opt-out
+            # made in the profile's own config; switching off keeps working as before.
+            explicit_reenable = (not old_enabled and new_enabled) or name in reenable_set
+            desired_skill_on = new_enabled and (explicit_reenable or skill_on)
+            if old_enabled != new_enabled or skill_on != desired_skill_on:
                 updated = [item for item in disabled if item not in ROUTING_SKILL_IDS]
-                if not new_enabled:
+                if not desired_skill_on:
                     updated.append(SKILL_NAME)
                 if scope == "routing":
                     profile_values = snapshots.setdefault(name, {"skills.disabled": raw_disabled})
@@ -1532,7 +1788,8 @@ class Service:
                 profile_values["skills.disabled"] = raw_disabled
                 if updated != disabled:
                     writes.append({"profile": name, "key": "skills.disabled", "before": raw_disabled, "after": updated})
-                    changes.append({"profile": name, "field": "skills.disabled", "before": "enabled" if old_enabled else "disabled", "after": "enabled" if new_enabled else "disabled"})
+                    # The routing skill's own state, before and after (not the canonical flag).
+                    changes.append({"profile": name, "field": "skills.disabled", "before": "enabled" if skill_on else "disabled", "after": "enabled" if desired_skill_on else "disabled"})
 
 
         if scope in {None, "models", "routing"}:
@@ -1548,7 +1805,27 @@ class Service:
                     self._check_primary_routes(entry["routing"], entry["models"])
             if not fallback_updates:
                 self._check_changed_routing_fallbacks(entries, after)
+        # The models every explicit model target must resolve to after apply, recorded before an
+        # unchanged target's projected entry is dropped below (a NOOP target has no entry to read).
+        approved_models = {name: copy.deepcopy(after[name]["models"]) for name in (targets if submitted_models is not None else []) if name in after}
+        if scope in {None, "routing"}:
+            # A profile without a stored entry gets one only if this plan changes it: an entry that
+            # was merely projected for the membership loop is dropped, so absent stays absent and its
+            # current models are never pinned into the store.
+            after = {name: entry for name, entry in after.items() if name in entries or entry != projected.get(name)}
         state_changed = scope != "timeouts" and after != entries
+        if page_expected is not None:
+            # Every profile and field this save writes must be covered, and must still hold.
+            needed: dict[str, set[str]] = {}
+            for name in (targets if submitted_models is not None else []):
+                needed.setdefault(name, set()).update({"models", "actual_models"})
+            for change in changes:
+                if change["field"] in {"routing", "routing.enabled", "skills.disabled"}:
+                    needed.setdefault(change["profile"], set()).add("routing")
+            for update in fallback_updates:
+                if isinstance(update, dict) and "native_fallback" in update and isinstance(update.get("profile"), str):
+                    needed.setdefault(update["profile"], set()).add("native_fallback")
+            self._check_page_expectations(page_expected, entries, needed)
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
         expires_at = datetime.fromtimestamp(expires_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1556,12 +1833,17 @@ class Service:
         plan = {
             "id": plan_id, "revision": revision, "after": after, "changes": changes,
             "snapshots": snapshots, "config_digests": config_digests, "writes": writes,
-            "model_targets": targets, "state_changed": state_changed, "expires_epoch": expires_epoch,
+            "model_targets": targets, "approved_models": approved_models, "state_changed": state_changed, "expires_epoch": expires_epoch,
             # Preserve target validation independently of obsolete skill-file ownership.
-            "validation_profiles": sorted(set(selected) & set(after) & set(discovered)) if scope in {None, "routing"} else [],
+            "validation_profiles": sorted(set(selected) & set(discovered)) if scope in {None, "routing"} else [],
             "timeout_writes": timeout_writes,
             "save_scope": scope,
+            "page_expected": page_expected,
+            # The exact store bytes this plan was computed from (read before and after loading).
+            "store_digest": store_digest,
         }
+        if self._store_file_digest() != store_digest:
+            raise RevisionConflict("settings changed during preview; preview again")
         for item in timeout_writes:
             if item.get("write_required", True):
                 changes.append({"profile": item["profile"], "field": "timeouts", "before": item["before_values"], "after": item["after"]})
@@ -1596,8 +1878,13 @@ class Service:
 
     def _prepare_fallback_preview(self, body: dict, *, base_plan: dict | None = None) -> dict[str, Any]:
         """Prepare explicit scope updates, optionally on a pending model plan."""
-        if not isinstance(body, dict) or set(body) != {"expected_revision", "updates", "confirmations"}:
+        fields = {"expected_revision", "updates", "confirmations"}
+        # A standalone fallback save may carry the page's frozen expectations, too (see preview).
+        if not isinstance(body, dict) or not (set(body) == fields or (base_plan is None and set(body) == fields | {"expected"})):
             raise ValueError("fallback preview body has unknown or missing fields")
+        if "expected" in body and isinstance(body["updates"], list) and any(
+                isinstance(update, dict) and set(update) & {"routing_fallback", "delegation_fallback"} for update in body["updates"]):
+            raise ValueError("expected covers the conversation fallback only")
         expected = body["expected_revision"]
         if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
             raise ValueError("expected_revision must be a non-negative integer")
@@ -1670,6 +1957,9 @@ class Service:
             if confirmation["allow_task_rerun"] is not expected_rerun:
                 raise ValueError("fallback confirmation retry flag does not match its fixed execution path")
 
+        store_digest = self._store_file_digest()
+        if base_plan is not None and base_plan.get("store_digest") != store_digest:
+            raise RevisionConflict("settings changed during combined preview")
         stored = self._load_store()
         revision = stored["revision"] if stored else 0
         if expected != revision:
@@ -1677,9 +1967,15 @@ class Service:
         entries = copy.deepcopy(stored["profiles"]) if stored else {}
         if base_plan is not None and base_plan["revision"] != revision:
             raise RevisionConflict("settings revision changed during combined preview")
+        page_expected = self._parse_page_expectations(body["expected"], discovered) if base_plan is None and "expected" in body else None
+        if page_expected is not None:
+            self._check_page_expectations(page_expected, entries, {
+                update["profile"]: {"native_fallback"} for update in updates
+                if isinstance(update, dict) and "native_fallback" in update and isinstance(update.get("profile"), str)})
         all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
-        after = (copy.deepcopy(base_plan["after"]) if base_plan is not None else
-                 {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries})
+        # Only the profiles this plan changes get an entry. Projecting every discovered profile
+        # would publish a new canonical entry (pinning its current models) for untargeted profiles.
+        after = copy.deepcopy(base_plan["after"]) if base_plan is not None else copy.deepcopy(entries)
         changes: list[dict[str, Any]] = copy.deepcopy(base_plan["changes"]) if base_plan else []
         snapshots: dict[str, dict[str, Any]] = copy.deepcopy(base_plan["snapshots"]) if base_plan else {}
         writes: list[dict[str, Any]] = copy.deepcopy(base_plan["writes"]) if base_plan else []
@@ -1707,7 +2003,7 @@ class Service:
             ]
 
         for profile, scopes in parsed_updates:
-            entry = after[profile]
+            entry = after.setdefault(profile, self._fresh_profile_entry(profile, entries))
             for scope, desired in scopes.items():
                 consent_key = scope
                 old_consent = entry["fallback_consent"][consent_key]
@@ -1865,6 +2161,7 @@ class Service:
             "writes": writes,
 
             "model_targets": list(base_plan["model_targets"]) if base_plan else [],
+            "approved_models": copy.deepcopy(base_plan.get("approved_models", {})) if base_plan else {},
             "validation_profiles": list(base_plan.get("validation_profiles", [])) if base_plan else [],
             "native_expected": native_expected,
             "native_snapshots": native_snapshots,
@@ -1875,6 +2172,7 @@ class Service:
             "state_changed": state_changed,
             "expires_epoch": expires_epoch,
             "timeout_writes": copy.deepcopy(base_plan.get("timeout_writes", [])) if base_plan else [],
+            "page_expected": copy.deepcopy(base_plan.get("page_expected")) if base_plan else page_expected,
         }
         # Eligibility, sanitized preview and before hashes all came from the
         # same immutable snapshot. Reject an intervening edit instead of
@@ -1895,6 +2193,9 @@ class Service:
                 raise RevisionConflict("delegation config changed during preview")
         for item in plan["timeout_writes"]:
             self._check_timeout_write(item)
+        plan["store_digest"] = store_digest
+        if self._store_file_digest() != store_digest:
+            raise RevisionConflict("settings changed during fallback preview; preview again")
         self._plans[plan_id] = plan
         plans_dir = self.store_path.parent / "plans"
         with _FileLock(self._lock_path):
@@ -1941,10 +2242,16 @@ class Service:
             revision = current["revision"] if current else 0
             if revision != plan["revision"]:
                 raise RevisionConflict("settings revision changed; preview again")
+            # Compare-and-set before anything is written: what the page saw must still hold.
+            self._check_page_expectations(plan.get("page_expected"), dict((current or {}).get("profiles") or {}))
             if plan.get("kind") == "native_delegation":
                 return native_service.apply_consumed(self, plan, plan_id)
             if plan.get("kind") == "initial_setup":
                 return native_service.initial_setup_apply_consumed(self, plan, plan_id)
+            # The plan's `after` replaces the whole store: refuse unless the store is byte-for-byte
+            # the one preview computed it from, so no profile the save did not target is reverted.
+            if plan.get("store_digest") is None or self._store_file_digest() != plan["store_digest"]:
+                raise RevisionConflict("settings changed since preview; preview again")
             # The preview checked that every installed package can read slots; an older
             # package may have appeared since. Clearing all slots stays possible.
             after_slots = _stored_slots(plan.get("after") or {})
@@ -1984,7 +2291,8 @@ class Service:
                 self._store_apply(receipt)
                 return receipt
             new_revision = revision + 1 if plan["state_changed"] else revision
-            next_store = {"schema": _store_schema(plan["after"]), "revision": new_revision, "profiles": plan["after"]}
+            next_profiles = self._preserve_untouched_entries(plan["after"], (current or {}).get("profiles") or {}, plan["store_digest"])
+            next_store = {"schema": _store_schema(plan["after"]), "revision": new_revision, "profiles": next_profiles}
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             profiles_to_backup = sorted({item["profile"] for item in plan["writes"]})
             timeout_writes = [item for item in plan.get("timeout_writes", []) if item.get("write_required", True)]
@@ -1999,7 +2307,17 @@ class Service:
                 self._store_apply(receipt)
                 return receipt
             if plan["state_changed"]:
-                _atomic_write(self.store_path, _json_bytes(next_store))
+                # Backups and validation ran since the check above; re-check right before replacing.
+                # Only config backups exist at this point; no setting has been written.
+                if self._store_file_digest() != plan["store_digest"]:
+                    raise RevisionConflict("settings changed during apply; nothing was written; preview again")
+
+                def store_unchanged() -> None:
+                    # Again after the new payload is written and synced, immediately before the replace.
+                    if self._store_file_digest() != plan["store_digest"]:
+                        raise RevisionConflict("settings changed during apply; nothing was written; preview again")
+
+                _atomic_write(self.store_path, _json_bytes(next_store), before_replace=store_unchanged)
             applied: list[dict[str, str]] = []
             pending = list(all_writes)
             try:
@@ -2046,8 +2364,14 @@ class Service:
                     observed = timeouts.read_timeouts(self._profile_home(item["profile"]))
                     if observed["revision"] != item["expected_revision"] + 1 or any(observed[key] != value for key, value in item["after"].items()):
                         raise RevisionConflict("timeout settings differ from approved selection")
+                approved_models = plan.get("approved_models") or {}
                 for profile in plan.get("model_targets", []):
-                    if self._actual_models(profile) != next_store["profiles"][profile]["models"]:
+                    # A NOOP target may have no store entry (absent stays absent); it is verified
+                    # against the approved values all the same.
+                    expected_models = approved_models.get(profile)
+                    if expected_models is None:
+                        expected_models = (next_store["profiles"].get(profile) or {}).get("models")
+                    if expected_models is None or self._actual_models(profile) != expected_models:
                         raise RevisionConflict("resolved roles differ from approved desired models")
                 for profile, expected_chain in plan.get("native_expected", {}).items():
                     actual_chain, warnings = self._native_actual(profile)

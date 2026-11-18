@@ -224,7 +224,7 @@ test('model section save ignores dirty timeout, re-enable and fallback drafts an
   h.input('model-main-model', 'unsaved-model-draft')
   h.input('routed-light-total-minutes', '9999')
   h.check('routing-reenable-other', true)
-  h.check('routing-fallback-enabled', true)
+  h.check('native-fallback-enabled', true)
   await h.click('model-section-save')
   await h.flush()
   const body = lastPreview(h).body
@@ -234,7 +234,7 @@ test('model section save ignores dirty timeout, re-enable and fallback drafts an
   assert.deepEqual(body.routing_profiles, ['claire'], 'a ticked re-enable box is not part of the model save')
   assert.equal(body.models.main.model, 'unsaved-model-draft')
   assert.equal(body.routing.heavy.follow, 'main')
-  assert.deepEqual(body.routing.fallback, profileRow(h, 'claire').routing.fallback)
+  assert.equal('fallback' in body.routing, false, 'the stored routed-job fallback is kept by omission, never sent')
   assert.equal('timeout_updates' in body, false)
   assert.equal('fallback_updates' in body, false)
   assert.equal('fallback_confirmations' in body, false)
@@ -249,7 +249,7 @@ test('re-enable save changes activation membership only, with baseline models, r
   h.input('delegate-total-minutes', '12345')
   h.click('model-target-all')
   h.check('routing-reenable-other', true)
-  h.check('routing-fallback-enabled', true)
+  h.check('native-fallback-enabled', true)
   await h.click('routing-reenable-save')
   await h.flush()
   const body = lastPreview(h).body
@@ -261,7 +261,7 @@ test('re-enable save changes activation membership only, with baseline models, r
   assert.deepEqual(body.routing.heavy, profileRow(h, 'claire').routing.heavy)
   assert.deepEqual(body.routing.light, profileRow(h, 'claire').routing.light)
   assert.equal('slots' in body.routing, false)
-  assert.deepEqual(body.routing.fallback, profileRow(h, 'claire').routing.fallback)
+  assert.equal('fallback' in body.routing, false, 'the stored routed-job fallback is kept by omission, never sent')
   assert.equal('timeout_updates' in body, false)
   assert.equal('fallback_updates' in body, false)
   assert.equal('fallback_confirmations' in body, false)
@@ -291,7 +291,7 @@ test('timeout-only save copies unchanged values to a frozen manual subset and om
   h.check('timeout-target-other', true)
   h.input('model-main-model', 'dirty-model')
   h.check('routing-reenable-other', true)
-  h.check('routing-fallback-enabled', true)
+  h.check('native-fallback-enabled', true)
   await h.click('timeouts-save')
   await h.flush()
   const body = lastPreview(h).body
@@ -300,7 +300,8 @@ test('timeout-only save copies unchanged values to a frozen manual subset and om
   assert.deepEqual(body.routing_targets, [])
   assert.deepEqual(body.routing_profiles, ['claire'])
   assert.deepEqual(body.models, sourceModels)
-  assert.deepEqual(body.routing, sourceRouting)
+  const { fallback: _retired, ...sourceRoutingWithoutFallback } = sourceRouting
+  assert.deepEqual(body.routing, sourceRoutingWithoutFallback)
   assert.deepEqual(body.timeout_updates, [expectedTimeout('other', 11, 0, 3600)])
   assert.equal('fallback_updates' in body, false)
   assert.equal('fallback_confirmations' in body, false)
@@ -407,3 +408,31 @@ for (const kind of ['readonly', 'unsupported']) {
     assert.equal(h.calls.some(call => call.operation === 'preview'), false)
   })
 }
+
+test('a chosen time-limit target that disappears stays ticked and blocks that save by name', () => {
+  const h = harness()
+  h.click('timeout-target-none')
+  h.check('timeout-target-claire', true); h.check('timeout-target-other', true)
+  const fewer = structuredClone(h.data()); fewer.profiles = fewer.profiles.filter(row => row.name !== 'other')
+  h.setData(fewer); h.render()
+  assert.equal(h.byId('timeout-target-other').props.checked, true)
+  assert.match(text(h.byId('timeout-targets-missing')), /더 이상 찾을 수 없어 저장하지 않습니다.*other/)
+  assert.equal(h.byId('timeouts-save').props.disabled, true)
+  h.check('timeout-target-other', false)
+  assert.throws(() => h.byId('timeout-target-other'))
+  assert.equal(h.byId('timeouts-save').props.disabled, false)
+})
+
+test('the page-made time-limit default follows a newly eligible profile until the list is edited by hand', () => {
+  const h = harness()
+  const grown = structuredClone(h.data())
+  const added = structuredClone(grown.profiles.find(row => row.name === 'other')); added.name = 'added'
+  grown.profiles.push(added)
+  h.setData(grown); h.render()
+  assert.equal(h.byId('timeout-target-added').props.checked, true)
+  h.check('timeout-target-added', false)
+  const later = structuredClone(added); later.name = 'later'
+  const more = structuredClone(h.data()); more.profiles.push(later)
+  h.setData(more); h.render()
+  assert.equal(h.byId('timeout-target-later').props.checked, false, 'a hand-edited list is not widened')
+})

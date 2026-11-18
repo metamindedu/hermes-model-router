@@ -352,7 +352,7 @@ class ProfileJobs:
                 self._update(job_id, lambda j: j.update(status='creating', pending_operation='create'))
                 remote_attempted = True
                 created = client.call('session.create', {'request_id': job['create_id'], 'source': 'tool', 'cwd': job['cwd'],
-                    'client': {'name': CLIENT_NAME, 'version': '0.11.4'}})
+                    'client': {'name': CLIENT_NAME, 'version': '0.12.0'}})
             sid = created.get('session_id')
             if not identifier(sid) or created.get('stored_session_id', sid) != sid:
                 raise JobError('session_identity_mismatch', unknown=True)

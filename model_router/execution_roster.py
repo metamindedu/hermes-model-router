@@ -75,7 +75,9 @@ def _status(value):
             'interrupted': 'interrupted', 'cancelled': 'cancelled', 'timeout': 'timeout'}.get(value, 'unknown')
 
 
-_TERMINAL = {'completed', 'error', 'interrupted', 'cancelled', 'timeout'}
+# 'ended': the run stopped but its outcome could not be attributed (see _resolve_stops). Desktop shows it
+# as unknown unless the native roster reports the run.
+_TERMINAL = {'completed', 'error', 'interrupted', 'cancelled', 'timeout', 'ended'}
 
 
 def _set_status(row, status):
@@ -92,6 +94,9 @@ class ExecutionRoster:
         self.rows = {}
         self.children = {}
         self.aliases = {}
+        # action='continue' rebuilds a finished child under the same subagent_id AND session id.
+        # new row key -> {sid, parent, original, child_session}, until its subagent_start or a refusal.
+        self.continuing = {}
         self.lock = threading.RLock()
         self.rpc_supported = False
         # Private native DB compatibility is not admitted by normal registration.
@@ -131,8 +136,12 @@ class ExecutionRoster:
         # Activity ticks touch one child; do not rescan every finished child on
         # every tool/API call as the bounded history fills up.
         for child in ([selected] if selected is not None else self.children.values()):
+            # A continued row keeps the values of its own run. A continuation row binds only to the
+            # run its own subagent_start began (run_for), never to the previous run's counters.
             matches = [r for r in self.rows.values() if r['subagent_id'] == child['short']
-                       and r['delegation_id'] and self._same_session(r['parent_session_id'], child['parent'])]
+                       and r['delegation_id'] and not r.get('continued_by')
+                       and (not r.get('continued_from') or child.get('run_for') == r['id'])
+                       and self._same_session(r['parent_session_id'], child['parent'])]
             siblings = [c for c in self.children.values() if c['short'] == child['short']
                         and self._same_session(c['parent'], child['parent'])]
             if len(matches) != 1 or len(siblings) != 1 or child.get('ambiguous'):
@@ -140,17 +149,51 @@ class ExecutionRoster:
             row = matches[0]
             if row.get('child_session_id') and not self._same_session(row['child_session_id'], child['session']):
                 continue
-            for field in ('child_session_id', 'started_at', 'activity_at', 'last_tool', 'tool_count',
-                          'api_call_count', 'duration_seconds', 'model', 'provider'):
-                if field in child:
-                    row[field] = child[field]
-            if child.get('tokens'):
-                row['tokens'] = dict(child['tokens'])
-            if child.get('models'):
-                row['models'] = copy.deepcopy(child['models'])
-                row['models_truncated'] = bool(child.get('models_truncated'))
-            _set_status(row, child.get('status', 'dispatched'))
-            row['updated_at'] = time.time()
+            self._copy_child(row, child)
+
+    @staticmethod
+    def _copy_child(row, child):
+        for field in ('child_session_id', 'started_at', 'activity_at', 'last_tool', 'tool_count',
+                      'api_call_count', 'duration_seconds', 'model', 'provider'):
+            if field in child:
+                row[field] = child[field]
+        if child.get('tokens'):
+            row['tokens'] = dict(child['tokens'])
+        if child.get('models'):
+            row['models'] = copy.deepcopy(child['models'])
+            row['models_truncated'] = bool(child.get('models_truncated'))
+        _set_status(row, child.get('status', 'dispatched'))
+        row['updated_at'] = time.time()
+
+    def _restart_for_continuation(self, child, session, parent, short):
+        # Core rebuilds a continued child under its subagent_id and its (possibly compacted) session.
+        pending = [key for key, p in self.continuing.items() if p['sid'] == short
+                   and self._same_session(p['parent'], parent)
+                   and (p['child_session'] is None or self._same_session(p['child_session'], session))]
+        if len(pending) != 1 or pending[0] not in self.rows:
+            return
+        p = self.continuing.pop(pending[0])
+        original = next((r for r in self.rows.values() if r['id'] == p['original']), None)
+        if original is not None and not (original.get('child_session_id') and
+                                         not self._same_session(original['child_session_id'], child['session'])):
+            self._copy_child(original, child)  # the previous run's final values stay with its row
+        # Core continues only a finished child, so a stop not yet observed belongs to an earlier run
+        # (grouped batch stops wait for siblings). Earlier unsettled runs and stops that arrived before
+        # this restart carry over; every held stop predates this run, so none of them is this run's.
+        earlier = list(child.get('earlier_runs', []))
+        held = [dict(h, earlier=True) for h in child.get('held_stops', [])]
+        if child.get('status') not in _TERMINAL and original is not None:
+            earlier.append(original['id'])
+        now = time.time()
+        kept = {key: child[key] for key in ('parent', 'session', 'short')}
+        child.clear()
+        child.update(kept, child_session_id=session, started_at=now, activity_at=now, tool_count=None,
+                     api_call_count=None, status='queued', run_for=self.rows[pending[0]]['id'],
+                     run_monotonic=time.monotonic())
+        if earlier:
+            child['earlier_runs'] = earlier[-16:]
+            child['held_stops'] = held[-17:]
+            self._resolve_stops(child)
 
     def start(self, parent_session_id=None, child_session_id=None, child_subagent_id=None, **kwargs):
         try:
@@ -158,7 +201,10 @@ class ExecutionRoster:
             if not self._owner() or not all((parent, session, short)):
                 return None
             with self.lock:
-                if session not in self.children:
+                existing = self.children.get(session)
+                if existing is None and self.continuing:
+                    existing = self._child(session)  # a continuation may restart on a compacted session id
+                if existing is None:
                     now = time.time()
                     self.children[session] = {'parent': parent, 'session': session, 'short': short,
                                               'child_session_id': session, 'started_at': now,
@@ -166,9 +212,10 @@ class ExecutionRoster:
                                               'status': 'queued'}
                     while len(self.children) > 512:
                         self.children.pop(next(iter(self.children)))
-                elif (self.children[session]['short'] != short or
-                      not self._same_session(self.children[session]['parent'], parent)):
-                    self.children[session]['ambiguous'] = True
+                elif existing['short'] != short or not self._same_session(existing['parent'], parent):
+                    existing['ambiguous'] = True
+                elif not existing.get('ambiguous'):
+                    self._restart_for_continuation(existing, session, parent, short)
                 self._reconcile()
                 self._notify_parent(parent)
         except Exception:
@@ -235,6 +282,71 @@ class ExecutionRoster:
                     child['activity_at'] = terminal['stopped_at']
                     self._reconcile(child)
 
+    @staticmethod
+    def _child_stop(child, status, duration):
+        if child.get('status') not in _TERMINAL and status in _TERMINAL:
+            child['status'] = status
+            if duration is not None:
+                child['duration_seconds'] = duration
+        child['activity_at'] = time.time()
+
+    def _settle_original(self, original_id, status, duration):
+        original = next((r for r in self.rows.values() if r['id'] == original_id), None)
+        if original is not None and status in _TERMINAL:
+            _set_status(original, status)
+            if duration is not None:
+                original['duration_seconds'] = duration
+            original['updated_at'] = time.time()
+
+    def _resolve_stops(self, child):
+        # The stop hook does not say which run stopped. A held stop is known to be an earlier run's only
+        # on evidence: it predates this run's restart, its duration exceeds this run's age, or this run
+        # was active after it. Outcomes are attributed only when that evidence makes them unambiguous.
+        earlier, held = child.get('earlier_runs', []), child.get('held_stops', [])
+        known = [h for h in held if h['earlier']]
+        if earlier and known:
+            if len(earlier) == 1:
+                self._settle_original(earlier.pop(), known[0]['status'], known[0]['duration'])
+                held.remove(known[0])
+            elif len(known) == len(earlier):
+                shared = {h['status'] for h in known}
+                outcome = next(iter(shared)) if len(shared) == 1 else 'ended'
+                for run in earlier:
+                    self._settle_original(run, outcome, None)
+                earlier.clear()
+                for h in known:
+                    held.remove(h)
+        if earlier and len(held) == len(earlier) + 1:
+            # Every run has stopped and nothing ties a stop to a run: report only a shared outcome.
+            shared = {h['status'] for h in held}
+            outcome = shared.pop() if len(shared) == 1 else 'ended'
+            for run in earlier:
+                self._settle_original(run, outcome, None)
+            earlier.clear()
+            held.clear()
+            self._child_stop(child, outcome, None)
+        if not earlier:
+            for h in held:
+                self._child_stop(child, h['status'], h['duration'])
+            held.clear()
+        if not earlier:
+            child.pop('earlier_runs', None)
+        if not held:
+            child.pop('held_stops', None)
+
+    def _hold_stop(self, child, status, duration):
+        age = time.monotonic() - child['run_monotonic'] if 'run_monotonic' in child else time.time() - child['started_at']
+        earlier = duration is not None and duration > age + 2.0
+        child.setdefault('held_stops', []).append({'status': status, 'duration': duration, 'earlier': earlier})
+        self._resolve_stops(child)
+
+    def _current_run_active(self, child):
+        # Activity of this run after a held stop proves that stop was an earlier run's.
+        if child.get('earlier_runs') and child.get('held_stops'):
+            for h in child['held_stops']:
+                h['earlier'] = True
+            self._resolve_stops(child)
+
     def stop(self, parent_session_id=None, child_session_id=None, child_status=None, duration_ms=None, **kwargs):
         try:
             parent, session = map(_safe, (parent_session_id, child_session_id))
@@ -243,12 +355,12 @@ class ExecutionRoster:
             with self.lock:
                 child = self._child(session) or self._stored_child(parent, session)
                 if child and self._same_session(child['parent'], parent):
+                    duration = duration_ms / 1000 if type(duration_ms) in (int, float) and 0 <= duration_ms < 1e12 else None
                     status = _status(child_status)
-                    if child.get('status') not in _TERMINAL and status in _TERMINAL:
-                        child['status'] = status
-                        if type(duration_ms) in (int, float) and 0 <= duration_ms < 1e12:
-                            child['duration_seconds'] = duration_ms / 1000
-                    child['activity_at'] = time.time()
+                    if child.get('earlier_runs'):
+                        self._hold_stop(child, status, duration)
+                    else:
+                        self._child_stop(child, status, duration)
                     self._reconcile(child)
                     self._notify_parent(parent)
         except Exception:
@@ -288,6 +400,9 @@ class ExecutionRoster:
         with self.lock:
             child = self._child(session) if session else None
             if not child or child.get('status') in _TERMINAL:
+                return
+            self._current_run_active(child)
+            if child.get('status') in _TERMINAL:
                 return
             _set_status(child, 'running')
             child['activity_at'] = time.time()
@@ -335,6 +450,8 @@ class ExecutionRoster:
                 child = self._child(session) if session else None
                 if not child:
                     return None
+                if child.get('status') not in _TERMINAL:
+                    self._current_run_active(child)  # a usage report means this run was still executing
                 tokens = child.setdefault('tokens', dict.fromkeys(_TOKEN_BUCKETS, 0))
                 for key, value in buckets.items():
                     tokens[key] = min(tokens[key] + value, 10**15)
@@ -349,7 +466,10 @@ class ExecutionRoster:
             self._activity(session_id, tool_name=tool_name)
             if not self._owner() or not self.origin_profile or tool_name != 'delegate_task' or not isinstance(args, dict):
                 return None
-            if args.get('action') not in (None, '', 'spawn'):
+            action = args.get('action')
+            if action == 'continue':
+                return self._pre_continue(args, session_id, conversation_id, tool_call_id)
+            if action not in (None, '', 'spawn'):
                 return None
             root, session, call = map(_safe, (conversation_id, session_id, tool_call_id))
             if not all((root, session, call)):
@@ -383,6 +503,69 @@ class ExecutionRoster:
             pass
         return None
 
+    def _pre_continue(self, args, session_id, conversation_id, tool_call_id):
+        # A continuation runs on the original child's route, so it inherits that row's request.
+        root, session, call = map(_safe, (conversation_id, session_id, tool_call_id))
+        sid = _safe(args.get('subagent_id'))
+        if not all((root, session, call, sid)):
+            return None
+        with self.lock:
+            key = (root, session, call, 0)
+            if key in self.rows:
+                return None
+            # Only a child of this parent session (or its compaction lineage) can be continued here.
+            originals = [r for r in self.rows.values() if r['conversation_id'] == root
+                         and r['subagent_id'] == sid and r['delegation_id'] and not r.get('continued_by')
+                         and self._same_session(r['parent_session_id'], session)]
+            if len(originals) != 1:
+                return None
+            original = originals[0]
+            self._reconcile()  # settle the previous run before its row stops following the child
+            digest = hashlib.sha256(json.dumps(key, ensure_ascii=True).encode()).hexdigest()
+            self.rows[key] = {'id': digest, 'execution_mode': 'native', 'requested': copy.deepcopy(original['requested']),
+                'observed': _observed({}), 'conversation_id': root, 'parent_session_id': session,
+                'tool_call_id': call, 'task_index': 0, 'subagent_id': None, 'delegation_id': None,
+                'async_unit_id': None, 'native_call_delegation_id': None, 'continued_from': original['id'],
+                'status': 'requested', 'updated_at': time.time()}
+            original['continued_by'] = digest
+            for stale in [k for k, p in self.continuing.items() if p['sid'] == sid
+                          and self._same_session(p['parent'], session)]:
+                self.continuing.pop(stale)  # a never-started earlier attempt
+            self.continuing[key] = {'sid': sid, 'parent': session, 'original': original['id'],
+                                    'child_session': original.get('child_session_id')}
+            while len(self.continuing) > 128:
+                self.continuing.pop(next(iter(self.continuing)))
+            while len(self.rows) > 512:
+                self.rows.pop(next(iter(self.rows)))
+        self._event(root, session)
+        return None
+
+    def _post_continue(self, root, session, call, args, result):
+        with self.lock:
+            key = (root, session, call, 0)
+            row = self.rows.get(key)
+            if row is None or not row.get('continued_from'):
+                return False
+            sid = _safe(args.get('subagent_id'))
+            sids = result.get('subagent_ids')
+            accepted = (result.get('status') == 'dispatched' and isinstance(sids, list) and len(sids) == 1
+                        and _safe(sids[0]) == sid) or isinstance(result.get('results'), list)
+            if not accepted:
+                # Refused: the original row stays the one that run's evidence belongs to.
+                self.continuing.pop(key, None)
+                self.rows.pop(key, None)
+                for other in self.rows.values():
+                    if other.get('continued_by') == row['id']:
+                        other.pop('continued_by', None)
+                self._reconcile()  # pick up anything the original missed while it was set aside
+                return True
+            # The pending restart stays until its subagent_start, whichever hook arrives first.
+            self._apply({0: row}, result)
+            if row['subagent_id'] is None and sid:
+                row['subagent_id'] = sid
+            self._reconcile()
+            return True
+
     def post(self, tool_name='', args=None, result=None, session_id=None, conversation_id=None, tool_call_id=None, **kwargs):
         try:
             if not self._owner() or tool_name != 'delegate_task' or not isinstance(args, dict):
@@ -395,6 +578,10 @@ class ExecutionRoster:
                     return None
                 result = json.loads(result)
             if not isinstance(result, dict):
+                return None
+            if args.get('action') == 'continue':
+                if self._post_continue(root, session, call, args, result):
+                    self._event(root, session)
                 return None
             changed = False
             with self.lock:

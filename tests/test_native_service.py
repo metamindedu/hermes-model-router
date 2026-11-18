@@ -285,3 +285,128 @@ def test_managed_overlay_is_sanitized_readonly(fixture, monkeypatch):
     dto = native_service.status(service, 'default')
     assert dto['editable'] is False and dto['backend'] == 'unavailable'
     assert calls == []
+
+
+
+def _seed(service, **delegation):
+    path = service.root / 'config.yaml'
+    config = yaml.safe_load(path.read_text(encoding='utf-8'))
+    config['delegation'].update(copy.deepcopy(delegation))
+    path.write_text(yaml.safe_dump(config), encoding='utf-8')
+    return path
+
+
+def _part_update(service, backend, **fields):
+    dto = native_service.status(service, 'default')
+    assert dto['editable'], dto
+    return {'expected_revision': 0, 'updates': [{'profile': 'default', 'expected_digest': dto['digest'],
+                                                  'backend': backend, 'allow_profile_access': False, **fields}]}
+
+
+def test_a_profile_only_update_leaves_an_absent_spare_policy_absent_on_disk(fixture):
+    service, calls, _ = fixture
+    routes = {'schema': 1, 'profiles': [{'name': 'p1', 'description': 'old'}], 'default': None}
+    path = _seed(service, backend='model-router-profiles', backends={'unrelated': {'keep': True}, 'model-router-profiles': routes})
+    request = _part_update(service, 'model-router-profiles', profile_routes={'profiles': [{'name': 'p1', 'description': 'new'}], 'default': None})
+    assert service.apply(service.delegation_preview(request)['plan_id'])['status'] == 'applied'
+    assert [row[1] for row in calls] == [ns.KEY_PROFILES]
+    stored = yaml.safe_load(path.read_text(encoding='utf-8'))['delegation']
+    assert set(stored['backends']) == {'unrelated', 'model-router-profiles'}, 'no spare-policy block is materialized'
+    assert stored['backends']['model-router-profiles']['profiles'] == [{'name': 'p1', 'description': 'new'}]
+
+
+def test_a_method_update_leaves_absent_or_stale_profile_routes_exactly_as_stored(fixture):
+    service, calls, _ = fixture
+    path = _seed(service, backend='model-router')
+    request = _part_update(service, 'model-router', slot_policy=ns.default_slot_policy(), allow_additional_cost=False)
+    assert service.apply(service.delegation_preview(request)['plan_id'])['status'] == 'applied'
+    assert [row[1] for row in calls] == [ns.KEY_POLICY]
+    assert 'model-router-profiles' not in yaml.safe_load(path.read_text(encoding='utf-8'))['delegation']['backends']
+    # A stored allow-list that still names a deleted profile is no dead end: the method can change
+    # while the list is kept byte-for-byte for a later, explicit removal.
+    calls.clear()
+    ghost = {'schema': 1, 'profiles': [{'name': 'ghost', 'description': 'deleted'}], 'default': 'ghost'}
+    _seed(service, backend='model-router', backends={'unrelated': {'keep': True}, 'model-router-profiles': ghost})
+    before = get_path(yaml.safe_load(path.read_text(encoding='utf-8')), ns.KEY_PROFILES)
+    # An explicit backend-only change: neither stored block is fabricated or rewritten.
+    request = _part_update(service, 'model-router-profiles')
+    assert service.apply(service.delegation_preview(request)['plan_id'])['status'] == 'applied'
+    after = yaml.safe_load(path.read_text(encoding='utf-8'))
+    assert get_path(after, ns.KEY_BACKEND) == 'model-router-profiles'
+    assert get_path(after, ns.KEY_PROFILES) == before == ghost
+    assert [row[1] for row in calls] == [ns.KEY_BACKEND]
+    assert set(after['delegation']['backends']) == {'unrelated', 'model-router-profiles'}
+
+
+def test_partial_update_fields_are_exact(fixture):
+    service, calls, _ = fixture
+    _seed(service, backend='model-router')
+    for fields, message in (({'allow_additional_cost': False, 'profile_routes': {'profiles': [], 'default': None}}, 'update fields'),
+                            ({'policy': ns.default_policy()}, 'update fields'),
+                            ({'policy': ns.default_policy(), 'slot_policy': ns.default_slot_policy(), 'allow_additional_cost': False}, 'update fields'),
+                            ({'allow_additional_cost': False}, 'update fields'),
+                            ({'unknown': True}, 'update fields')):
+        with pytest.raises(ValueError, match=message): service.delegation_preview(_part_update(service, 'model-router', **fields))
+    request = _part_update(service, 'model-router', policy=ns.default_policy(), allow_additional_cost=False)
+    request['updates'][0]['allow_profile_access'] = True
+    with pytest.raises(ValueError, match='needs submitted profile routes'): service.delegation_preview(request)
+    assert calls == []
+
+
+
+def test_submitted_routes_are_authorized_again_at_apply_even_when_unchanged(fixture, monkeypatch):
+    service, calls, _ = fixture
+    routes = {'schema': 1, 'profiles': [{'name': 'p1', 'description': 'kept'}], 'default': None}
+    _seed(service, backend='model-router-profiles', backends={'unrelated': {'keep': True}, 'model-router-profiles': routes})
+    same = _part_update(service, 'model-router-profiles', profile_routes={'profiles': [{'name': 'p1', 'description': 'kept'}], 'default': None})
+    submitted = service.delegation_preview(same)['plan_id']
+    omitted = service.delegation_preview(_part_update(service, 'model-router-profiles'))['plan_id']
+    seen = []
+    def refuse(_service, profiles):
+        seen.append([row['name'] for row in profiles['profiles']])
+        raise ValueError('native profile resolution does not match the selected origin inventory')
+    monkeypatch.setattr(native_service, 'validate_native_targets', refuse)
+    with pytest.raises(ValueError, match='selected origin inventory'):
+        service.apply(submitted)
+    assert seen == [['p1']], 'an unchanged but submitted allow-list is checked again'
+    assert service.apply(omitted)['status'] == 'no_change', 'routes left out keep the stored list without re-authorizing it'
+    assert calls == []
+
+
+
+CONSENT_STORED = {'profiles': [{'name': 'p1', 'description': 'one'}, {'name': 'p2', 'description': 'two'}], 'default': 'p1'}
+
+
+@pytest.mark.parametrize('label, routes, needs_consent', [
+    ('add a profile', {'profiles': [*CONSENT_STORED['profiles'], {'name': 'default', 'description': 'self'}], 'default': 'p1'}, True),
+    ('default to a new non-null profile', {**CONSENT_STORED, 'default': 'p2'}, True),
+    ('description only', {'profiles': [{'name': 'p1', 'description': 'new one'}, {'name': 'p2', 'description': ''}], 'default': 'p1'}, False),
+    ('removal only', {'profiles': [{'name': 'p1', 'description': 'one'}], 'default': 'p1'}, False),
+    ('removal of the default', {'profiles': [{'name': 'p2', 'description': 'two'}], 'default': None}, False),
+    ('unchanged default re-written with the block', copy.deepcopy(CONSENT_STORED), False),
+])
+def test_consent_protects_new_profile_authority_only(fixture, label, routes, needs_consent):
+    service, calls, _ = fixture
+    _seed(service, backend='model-router-profiles', backends={'unrelated': {'keep': True}, 'model-router-profiles': {'schema': 1, **CONSENT_STORED}})
+    request = _part_update(service, 'model-router-profiles', profile_routes=copy.deepcopy(routes))
+    if needs_consent:
+        with pytest.raises(ValueError, match='requires explicit permission'):
+            service.delegation_preview(request)
+        assert calls == []
+        request['updates'][0]['allow_profile_access'] = True
+    receipt = service.apply(service.delegation_preview(request)['plan_id'])
+    assert receipt['status'] in ('applied', 'no_change'), label
+    assert native_service.status(service, 'default')['profile_routes'] == routes
+
+
+def test_consent_must_be_the_literal_true(fixture):
+    service, calls, _ = fixture
+    _seed(service, backend='model-router-profiles', backends={'model-router-profiles': {'schema': 1, **CONSENT_STORED}})
+    request = _part_update(service, 'model-router-profiles', profile_routes={**CONSENT_STORED, 'default': 'p2'})
+    for value in (1, 'true', None):
+        request['updates'][0]['allow_profile_access'] = value
+        with pytest.raises(ValueError, match='must be boolean'):
+            service.delegation_preview(request)
+    assert native_service.new_profile_authority(CONSENT_STORED, {**CONSENT_STORED, 'default': None}) == {'added': [], 'default': None}
+    assert native_service.new_profile_authority(CONSENT_STORED, {'profiles': [{'name': 'p2', 'description': ''}, {'name': 'default', 'description': ''}], 'default': 'p2'}) == {'added': ['default'], 'default': 'p2'}
+    assert calls == []

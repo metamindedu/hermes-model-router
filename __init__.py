@@ -99,7 +99,12 @@ def register(ctx):
             print(cli_reply(result))
             return 0
         except Exception as exc:
-            print("MODEL_ROUTER_JSON:" + json.dumps({"error": type(exc).__name__, "message": "작업이 완료되지 않았습니다. 상태를 확인한 후 다시 미리보기 하세요."}, ensure_ascii=False))
+            try:
+                from .model_router.service import cli_error_payload
+                payload = cli_error_payload(exc)
+            except Exception:
+                payload = {"error": type(exc).__name__, "message": "작업이 완료되지 않았습니다. 상태를 확인한 후 다시 미리보기 하세요."}
+            print("MODEL_ROUTER_JSON:" + json.dumps(payload, ensure_ascii=False))
             return 2
 
     ctx.register_cli_command("model-router", "Profile model settings and task routing", cli_setup, cli_handler)
@@ -184,7 +189,7 @@ def register(ctx):
 
     schema = {
         "name": "coding_route",
-        "description": "Read effective Heavy/Light roles or inspect/join historical process-backed jobs. New work uses native delegate_task with the selected model-router, model-router-profiles or model-router-auto backend, never coding_route start. Main handles small bounded changes directly, including tests. Ordinary implementation delegation requires at least two substantive independent workstreams unless explicitly requested by the user; required Heavy/independent review remains mandatory. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
+        "description": "Read effective Heavy/Light roles or inspect/join historical process-backed jobs. New work uses native delegate_task with the selected model-router, model-router-profiles or model-router-auto backend, never coding_route start. Main handles small bounded changes directly, including tests. Ordinary delegation needs a concrete benefit: a different-model route the task needs, heavy context, long runtime, or at least two substantive independent workstreams; on Main's own model, design stays with Main unless explicitly requested by the user; required Heavy/independent review remains mandatory. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {

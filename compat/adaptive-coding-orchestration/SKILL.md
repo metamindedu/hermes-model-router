@@ -1,12 +1,12 @@
 ---
 name: adaptive-coding-orchestration
 description: Use for coding or complex non-coding judgment.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Adaptive Coding Orchestration
 
-Main implements small, bounded changes directly, including focused tests. Ordinary implementation delegation must justify at least two substantive, independent workstreams and save more time than startup, context transfer and coordination cost. Do not split a small task artificially or count its tests/build/optional review as another implementation workstream. Do not discover/query coding_route for direct local work or substitute native delegate_task. Preserve required Heavy or independent review and high-risk safety gates even when only one reviewer is needed; explicit user delegation remains allowed. Visual/motion design stays Main-owned.
+Main implements small, bounded changes directly, including focused tests. Delegation must save more than startup, context transfer and coordination cost. When the slot runs on Main's model, delegate only for context weight (large tool output or long screen sessions), long runtime (keep Main responsive) or at least two substantive, independent workstreams; design stays with Main. A different model counts only when the task needs that slot's role. Do not split a small task artificially or count its tests/build/optional review as another implementation workstream. Do not discover/query coding_route for direct local work or substitute native delegate_task. Preserve required Heavy or independent review and high-risk safety gates even when only one reviewer is needed; explicit user delegation remains allowed. Visual/motion design stays Main-owned.
 
 This compatibility entry covers coding and complex non-coding judgment (ambiguous evidence, consequential content errors or repeated conceptual failure), not routine writing/extraction. It preserves the existing slash name. The canonical policy and executable routing are owned by the **model-router** plugin.
 

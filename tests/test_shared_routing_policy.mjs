@@ -19,10 +19,21 @@ test('small bounded changes stay Main-owned before route discovery or configurat
     assert.match(policy, /startup, context transfer and coordination/)
     assert.match(policy, /required Heavy or independent review/)
   }
+  // v0.12.0: same-model delegation needs context weight, long runtime or parallel work.
+  for (const policy of [canonical, compatibility]) {
+    assert.match(policy, /context weight/)
+    assert.match(policy, /long runtime/)
+    assert.match(policy, /only when the task needs that slot's role/)
+  }
+  assert.match(canonical, /### When a child is worth it/)
+  assert.match(canonical, /Design\/plan: Main-owned/)
+  assert.match(canonical, /Long multi-step screen sessions go to a `computer-use` child/)
+  assert.match(canonical, /an independent or final review is always a fresh child, whatever the model/)
+  assert.doesNotMatch(canonical, /rather than spawning a single implementation child/)
   assert.ok(canonical.indexOf('## Direct-Main default') < canonical.indexOf('## First check'))
   assert.match(canonical, /do not discover or query coding_route just to perform local work/)
   assert.match(canonical, /Tests, lint, build and optional review of the same small edit do not count/)
-  assert.match(canonical, /Apply the same threshold to native delegate_task/)
+  assert.match(canonical, /Apply the same criteria to native delegate_task/)
   assert.match(canonical, /A required single Heavy review is an exception/)
   assert.match(canonical, /Small review-driven corrections stay with Main/)
   assert.match(canonical, /User-facing visual\/motion design remains Main-owned/)
@@ -62,7 +73,7 @@ test('settings page explains broad routing scope, default-on installation, and p
   assert.match(desktop, /새 설치에서는 작업 분담이 기본으로 켜지며, 이전에 꺼 둔 설정은 유지/)
   assert.match(desktop, /작업 분담이 꺼져 있는 프로필입니다\. 이전에 꺼 두었거나/)
   assert.doesNotMatch(desktop, /id: 'routing-enabled'/, 'the page no longer offers turning task routing off')
-  assert.match(desktop, /작업·검증 라우팅 폴백/)
+  assert.doesNotMatch(desktop, /작업·검증 라우팅 폴백/, 'the retired routed-job spare-model panel is gone')
   assert.doesNotMatch(desktop, /코딩·검증 라우팅/)
   assert.match(readme, /동봉 정책은 프로필마다 동일합니다/)
   assert.match(readme, /공통 정책 문구의 배포는 라우팅 사용 동의가 아닙니다/)

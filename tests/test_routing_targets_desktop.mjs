@@ -42,14 +42,17 @@ test('follow projection uses each target canonical model, not source or external
   assert.equal(primaryRouteForFallback(r, 'heavy', body).model, 'source-main')
 })
 
-test('combined fallback validation receives non-source routing copy projection', () => {
+test('a combined body never carries or validates a routing fallback draft; stored ones are checked against the copy projection', () => {
   const rows = [row('source'), row('other')], draft = draftFor(rows[0])
   const fallback = { enabled: true, heavy: route('other-spare'), light: route('new-spare-light') }
   const before = { ...fallback, enabled: false }
-  const result = buildCombinedPreviewBody(1, 'source', draft, [], ['source', 'other'],
-    { routing: fallback }, { routing: before }, { routing: ['other'] }, rows, true, {}, ['other'])
-  assert.match(result.errors.join(' '), /other/)
-  const notCopied = buildCombinedPreviewBody(1, 'source', draft, [], ['source', 'other'],
-    { routing: fallback }, { routing: before }, { routing: ['other'] }, rows, true, {}, [])
-  assert.deepEqual(notCopied.errors, [])
+  for (const routingTargets of [['other'], []]) {
+    const result = buildCombinedPreviewBody(1, 'source', draft, [], ['source', 'other'],
+      { routing: fallback }, { routing: before }, { routing: ['other'] }, rows, true, { routing: true }, routingTargets)
+    assert.deepEqual(result.errors, [])
+    assert.equal('fallback_updates' in result.body, false)
+  }
+  // The stored routing fallback of a copy target is still checked, so a colliding save is explained up front.
+  const projection = buildPreviewBody(1, 'source', draft, [], ['source', 'other'], ['other'])
+  assert.match(projectedRoutingFallbackErrors(rows, projection).join(' '), /other에 보관된 이전 작업 방식의 예비 모델/)
 })

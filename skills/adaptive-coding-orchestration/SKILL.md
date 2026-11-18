@@ -1,7 +1,7 @@
 ---
 name: adaptive-coding-orchestration
 description: Use for coding or complex non-coding judgment.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Adaptive Coding Orchestration — Model Router
@@ -10,15 +10,33 @@ This policy is bundled with the model-router plugin. Model choices and profile e
 
 ## Direct-Main default
 
-Main implements small, bounded changes directly, including narrow bug fixes, copy/config edits, small UI adjustments and their focused tests. When the work does not justify at least two substantive, independent workstreams, keep implementation and mechanical checks in Main rather than spawning a single implementation child. Compare expected time saved against startup, context transfer and coordination; delegate ordinary implementation only when parallel work has a clear net benefit. Do not split a small task artificially to reach two children. Tests, lint, build and optional review of the same small edit do not count as a second implementation workstream.
+Main implements small, bounded changes directly, including narrow bug fixes, copy/config edits, small UI adjustments and their focused tests. Delegation needs a concrete benefit that outweighs startup, context transfer and coordination; a different model is only one possible benefit. Do not split a small task artificially to reach two children. Tests, lint, build and optional review of the same small edit do not count as a second implementation workstream.
 
-Apply the same threshold to native delegate_task; it is not a workaround for avoiding this rule. For direct Main work, do not discover or query coding_route just to perform local work. Neither file count, a Medium label nor an available Light route is by itself a reason to delegate. The user may explicitly request delegation; otherwise use this default.
+### When a child is worth it
+
+Decide per task. Compare the slot's configured model with Main's own model only once delegation is being considered (see First check).
+
+- Different model: the route is a benefit only when the task needs that slot's role, for example a separate Heavy `plan` model for complex/high-risk design. An available Light route alone is not a reason.
+- Same model: a child adds no capability, only a fresh context. Delegate only when at least one holds:
+  1. Context weight: the work would pour large tool output into Main, such as a multi-file implementation with repeated test/fix cycles, bulk evidence reading, or a screen session with many screenshots and steps.
+  2. Long runtime: the work is long enough that Main should stay responsive to the user while it runs in the background.
+  3. Parallelism: at least two substantive, independent workstreams with a clear net parallel benefit.
+  Otherwise Main does the work directly.
+
+By work type when the slot uses Main's model:
+
+- Design/plan: Main-owned, because it depends on the conversation and the user's preferences. Delegate only to explore alternatives in parallel or when the user asks for a separate opinion. When Main runs on the same model as the Heavy design slot, Main may own complex planning itself.
+- Code: small and bounded edits stay in Main. One implementation child is justified for large multi-file work with long test cycles under context weight or long runtime.
+- Computer use: a few clicks or a single page check stay in Main. Long multi-step screen sessions go to a `computer-use` child.
+- Verification: an independent or final review is always a fresh child, whatever the model. Same-model fresh context gives independent context, not model diversity.
+
+Apply the same criteria to native delegate_task; it is not a workaround for avoiding this rule. For direct Main work, do not discover or query coding_route just to perform local work. Neither file count, a Medium label nor an available Light route is by itself a reason to delegate. The user may explicitly request delegation; otherwise use this default.
 
 This threshold does not waive required Heavy or independent review, high-risk semantic judgment, production approval or project-specific safety gates. A required single Heavy review is an exception, not a reason to add an implementation child or manufacture a second job. User-facing visual/motion design remains Main-owned; Light may gather evidence, run justified mechanical work or apply Main's exact specified corrections, not own the design.
 
 ## First check
 
-Only when delegation is justified above or a required Heavy gate applies, load coding_route via tool discovery when absent from the current tool list and query action=config. If the plugin/profile is disabled or the tool is unavailable, do not bypass the gate through an old script or global config change. Explain that a new session or plugin activation is needed for routing. Safe local work may continue, but required Heavy review is unmet.
+Only when delegation is being considered under the criteria above or a required Heavy gate applies, load coding_route via tool discovery when absent from the current tool list and query action=config. Its slots tell whether the slot runs on Main's model; if they do and no same-model criterion holds, do ordinary implementation, design or screen work in Main. This never applies to a required Heavy or independent review: that review still runs as a fresh child, however short. If the plugin/profile is disabled or the tool is unavailable, do not bypass the gate through an old script or global config change. Explain that a new session or plugin activation is needed for routing. Safe local work may continue, but required Heavy review is unmet.
 
 Models are operator-assigned roles, not a claim about benchmark capability. Main may be Light or Heavy; do not infer class from a model name or reasoning effort. Heavy/Light may follow Main/Delegation or use separate overrides. The native purpose provider resolves the actual profile setting at execution.
 
@@ -33,8 +51,8 @@ Use the existing approved tool purposes without changing the plugin implementati
 ## Classify work
 
 - Trivial: Main handles locally, minimal focused checks; no delegation or Heavy review ceremony.
-- Medium: Main implements bounded existing patterns by default; use Light implementation only after the substantive parallel-work threshold above is met (or the user explicitly requests delegation). Escalate a real ambiguity/risk seam only.
-- Complex/high-risk: architecture, authentication, payments, privacy, migration, data loss, concurrency, critical contracts, repeated conceptual failures. Heavy plans/diagnoses and performs final semantic judgment; Main may implement a bounded fix directly, while Light implementation still follows the threshold above.
+- Medium: Main implements bounded existing patterns by default; use Light implementation only when the delegation criteria above are met (or the user explicitly requests delegation). Escalate a real ambiguity/risk seam only.
+- Complex/high-risk: architecture, authentication, payments, privacy, migration, data loss, concurrency, critical contracts, repeated conceptual failures. Heavy plans/diagnoses and performs final semantic judgment; Main may implement a bounded fix directly, while Light implementation still follows the criteria above.
 - Light may collect evidence and flag preliminary findings. This never satisfies a required Heavy or independent final review.
 - Explicit independent final review requires a fresh Heavy child, not Main's own review, even when Main is Heavy. Task wording (read-only, small diff, GO/NO-GO, timeboxed) cannot reduce the required class.
 

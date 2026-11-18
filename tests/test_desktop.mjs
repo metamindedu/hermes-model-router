@@ -101,8 +101,9 @@ test('bulk model targets remain separate from routing scope in both all and none
   assert.deepEqual(nonePayload.model_targets, [])
   assert.deepEqual(allPayload.routing_profiles, routingProfiles)
   assert.deepEqual(nonePayload.routing_profiles, routingProfiles)
-  assert.deepEqual(allPayload.routing, { ...sampleProfile.routing, enabled: false })
-  assert.deepEqual(nonePayload.routing, { ...sampleProfile.routing, enabled: false })
+  const { fallback: _retired, ...routingWithoutFallback } = sampleProfile.routing
+  assert.deepEqual(allPayload.routing, { ...routingWithoutFallback, enabled: false }, 'the retired routing fallback is never sent')
+  assert.deepEqual(nonePayload.routing, { ...routingWithoutFallback, enabled: false })
 })
 
 test('bulk target actions invalidate pending previews and their prior confirmation generation', () => {
@@ -137,12 +138,13 @@ test('preview payload carries full draft and keeps model targets separate from r
   const modelTargets = ['claire', 'research']
   const routingProfiles = ['default', 'claire']
   const payload = helpers.buildPreviewBody(17, 'claire', draft, modelTargets, routingProfiles)
+  const { fallback: _retired, ...routingWithoutFallback } = sampleProfile.routing
   assert.deepEqual(payload, {
     expected_revision: 17,
     profile: 'claire',
     models: sampleProfile.models,
     model_targets: ['claire', 'research'],
-    routing: sampleProfile.routing,
+    routing: routingWithoutFallback,
     routing_profiles: ['default', 'claire']
   })
   payload.models.main.model = 'mutated'

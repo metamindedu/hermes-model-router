@@ -1,0 +1,271 @@
+{
+  "schema": 1,
+  "generated_by": "tests/test_native_contract_desktop.mjs",
+  "row": {
+    "name": "p1",
+    "models": {
+      "main": {
+        "provider": "openai-codex",
+        "model": "stored-main",
+        "reasoning": "high"
+      },
+      "delegation": {
+        "provider": "deepseek",
+        "model": "stored-light",
+        "reasoning": "low"
+      },
+      "compression": {
+        "provider": "openai-codex",
+        "model": "stored-main",
+        "reasoning": "high"
+      },
+      "title": {
+        "provider": "openai-codex",
+        "model": "stored-main",
+        "reasoning": "high"
+      }
+    },
+    "actual_models": {
+      "main": {
+        "provider": "openai-codex",
+        "model": "actual-main",
+        "reasoning": "high"
+      },
+      "delegation": {
+        "provider": "deepseek",
+        "model": "stored-light",
+        "reasoning": "low"
+      },
+      "compression": {
+        "provider": "openai-codex",
+        "model": "actual-main",
+        "reasoning": "high"
+      },
+      "title": {
+        "provider": "openai-codex",
+        "model": "actual-main",
+        "reasoning": "high"
+      }
+    },
+    "routing": {
+      "enabled": true,
+      "heavy": {
+        "follow": "main",
+        "custom": null
+      },
+      "light": {
+        "follow": "custom",
+        "custom": {
+          "provider": "deepseek",
+          "model": "routed",
+          "reasoning": "low"
+        }
+      },
+      "fallback": {
+        "enabled": false,
+        "heavy": null,
+        "light": null
+      },
+      "slots": {
+        "design": {
+          "follow": "main",
+          "custom": null
+        }
+      }
+    },
+    "fallbacks": {
+      "native": {
+        "managed": true,
+        "editable": true,
+        "enabled": true,
+        "chain": [
+          {
+            "provider": "xiaomi",
+            "model": "spare"
+          }
+        ],
+        "actual_chain": [
+          {
+            "provider": "xiaomi",
+            "model": "spare"
+          }
+        ],
+        "drift": false,
+        "warnings": [],
+        "consent": null
+      }
+    },
+    "drift": [
+      "skills.disabled"
+    ]
+  },
+  "expectation": {
+    "models": {
+      "main": {
+        "provider": "openai-codex",
+        "model": "stored-main",
+        "reasoning": "high"
+      },
+      "delegation": {
+        "provider": "deepseek",
+        "model": "stored-light",
+        "reasoning": "low"
+      },
+      "compression": {
+        "provider": "openai-codex",
+        "model": "stored-main",
+        "reasoning": "high"
+      },
+      "title": {
+        "provider": "openai-codex",
+        "model": "stored-main",
+        "reasoning": "high"
+      }
+    },
+    "actual_models": {
+      "main": {
+        "provider": "openai-codex",
+        "model": "actual-main",
+        "reasoning": "high"
+      },
+      "delegation": {
+        "provider": "deepseek",
+        "model": "stored-light",
+        "reasoning": "low"
+      },
+      "compression": {
+        "provider": "openai-codex",
+        "model": "actual-main",
+        "reasoning": "high"
+      },
+      "title": {
+        "provider": "openai-codex",
+        "model": "actual-main",
+        "reasoning": "high"
+      }
+    },
+    "routing": {
+      "enabled": true,
+      "heavy": {
+        "follow": "main",
+        "custom": null
+      },
+      "light": {
+        "follow": "custom",
+        "custom": {
+          "provider": "deepseek",
+          "model": "routed",
+          "reasoning": "low"
+        }
+      },
+      "slots": {
+        "design": {
+          "follow": "main",
+          "custom": null
+        }
+      },
+      "skill_enabled": false
+    },
+    "native_fallback": {
+      "enabled": true,
+      "chain": [
+        {
+          "provider": "xiaomi",
+          "model": "spare"
+        }
+      ],
+      "actual_chain": [
+        {
+          "provider": "xiaomi",
+          "model": "spare"
+        }
+      ]
+    }
+  },
+  "preview_expected": [
+    {
+      "profile": "p1",
+      "actual_models": {
+        "main": {
+          "provider": "openai-codex",
+          "model": "actual-main",
+          "reasoning": "high"
+        },
+        "delegation": {
+          "provider": "deepseek",
+          "model": "stored-light",
+          "reasoning": "low"
+        },
+        "compression": {
+          "provider": "openai-codex",
+          "model": "actual-main",
+          "reasoning": "high"
+        },
+        "title": {
+          "provider": "openai-codex",
+          "model": "actual-main",
+          "reasoning": "high"
+        }
+      },
+      "models": {
+        "main": {
+          "provider": "openai-codex",
+          "model": "stored-main",
+          "reasoning": "high"
+        },
+        "delegation": {
+          "provider": "deepseek",
+          "model": "stored-light",
+          "reasoning": "low"
+        },
+        "compression": {
+          "provider": "openai-codex",
+          "model": "stored-main",
+          "reasoning": "high"
+        },
+        "title": {
+          "provider": "openai-codex",
+          "model": "stored-main",
+          "reasoning": "high"
+        }
+      },
+      "native_fallback": {
+        "enabled": true,
+        "chain": [
+          {
+            "provider": "xiaomi",
+            "model": "spare"
+          }
+        ],
+        "actual_chain": [
+          {
+            "provider": "xiaomi",
+            "model": "spare"
+          }
+        ]
+      },
+      "routing": {
+        "enabled": true,
+        "heavy": {
+          "follow": "main",
+          "custom": null
+        },
+        "light": {
+          "follow": "custom",
+          "custom": {
+            "provider": "deepseek",
+            "model": "routed",
+            "reasoning": "low"
+          }
+        },
+        "slots": {
+          "design": {
+            "follow": "main",
+            "custom": null
+          }
+        },
+        "skill_enabled": false
+      }
+    }
+  ]
+}

@@ -392,3 +392,260 @@ def test_token_usage_is_summed_per_child_from_post_api_request(env):
     r.api_post(session_id='child', usage=None)
     r.api_post(session_id='other', usage=usage)
     assert rows(r)[0]['tokens'] == {'input': 200, 'cache_read': 2000, 'cache_write': 10, 'output': 40}
+
+
+
+def _finished_child(r, usage):
+    pre(r, {'tasks': [{'goal': 'g', 'execution': 'model', 'purpose': 'implementation'}]})
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit-1'},
+         {'tasks': [{'goal': 'g', 'execution': 'model', 'purpose': 'implementation'}]})
+    r.api_pre(session_id='child', model='fixture-model', provider='fixture')
+    r.api_post(session_id='child', usage=usage)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed')
+
+
+def test_continue_inherits_the_request_and_gets_its_own_row(env):
+    r, _, _ = env
+    usage = {'input_tokens': 100, 'output_tokens': 20}
+    _finished_child(r, usage)
+    args = {'action': 'continue', 'subagent_id': 'short', 'message': 'PRIVATE_FOLLOW_UP'}
+    r.pre(tool_name='delegate_task', args=args, session_id='segment-1', conversation_id='root', tool_call_id='call-2')
+    # Core rebuilds the same child under the same subagent_id AND session id.
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    r.post(tool_name='delegate_task', args=args, session_id='segment-1', conversation_id='root', tool_call_id='call-2',
+           result=json.dumps({'status': 'dispatched', 'mode': 'background', 'count': 1,
+                              'delegation_id': 'unit-2', 'subagent_ids': ['short']}))
+    first, second = rows(r)
+    assert first['status'] == 'completed' and first['tokens'] == {'input': 100, 'cache_read': 0, 'cache_write': 0, 'output': 20}
+    assert second['requested'] == first['requested'] and second['requested']['slot'] == 'code-complex'
+    assert (second['subagent_id'], second['delegation_id'], second['native_call_delegation_id']) == ('short', 'unit-2', 'unit-2')
+    assert second['status'] == 'queued' and second['continued_from'] == first['id']
+    r.api_pre(session_id='child', model='fixture-model', provider='fixture')
+    r.api_post(session_id='child', usage={'input_tokens': 7, 'output_tokens': 3})
+    first, second = rows(r)
+    assert second['status'] == 'running' and second['api_call_count'] == 1
+    assert second['tokens'] == {'input': 7, 'cache_read': 0, 'cache_write': 0, 'output': 3}
+    assert first['tokens'] == {'input': 100, 'cache_read': 0, 'cache_write': 0, 'output': 20} and first['api_call_count'] == 1
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed')
+    first, second = rows(r)
+    assert (first['status'], second['status']) == ('completed', 'completed')
+    assert 'PRIVATE_FOLLOW_UP' not in json.dumps(rows(r))
+
+
+def test_refused_or_unknown_continue_leaves_the_original_row_alone(env):
+    r, _, _ = env
+    _finished_child(r, {'input_tokens': 1})
+    args = {'action': 'continue', 'subagent_id': 'short', 'message': 'x'}
+    ids = dict(session_id='segment-1', conversation_id='root', tool_call_id='call-2')
+    r.pre(tool_name='delegate_task', args=args, **ids)
+    r.post(tool_name='delegate_task', args=args, result=json.dumps({'error': 'not finished'}), **ids)
+    assert len(rows(r)) == 1 and 'continued_by' not in rows(r)[0]
+    unknown = {'action': 'continue', 'subagent_id': 'nobody', 'message': 'x'}
+    r.pre(tool_name='delegate_task', args=unknown, **dict(ids, tool_call_id='call-3'))
+    assert len(rows(r)) == 1
+    # The original can still be continued afterwards, and a chain continues the latest run.
+    for call, unit in (('call-4', 'unit-4'), ('call-5', 'unit-5')):
+        r.pre(tool_name='delegate_task', args=args, **dict(ids, tool_call_id=call))
+        r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+        r.post(tool_name='delegate_task', args=args, **dict(ids, tool_call_id=call),
+               result=json.dumps({'status': 'dispatched', 'delegation_id': unit, 'subagent_ids': ['short']}))
+        r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed')
+    got = rows(r)
+    assert [x['delegation_id'] for x in got] == ['unit-1', 'unit-4', 'unit-5']
+    assert all(x['requested']['kind'] == 'model' for x in got) and all(x['status'] == 'completed' for x in got)
+
+
+
+def _continue_args(sid='short'):
+    return {'action': 'continue', 'subagent_id': sid, 'message': 'x'}
+
+
+def _cont(r, hook, call, **kw):
+    ids = dict(session_id='segment-1', conversation_id='root', tool_call_id=call)
+    ids.update(kw)
+    if hook == 'pre':
+        r.pre(tool_name='delegate_task', args=_continue_args(), **ids)
+    else:
+        r.post(tool_name='delegate_task', args=_continue_args(), result=json.dumps(hook), **ids)
+
+
+def _receipt(unit):
+    return {'status': 'dispatched', 'delegation_id': unit, 'subagent_ids': ['short']}
+
+
+def test_continuation_counters_do_not_depend_on_hook_order(env):
+    r, _, _ = env
+    _finished_child(r, {'input_tokens': 100})
+    _cont(r, 'pre', 'call-2')
+    _cont(r, _receipt('unit-2'), 'call-2')          # receipt before the restart
+    first, second = rows(r)
+    assert second['status'] == 'dispatched' and 'tokens' not in second, 'never bound to the previous run'
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    r.api_pre(session_id='child', model='m', provider='p')
+    r.api_post(session_id='child', usage={'input_tokens': 7})
+    first, second = rows(r)
+    assert second['status'] == 'running' and second['api_call_count'] == 1 and second['tokens']['input'] == 7
+    assert first['tokens']['input'] == 100 and first['status'] == 'completed'
+
+
+def test_previous_run_stop_arriving_late_stays_with_the_original(env):
+    r, _, _ = env
+    pre(r, {'tasks': [{'goal': 'g', 'purpose': 'implementation'}]})
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit-1'},
+         {'tasks': [{'goal': 'g', 'purpose': 'implementation'}]})
+    r.api_pre(session_id='child', model='m', provider='p')
+    r.api_post(session_id='child', usage={'input_tokens': 100})
+    # The original stop has not been observed yet when the continuation restarts the child.
+    _cont(r, 'pre', 'call-2')
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    _cont(r, _receipt('unit-2'), 'call-2')
+    r.api_pre(session_id='child', model='m', provider='p')
+    r.api_post(session_id='child', usage={'input_tokens': 7})
+    first, second = rows(r)
+    assert (first['api_call_count'], first['tokens']['input']) == (1, 100)
+    assert (second['api_call_count'], second['tokens']['input']) == (1, 7)
+    assert second['status'] == 'running'
+
+
+def test_continuation_restart_on_a_compacted_session_and_parent_lineage(env):
+    r, _, _ = env
+    _finished_child(r, {'input_tokens': 1})
+    r.compact(old_session_id='child', session_id='rotated')
+    _cont(r, 'pre', 'call-2')
+    r.start(parent_session_id='segment-1', child_session_id='rotated', child_subagent_id='short')
+    _cont(r, _receipt('unit-2'), 'call-2')
+    r.api_pre(session_id='rotated', model='m', provider='p')
+    second = rows(r)[1]
+    assert second['status'] == 'running' and second['child_session_id'] == 'rotated' and second['api_call_count'] == 1
+    assert len([c for c in r.children.values() if c['short'] == 'short']) == 1
+
+
+def test_unrelated_parent_cannot_inherit_a_request_by_short_id(env):
+    r, _, _ = env
+    _finished_child(r, {'input_tokens': 1})
+    _cont(r, 'pre', 'call-2', session_id='unrelated-parent')
+    assert len(rows(r)) == 1 and 'continued_by' not in rows(r)[0]
+
+
+def test_refused_continue_reconciles_a_stop_that_arrived_meanwhile(env):
+    r, _, _ = env
+    pre(r, {'tasks': [{'goal': 'g', 'purpose': 'implementation'}]})
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit-1'},
+         {'tasks': [{'goal': 'g', 'purpose': 'implementation'}]})
+    r.api_pre(session_id='child', model='m', provider='p')
+    _cont(r, 'pre', 'call-2')
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed')
+    _cont(r, {'error': 'not finished'}, 'call-2')
+    assert len(rows(r)) == 1 and rows(r)[0]['status'] == 'completed'
+
+
+
+def test_late_stop_of_the_previous_run_settles_only_the_original(env):
+    r, _, _ = env
+    pre(r, {'tasks': [{'goal': 'g', 'purpose': 'implementation'}]})
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit-1'},
+         {'tasks': [{'goal': 'g', 'purpose': 'implementation'}]})
+    r.api_pre(session_id='child', model='m', provider='p')
+    _cont(r, 'pre', 'call-2')
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    _cont(r, _receipt('unit-2'), 'call-2')
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=9000)
+    r.api_pre(session_id='child', model='m', provider='p')
+    first, second = rows(r)
+    assert (first['status'], first['duration_seconds']) == ('completed', 9.0)
+    assert second['status'] == 'running' and second['api_call_count'] == 1 and 'duration_seconds' not in second
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=2000)
+    first, second = rows(r)
+    assert (second['status'], second['duration_seconds']) == ('completed', 2.0) and first['duration_seconds'] == 9.0
+
+
+
+def _restarted_before_previous_stop(r):
+    pre(r, {'tasks': [{'goal': 'g', 'purpose': 'implementation'}]})
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit-1'},
+         {'tasks': [{'goal': 'g', 'purpose': 'implementation'}]})
+    r.api_pre(session_id='child', model='m', provider='p')
+    _cont(r, 'pre', 'call-2')
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    _cont(r, _receipt('unit-2'), 'call-2')
+
+
+def test_continuation_stop_before_the_late_previous_stop_is_not_swapped(env):
+    r, _, _ = env
+    _restarted_before_previous_stop(r)
+    r.api_pre(session_id='child', model='m', provider='p')
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='failed', duration_ms=0)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=9000)
+    first, second = rows(r)
+    assert (first['status'], first['duration_seconds']) == ('completed', 9.0)
+    assert (second['status'], second.get('duration_seconds')) == ('error', 0.0)
+
+
+def test_held_previous_stop_is_resolved_by_this_runs_activity(env):
+    r, _, _ = env
+    _restarted_before_previous_stop(r)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=500)
+    r.api_pre(session_id='child', model='m', provider='p')
+    first, second = rows(r)
+    assert first['status'] == 'completed' and second['status'] == 'running'
+
+
+def test_indistinguishable_stops_report_only_a_shared_outcome(env):
+    r, _, _ = env
+    _restarted_before_previous_stop(r)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='failed', duration_ms=0)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=0)
+    first, second = rows(r)
+    assert first['status'] not in ('completed', 'error') and second['status'] not in ('completed', 'error')
+
+
+
+def _three_runs(r):
+    # A runs in a batch whose grouped stop hook is delayed; B and C are quick follow-ups.
+    _restarted_before_previous_stop(r)            # A open, B started (call-2 / unit-2)
+
+
+def _continue_again(r, call, unit):
+    _cont(r, 'pre', call)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    _cont(r, _receipt(unit), call)
+
+
+def test_a_second_continuation_keeps_earlier_unsettled_runs(env):
+    r, _, _ = env
+    _three_runs(r)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=0)   # B
+    _continue_again(r, 'call-3', 'unit-3')
+    r.api_pre(session_id='child', model='m', provider='p')
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='failed', duration_ms=0)      # C
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=9000)  # A late
+    a, b, c = rows(r)
+    assert c['status'] == 'error', 'C was active after the held stop, so its own stop is the only candidate'
+    assert (a['status'], b['status']) == ('completed', 'completed'), 'a shared outcome is kept for every earlier run'
+    assert 'running' not in (a['status'], b['status'], c['status'])
+    assert not (b['status'] == 'completed' and b.get('duration_seconds') == 9.0), 'never A\'s 9s on B'
+
+
+def test_usage_report_after_a_held_stop_resolves_it(env):
+    r, _, _ = env
+    _restarted_before_previous_stop(r)
+    r.api_pre(session_id='child', model='m', provider='p')
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=0)   # A late
+    r.api_post(session_id='child', usage={'output_tokens': 19})
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='failed', duration_ms=0)      # B
+    a, b = rows(r)
+    assert (a['status'], b['status']) == ('completed', 'error') and b['tokens']['output'] == 19
+
+
+def test_unattributable_pair_ends_with_an_unknown_outcome_not_running(env):
+    r, _, _ = env
+    _restarted_before_previous_stop(r)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='failed', duration_ms=0)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=0)
+    a, b = rows(r)
+    assert (a['status'], b['status']) == ('ended', 'ended')

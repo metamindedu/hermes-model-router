@@ -378,7 +378,8 @@ test('a host without the catalog menu keeps the plain ID inputs and a level sele
 
 test('spare-model entries use the same picker without a reasoning level and keep stable row keys', () => {
   assert.doesNotMatch(source, /`\$\{entry\.provider\}:\$\{entry\.model\}:\$\{index\}`/, 'typing an ID must not remount its own row')
-  for (const prefix of ['native-chain', 'delegation-chain']) assert.ok(source.includes(`picker: \`${prefix}-\${index}-picker\``), `${prefix} picker missing`)
+  assert.ok(source.includes('picker: `native-chain-${index}-picker`'), 'native-chain picker missing')
+  assert.equal(source.includes('delegation-chain-'), false, 'the default-delegation spare list is gone')
   assert.ok(source.includes('picker: `slot-${slot.id}-spare-picker-${index}`'))
   assert.match(source, /이 항목에는 추론 강도를 따로 저장하지 않습니다/)
 })
