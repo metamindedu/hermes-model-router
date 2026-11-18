@@ -4,7 +4,7 @@ import fs from 'node:fs'
 const source=fs.readFileSync(new URL('../desktop/plugin.js',import.meta.url),'utf8')
 
 test('late reload after gateway switch does not replace draft or unlock state',async()=>{
- const start=source.indexOf('  const reloadStatus = async () => {')
+ const start=source.indexOf('  const reloadStatus = async ({ keepOutcome = false } = {}) => {')
  const end=source.indexOf('\n  }',start)+4
  const body=source.slice(start,end)
  let complete;const pending=new Promise(r=>complete=r)

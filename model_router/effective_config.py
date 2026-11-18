@@ -106,6 +106,47 @@ def _file_signature(path: Path | None) -> str:
     return _digest(identity)
 
 
+_RAW_READS = None
+
+
+def _memoized_raw_reader(read):
+    """``read_user_config_raw`` memoized by the file's exact bytes, only while the selected config
+    backend is Hermes' file backend. There the read is ``fast_safe_load`` of the file text, so the
+    memo parses exactly the bytes it is keyed by with that same loader; nothing read separately
+    is ever cached. Any other backend, or a missing loader, keeps the uncached host read."""
+    global _RAW_READS
+    from .yaml_compat import ContentMemo
+    import hashlib
+    import io as _io
+    if _RAW_READS is None:
+        _RAW_READS = ContentMemo()
+    try:
+        from hermes_cli import config_backend
+        from utils import fast_safe_load
+        file_backend = type(config_backend.get_config_backend()) is config_backend.FileBackend
+    except Exception:
+        file_backend = False
+    if not file_backend:
+        return read
+
+    def memoized(config_path=None):
+        if config_path is None:
+            return read(config_path)
+        path = Path(config_path)
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return {}
+        except OSError:
+            return read(config_path)
+        key = (str(path.resolve(strict=False)), hashlib.sha256(data).hexdigest())
+        def parse():
+            value = fast_safe_load(_io.StringIO(data.decode("utf-8-sig")))
+            return value if isinstance(value, dict) else {}
+        return _RAW_READS.get(key, parse)
+    return memoized
+
+
 def _helpers() -> Any:
     """Load the installed Hermes helper APIs; missing APIs are never treated as no overlay."""
     try:
@@ -128,7 +169,7 @@ def _helpers() -> Any:
     if not all(required):
         raise EffectiveConfigUnavailable("supported Hermes config helpers are incomplete")
     return type("HermesConfigHelpers", (), {
-        "read_user_config_raw": staticmethod(config.read_user_config_raw),
+        "read_user_config_raw": staticmethod(_memoized_raw_reader(config.read_user_config_raw)),
         "load_managed_config": staticmethod(managed_scope.load_managed_config),
         "managed_config_keys": staticmethod(managed_scope.managed_config_keys),
         "get_managed_dir": staticmethod(managed_scope.get_managed_dir),

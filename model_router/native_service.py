@@ -581,7 +581,9 @@ def _initial_observation(service, profile, readiness=None):
     if not isinstance(disabled, list) or not isinstance(skill_disabled, list):
         raise ValueError('initial setup opt-out state unavailable')
     action, reason = 'manual', 'configuration_unavailable'
-    source_package_code = _initial_package_code(service, service.active_profile())
+    from .service import scoped
+    source = service.active_profile()
+    source_package_code = scoped(('initial_package_code', str(service.root), source), lambda: _initial_package_code(service, source))
     package_code = source_package_code if profile == service.active_profile() else _initial_package_code(service, profile)
     present = snapshot.raw_present(ns.KEY_BACKEND)
     backend = snapshot.raw(ns.KEY_BACKEND)

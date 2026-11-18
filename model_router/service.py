@@ -13,6 +13,7 @@ import time
 import uuid
 import copy
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,30 @@ from . import effective_config, fallback_policy, installation, timeouts, native_
 from . import slots as slot_model
 
 SCHEMA = 2
+# One status read asks the same questions (which profiles exist, the source package identity) per
+# row. While a read is active those answers are computed once; the scope ends with the read.
+_READ_SCOPE: ContextVar[dict | None] = ContextVar("model_router_read_scope", default=None)
+
+
+@contextmanager
+def read_scope():
+    if _READ_SCOPE.get() is not None:
+        yield
+        return
+    token = _READ_SCOPE.set({})
+    try:
+        yield
+    finally:
+        _READ_SCOPE.reset(token)
+
+
+def scoped(key, compute):
+    memo = _READ_SCOPE.get()
+    if memo is None:
+        return compute()
+    if key not in memo:
+        memo[key] = compute()
+    return copy.deepcopy(memo[key])
 # Written only while some profile carries task-slot declarations, so an
 # untouched install keeps a file an older package can still read.
 SLOT_SCHEMA = 3
@@ -289,6 +314,9 @@ class Service:
         return self.root if name == "default" else self.root / "profiles" / name
 
     def _discover_profiles(self) -> list[str]:
+        return scoped(("discover", str(self.root)), self._discover_profiles_now)
+
+    def _discover_profiles_now(self) -> list[str]:
         root = self.root.resolve(strict=False)
         found: set[str] = set()
         default_config = root / "config.yaml"
@@ -1047,7 +1075,8 @@ class Service:
 
     def delegation_preview(self, body: dict) -> dict[str, Any]:
         from .native_service import preview
-        return preview(self, body)
+        with read_scope():
+            return preview(self, body)
 
     def initial_setup_preview(self, body: dict) -> dict[str, Any]:
         return native_service.initial_setup_preview(self, body)
@@ -1063,6 +1092,10 @@ class Service:
     def status(self, *, paged: bool = False, profiles: list[str] | None = None) -> dict[str, Any]:
         """Settings status. ``paged`` bounds the reply size: rows that do not fit are named in
         ``pending_profiles`` and are read with a further call passing them as ``profiles``."""
+        with read_scope():
+            return self._status_now(paged=paged, profiles=profiles)
+
+    def _status_now(self, *, paged: bool, profiles: list[str] | None) -> dict[str, Any]:
         discovered = self._discover_profiles()
         if profiles is not None:
             if not paged:

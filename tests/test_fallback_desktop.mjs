@@ -382,7 +382,7 @@ test('native scope handler sends exact fallback-preview payload, uses notice ins
   assert.throws(() => h.byId('native-fallback-review'))
   assert.equal(h.calls.some(call => call.operation === 'apply'), true)
   assert.deepEqual(h.calls.filter(call => call.operation === 'apply').map(call => call.body), [{ plan_id: 'fallback-plan' }])
-  assert.equal(h.byId('native-fallback-enabled').props.disabled, true)
+  assert.equal(h.byId('native-fallback-enabled').props.disabled, false, 'a confirmed save reloads the saved state and unlocks by itself')
 })
 
 test('coding fallback handler sends only routing scope with both cost and fresh-task consent', async () => {
@@ -584,7 +584,7 @@ test('whole-page handler includes all three changed fallbacks with independent t
   assert.equal(h.calls.some(x => x.operation === 'fallback-preview'), false)
   assert.throws(() => h.byId('confirm-preview'))
   assert.deepEqual(h.calls.filter(x => x.operation === 'apply').map(x => x.body), [{ plan_id: 'combined-plan' }])
-  assert.equal(h.byId('native-fallback-enabled').props.disabled, true)
+  assert.equal(h.byId('native-fallback-enabled').props.disabled, false, 'a confirmed save reloads and unlocks by itself')
 })
 
 test('whole-page model-only preview preserves untouched fallback policies', async () => {
@@ -681,7 +681,7 @@ test('saved target copy is not repeated on later model-only save while selection
     managed: true, enabled: true, chain: [{ provider: 'independent', model: 'other-spare' }], consent: consent('native')
   })
   h.setData(data)
-  globalButton(h, '실제 상태 확인 후 편집 재개')
+  globalButton(h, '상태 새로고침')
   await h.flush()
   assert.equal(h.byId('native-fallback-target-other').props.checked, true)
   edit(h, 'model-main-model', 'later-model-only')
@@ -689,7 +689,7 @@ test('saved target copy is not repeated on later model-only save while selection
   await h.flush()
   assert.equal('fallback_updates' in h.calls.filter(x => x.operation === 'preview').at(-1).body, false)
   // A new explicit target action does create a new one-time copy intent.
-  globalButton(h, '실제 상태 확인 후 편집 재개'); await h.flush()
+  await h.flush()
   h.check('native-fallback-target-other', false)
   globalButton(h, '저장')
   await h.flush()
@@ -726,4 +726,20 @@ test('one catalog choice edits provider and model of a legacy spare entry in the
   model({ target: { value: 'late-stale-edit' } }); h.render()
   assert.equal(h.byId('delegation-chain-0-model').props.value, 'sample-flash')
   assert.equal(h.calls.length, 0)
+})
+
+test('a fallback save does not reload over an unsaved model edit; the edit and its lock stay until an explicit reload', async () => {
+  const h = harness()
+  edit(h, 'model-main-model', 'unsaved-main')
+  h.click('native-fallback-target-source')
+  h.click('native-fallback-preset-audited-non-openai')
+  h.check('native-fallback-enabled', true)
+  await h.click('native-fallback-save')
+  await h.flush()
+  assert.equal(h.calls.filter(call => call.operation === 'apply').length, 1)
+  assert.equal(h.calls.filter(call => call.operation === 'status').length, 0, 'no automatic reload')
+  assert.equal(h.byId('model-main-model').props.value, 'unsaved-main', 'the unsaved edit is still on the page')
+  assert.equal(h.byId('native-fallback-enabled').props.disabled, true)
+  globalButton(h, '실제 상태 확인 후 편집 재개'); await h.flush()
+  assert.equal(h.byId('native-fallback-enabled').props.disabled, false)
 })

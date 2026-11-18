@@ -67,7 +67,9 @@ def test_adapter_uses_legacy_yaml_only_when_host_module_is_absent(monkeypatch):
         return legacy
     monkeypatch.setattr(importlib, 'import_module', load)
     path = Path(__file__).resolve().parents[1] / 'model_router/yaml_compat.py'
-    assert runpy.run_path(str(path))['yaml'] is legacy
+    namespace = runpy.run_path(str(path))
+    # `yaml` is a thin proxy (content-memoized safe_load); the selected module is the legacy one.
+    assert namespace['_module'] is legacy
     assert calls == ['hermes_yaml', 'yaml']
 
 

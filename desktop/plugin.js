@@ -962,7 +962,8 @@ export async function readPagedStatus(send) {
 }
 
 // The backend refuses a request body over 16,384 characters before reading it; say why up front.
-export const PREVIEW_BODY_LIMIT = 16384
+// Bodies over one command line are staged in pieces (see stagedBodyChunks); this is the overall cap.
+export const PREVIEW_BODY_LIMIT = 400000
 export const BODY_TOO_LARGE_MESSAGE = '한 번에 저장하기에는 내용이 너무 큽니다. 적용 대상 프로필을 줄여 여러 번에 나눠 저장하세요.'
 export const previewBodyTooLarge = body => Boolean(body) && JSON.stringify(body).length > PREVIEW_BODY_LIMIT
 
@@ -2475,11 +2476,34 @@ async function nativeBackendCallOnce(path, options = {}) {
   const operation = { '/status': 'status', '/preview': 'preview', '/fallback-preview': 'fallback-preview', '/delegation-preview': 'delegation-preview', '/initial-setup-preview': 'initial-setup-preview', '/apply': 'apply' }[path]
   if (!operation) throw new Error('지원하지 않는 플러그인 요청입니다.')
   const profile = options.profile || host.state.profile.get() || 'default'
-  const reply = await host.request('cli.exec', {
-    argv: ['--profile', profile, 'model-router', operation, '--body', JSON.stringify(options.body || {})],
-    profile,
-    timeout: 180
-  }, 210000)
+  const params = (name, body) => ({ argv: ['--profile', profile, 'model-router', name, '--body', JSON.stringify(body)], profile, timeout: 180 })
+  let exec = (name, body) => host.request('cli.exec', params(name, body), 210000)
+  let body = options.body || {}
+  const text = JSON.stringify(body)
+  if (text.length > CLI_BODY_INLINE_LIMIT && STAGED_OPERATIONS.has(operation)) {
+    // Every piece and the final request go to the one gateway that was live when the transfer
+    // started (host.request re-resolves the live socket per call); a switch aborts the transfer.
+    const pinned = typeof host.getGateway === 'function' ? host.getGateway() : null
+    const connection = host.state?.connectionId?.get?.(), activeProfile = host.state.profile.get()
+    if (!pinned || typeof pinned.request !== 'function') throw new Error('현재 연결을 확인할 수 없어 저장 내용을 전달하지 않았습니다. 설정은 변경되지 않았습니다.')
+    exec = (name, body) => {
+      if (host.getGateway() !== pinned || host.state?.connectionId?.get?.() !== connection || host.state.profile.get() !== activeProfile) {
+        return Promise.reject(new Error('저장 도중 연결 또는 프로필이 바뀌어 전달을 멈췄습니다. 설정은 변경되지 않았습니다.'))
+      }
+      return pinned.request('cli.exec', params(name, body), 210000)
+    }
+    const id = stageId(), chunks = stagedBodyChunks(text)
+    if (chunks.length > STAGED_MAX_CHUNKS) throw new Error('한 번에 저장하기에는 내용이 너무 큽니다. 적용 대상 프로필을 줄여 여러 번에 나눠 저장하세요.')
+    for (const [index, chunk] of chunks.entries()) {
+      const staged = await exec('stage', { id, index, total: chunks.length, chunk })
+      const frame = String(staged?.output || '').split(/\r?\n/).find(value => value.startsWith('MODEL_ROUTER_JSON:'))
+      let ok = false
+      try { ok = !staged?.blocked && staged.code === 0 && JSON.parse(frame.slice('MODEL_ROUTER_JSON:'.length))?.staged === true } catch {}
+      if (!ok) throw new Error('저장 내용을 전달하지 못했습니다. 설정은 변경되지 않았습니다.')
+    }
+    body = { staged: { id, total: chunks.length, length: text.length } }
+  }
+  const reply = await exec(operation, body)
   if (reply.blocked) throw new Error(reply.hint || '요청이 차단되었습니다.')
   const line = String(reply.output || '').split(/\r?\n/).find(value => value.startsWith('MODEL_ROUTER_JSON:'))
   if (!line) throw new Error('플러그인 응답을 확인할 수 없습니다. 활성화 상태를 확인하세요.')
@@ -2490,6 +2514,33 @@ async function nativeBackendCallOnce(path, options = {}) {
   return data
 }
 
+// cli.exec passes --body as one Windows command-line argument (32,767 characters with escaping).
+// Larger settings bodies go in pieces through the plugin's `stage` operation.
+export const CLI_BODY_INLINE_LIMIT = 12000
+const STAGED_OPERATIONS = new Set(['preview', 'fallback-preview', 'delegation-preview', 'initial-setup-preview'])
+const STAGED_MAX_CHUNKS = 128
+export function stagedBodyChunks(text, size = 8000) {
+  const chunks = []
+  let start = 0
+  while (start < text.length) {
+    let end = Math.min(text.length, start + size)
+    // Never split a surrogate pair: each piece must be well-formed text on its own.
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end -= 1
+    // Keep each piece's own JSON encoding (quotes and backslashes doubled) under the inline limit.
+    while (JSON.stringify(text.slice(start, end)).length > 11000 && end - start > 1) {
+      end = start + Math.floor((end - start) / 2)
+      if (/[\uD800-\uDBFF]/.test(text[end - 1])) end -= 1
+    }
+    chunks.push(text.slice(start, end))
+    start = end
+  }
+  return chunks
+}
+function stageId() {
+  const bytes = new Uint8Array(16)
+  globalThis.crypto.getRandomValues(bytes)
+  return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('')
+}
 function RouterPage({ ctx: pluginContext }) {
   // Native CLI RPC uses the same Service as REST and works without restarting
   // an already-running Desktop backend to mount newly installed REST routes.
@@ -2533,6 +2584,7 @@ function RouterPage({ ctx: pluginContext }) {
   const [pageError, setPageError] = useState('')
   const [applyOutcome, setApplyOutcome] = useState(null)
   const [needsReload, setNeedsReload] = useState(false)
+  const [autoReloading, setAutoReloading] = useState(false)
   const generationRef = useRef(0)
   const editTurnRef = useRef(null)
   const mountedRef = useRef(true)
@@ -2542,6 +2594,8 @@ function RouterPage({ ctx: pluginContext }) {
   }, [])
   const applyPendingRef = useRef(false)
   const refreshPendingRef = useRef(false)
+  // Which parts of the page hold unsaved edits, as of the latest render (read when a save starts).
+  const dirtyPartsRef = useRef({})
   const needsReloadRef = useRef(false)
   const applyScopeRef = useRef(null)
   const applyPhaseRef = useRef(null)
@@ -2780,6 +2834,10 @@ function RouterPage({ ctx: pluginContext }) {
     catch (error) { nativeDelegationError = error.message }
   }
   const sectionWriteNeeded = modelWriteNeeded || routingCopyPending || nativeWriteNeeded
+  dirtyPartsRef.current = { models: modelDraftChanged, routing: slotDraftChanged || routingTargetEdited, native: Boolean(nativeDraftChanged),
+    timeouts: Boolean(timeoutWriteRequested), 'fallback:native': nativeFallbackDraftChanged || Boolean(fallbackTargetEdits.native),
+    'fallback:routing': routingFallbackDraftChanged || Boolean(fallbackTargetEdits.routing), 'fallback:delegation': delegationFallbackDraftChanged || Boolean(fallbackTargetEdits.delegation),
+    reenable: reenableProfiles.length > 0 }
   const noTargetError = (modelDraftChanged || slotDraftChanged || nativeDraftChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
   // A changed delegation method or spare model that no selected profile can take is never dropped silently.
   const noNativeTargetError = nativeDraftChanged && selectedTargets.length && !nativeWriteTargets.length
@@ -3011,7 +3069,7 @@ function RouterPage({ ctx: pluginContext }) {
     setNeedsReload(true)
   }
 
-  const runSave = async ({ operation, scope = null, snapshot, prepare, beforeApply = null, nativeWrite = false, followUp = null }) => {
+  const runSave = async ({ operation, scope = null, snapshot, prepare, beforeApply = null, nativeWrite = false, followUp = null, covers = [] }) => {
     if (!snapshot || setupPendingRef.current || profilePreparationLocked() || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity) || applyPendingRef.current || needsReloadRef.current) return
     const token = ++generationRef.current
     applyPendingRef.current = true
@@ -3026,6 +3084,9 @@ function RouterPage({ ctx: pluginContext }) {
       setSectionErrors(current => ({ ...current, [scope]: '' }))
     }
     let applyStarted = false
+    let cleanSave = false
+    // Reloading replaces every draft, so it runs by itself only when this save covers every edit.
+    const otherEdits = Object.entries(dirtyPartsRef.current || {}).some(([part, dirty]) => dirty && !covers.includes(part))
     let nativeFenceRecord = null
     const skippedNote = followUp ? `‘${followUp.secondLabel}’ 저장은 시작하지 않았습니다. 새로고침하면 저장하지 않은 편집은 사라지므로 다시 입력해 저장하세요.` : ''
     try {
@@ -3083,6 +3144,7 @@ function RouterPage({ ctx: pluginContext }) {
       if (!followUp || isPartialReceipt(receipt) || !['applied', 'no_change'].includes(receipt?.status)) {
         // A partial or unknown first receipt ends the chain; nothing else is attempted.
         recordApplyReceipt(snapshot, receipt, followUp ? skippedNote : '')
+        cleanSave = !followUp && !isPartialReceipt(receipt) && ['applied', 'no_change'].includes(receipt?.status)
         return
       }
       // The first apply does not move the store revision, but a plan made before it is not reused.
@@ -3098,6 +3160,7 @@ function RouterPage({ ctx: pluginContext }) {
         if (!isSaveCurrent(snapshot, token)) throw new Error('저장 도중 연결 또는 프로필이 바뀌었습니다.')
         if (isPartialReceipt(second) || !['applied', 'no_change'].includes(second?.status)) throw new Error(second?.error || '적용 결과를 확인할 수 없습니다.')
         setApplyOutcome({ kind: 'success', result: { [followUp.firstLabel]: receipt, [followUp.secondLabel]: second } })
+        cleanSave = true
       } catch (error) {
         const firstDone = receipt.status === 'no_change' ? `‘${followUp.firstLabel}’: 바뀐 내용이 없었습니다.` : `‘${followUp.firstLabel}’: 저장했습니다.`
         const reason = `(사유: ${error?.message || '알 수 없는 오류'})`
@@ -3125,6 +3188,14 @@ function RouterPage({ ctx: pluginContext }) {
         markApplyUnknown(snapshot, '저장 도중 연결 또는 프로필이 바뀌어 결과를 확인할 수 없습니다. 다시 저장하지 마세요. 원래 연결·프로필로 돌아가 실제 상태를 새로고침하세요.')
       }
       releaseSaveLock(token)
+      // A confirmed save reloads the saved state by itself so editing can continue; partial or
+      // unknown results still wait for an explicit refresh.
+      if (cleanSave && !otherEdits && generationRef.current === token) {
+        setAutoReloading(true)
+        void reloadStatus({ keepOutcome: true }).finally(() => setAutoReloading(false))
+      }
+      else if (cleanSave && otherEdits && generationRef.current === token) setApplyOutcome(current => current?.kind === 'success'
+        ? { ...current, message: '저장했습니다. 다른 곳에 저장하지 않은 편집이 있어 자동으로 다시 불러오지 않았습니다. 아래 버튼으로 다시 불러오면 그 편집은 사라집니다.' } : current)
     }
   }
 
@@ -3134,7 +3205,7 @@ function RouterPage({ ctx: pluginContext }) {
     const targetNames = scope === 'native' ? [...nativeFallbackTargets] : scope === 'routing' ? [...routingFallbackTargets] : [...delegationFallbackTargets]
     const value = deepClone(scope === 'native' ? nativeFallbackDraft : scope === 'routing' ? routingFallbackDraft : delegationFallbackDraft)
     return runSave({
-      operation: '/fallback-preview', scope, snapshot,
+      operation: '/fallback-preview', scope, snapshot, covers: [`fallback:${scope}`],
       prepare: () => ({ body: buildFallbackPreviewBody(snapshot.revision, scope, targetNames, value, snapshot.profiles), errors: [] })
     })
   }
@@ -3160,10 +3231,10 @@ function RouterPage({ ctx: pluginContext }) {
       nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
     const store = { operation: '/preview', firstLabel: '맡기는 방식과 예비 모델', secondLabel: '모델 변경',
       prepare: () => buildModelSectionPreviewBody(snapshot, storeScope) }
-    if (!nativeWriteNeeded) return runSave({ operation: '/preview', scope: 'models', snapshot, prepare: store.prepare })
+    if (!nativeWriteNeeded) return runSave({ operation: '/preview', scope: 'models', snapshot, prepare: store.prepare, covers: ['models', 'routing'] })
     if (nativeDelegationError || !nativeStorageAvailable || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity) ||
       !nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current)) return
-    return runSave({ operation: '/delegation-preview', scope: 'models', snapshot, nativeWrite: true,
+    return runSave({ operation: '/delegation-preview', scope: 'models', snapshot, nativeWrite: true, covers: ['models', 'routing', 'native'],
       beforeApply: () => nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current),
       prepare: () => ({ body: buildNativeDelegationBatchBody(snapshot.revision, snapshot.profile, snapshot.nativeTargets,
         snapshot.nativeDraft, snapshot.nativeBaselines, snapshot.profiles), errors: [] }),
@@ -3178,7 +3249,7 @@ function RouterPage({ ctx: pluginContext }) {
     const routing = deepClone(profileBaselines[selectedProfile]?.routing || draft.routing)
     delete routing.slots
     const snapshot = freezeDeep({ ...base, draft: { ...base.draft, routing }, routingProfiles: uniqueProfileNames([...loadedRoutingProfiles, ...reenableProfiles]), routingTargets: [], routingTargetError: '' })
-    return runSave({ operation: '/preview', scope: 'models', snapshot, prepare: () => buildScopedPreviewBody(snapshot, 'routing') })
+    return runSave({ operation: '/preview', scope: 'models', snapshot, covers: ['reenable'], prepare: () => buildScopedPreviewBody(snapshot, 'routing') })
   }
 
   const saveSection = saveScope => {
@@ -3188,7 +3259,7 @@ function RouterPage({ ctx: pluginContext }) {
     if (!['models', 'routing', 'timeouts'].includes(saveScope)) return
     const snapshot = captureSaveSnapshot()
     return runSave({
-      operation: '/preview', scope: saveScope, snapshot,
+      operation: '/preview', scope: saveScope, snapshot, covers: [saveScope],
       prepare: () => {
         const prepared = buildScopedPreviewBody(snapshot, saveScope)
         if (saveScope === 'routing' && snapshot.routingTargetError) {
@@ -3203,7 +3274,7 @@ function RouterPage({ ctx: pluginContext }) {
     if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || !currentRow || !draft || !statusQuery.data || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     const snapshot = captureSaveSnapshot()
     return runSave({
-      operation: '/preview', snapshot,
+      operation: '/preview', snapshot, covers: ['models', 'routing', 'timeouts', 'fallback:native', 'fallback:routing', 'fallback:delegation'],
       prepare: () => {
         const combined = buildCombinedPreviewBody(
           snapshot.revision,
@@ -3245,7 +3316,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
 
-  const reloadStatus = async () => {
+  const reloadStatus = async ({ keepOutcome = false } = {}) => {
     if (setupPendingRef.current || profilePreparationReloadBlocked(scopeKey) || applyPendingRef.current || refreshPendingRef.current) return
     const fenceBefore = readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity)
     if (fenceBefore?.foreignScope) { setPageError('이전 저장을 시작한 연결과 프로필로 돌아가 결과를 먼저 확인하세요.'); return }
@@ -3330,14 +3401,16 @@ function RouterPage({ ctx: pluginContext }) {
     needsReloadRef.scopeKey = null
     applyScopeRef.current = null
     setNeedsReload(false)
-    setApplyOutcome(null)
+    if (!keepOutcome) setApplyOutcome(null)
   }
 
   if (readyScope !== scopeKey || statusQuery.isPending) {
     return jsxs('main', { style: styles.page, 'aria-busy': true, children: [jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsxs('div', { role: 'status', style: styles.statusLine, children: [jsx(GlyphSpinner, {}), jsx('span', { style: styles.hint, children: '프로필 설정을 불러오고 있습니다.' })] })] })
   }
 
-  if (statusQuery.isError) {
+  // A failed status read shows the error screen, except right after a save: then the page stays
+  // (editing is already locked by needsReload) so the save outcome and its retry button remain.
+  if (statusQuery.isError && !(statusQuery.data && needsReload)) {
     return jsxs('main', { style: styles.page, children: [jsx('h1', { style: styles.title, children: '모델 및 라우팅' }), jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '설정 서비스를 사용할 수 없습니다.' }), jsx('p', { style: styles.hint, children: '이 프로필의 설정 기능에 연결하지 못했습니다. 플러그인이 설치되고 켜져 있는지 확인한 뒤 다시 불러오세요. 기존 설정은 바꾸지 않습니다.' }), jsx('p', { style: styles.hint, children: statusQuery.error?.message || '상태 요청에 실패했습니다.' }), jsx(Button, { size: 'sm', variant: 'secondary', onClick: () => void statusQuery.refetch(), children: '다시 불러오기' })] }), jsx(BackendPreparationGuide, { profile: activeProfile })] })
   }
 
@@ -3755,7 +3828,7 @@ function RouterPage({ ctx: pluginContext }) {
       profiles.length ? fallbackManagement : null,
       revisionChanged ? jsx('div', { role: 'alert', style: styles.warning, children: '다른 화면에서 설정이 변경되어 저장을 잠갔습니다. 편집값은 아직 보존되어 있습니다. 필요한 값을 확인한 뒤 상태 새로고침으로 최신 설정을 불러와 다시 편집하세요.' }) : null,
       pageError ? jsx('div', { role: 'alert', style: styles.warning, children: pageError }) : null,
-      applyOutcome ? jsxs('div', { role: 'status', 'aria-live': 'polite', style: applyOutcome.kind === 'success' ? styles.message : styles.warning, children: [jsx('strong', { children: applyOutcome.kind === 'prepared' ? '플러그인 준비 상태가 달라졌습니다.' : applyOutcome.kind === 'success' ? '적용 요청이 완료되었습니다.' : applyOutcome.kind === 'partial' ? '일부 설정만 적용되었을 수 있습니다.' : '적용 결과를 확인할 수 없습니다.' }), jsx('p', { style: styles.hint, children: applyOutcome.message || (applyOutcome.kind === 'success' ? '실제 상태를 새로고침해 확인하세요. 저장한 내용을 다시 확인한 뒤 편집을 계속하세요.' : '다시 적용하지 마세요. 상태를 새로고침해 실제 반영 여부를 확인하세요.') }), applyOutcome.result ? jsxs('details', { children: [jsx('summary', { style: { cursor: 'pointer', fontSize: '0.8rem' }, children: '세부 결과 보기 · 고급' }), jsx('pre', { style: styles.value, children: readableValue(applyOutcome.result) })] }) : null] }) : null,
+      applyOutcome ? jsxs('div', { role: 'status', 'aria-live': 'polite', style: applyOutcome.kind === 'success' ? styles.message : styles.warning, children: [jsx('strong', { children: applyOutcome.kind === 'prepared' ? '플러그인 준비 상태가 달라졌습니다.' : applyOutcome.kind === 'success' ? '적용 요청이 완료되었습니다.' : applyOutcome.kind === 'partial' ? '일부 설정만 적용되었을 수 있습니다.' : '적용 결과를 확인할 수 없습니다.' }), jsx('p', { style: styles.hint, children: applyOutcome.message || (applyOutcome.kind === 'success' ? (autoReloading ? '저장한 상태를 다시 불러오고 있습니다. 끝나면 바로 편집을 이어갈 수 있습니다.' : needsReload ? '저장했습니다. 저장한 상태를 자동으로 다시 불러오지 못했습니다. 아래 버튼으로 다시 불러오세요.' : '저장한 상태를 다시 불러왔습니다. 편집을 이어가세요.') : '다시 적용하지 마세요. 상태를 새로고침해 실제 반영 여부를 확인하세요.') }), applyOutcome.result ? jsxs('details', { children: [jsx('summary', { style: { cursor: 'pointer', fontSize: '0.8rem' }, children: '세부 결과 보기 · 고급' }), jsx('pre', { style: styles.value, children: readableValue(applyOutcome.result) })] }) : null] }) : null,
       nativeFence ? jsxs('div', { id: 'native-save-recovery', style: styles.warning, children: [
         jsx('p', { children: nativeFence.foreignScope ? '다른 연결에서 시작한 저장 결과를 확인해야 합니다. 저장을 시작한 원래 연결과 프로필로 돌아가 주세요.' : nativeFence.state === 'pending' ? '이전에 시작한 저장이 끝났는지 확인해야 합니다. 같은 설정을 다시 저장하지 마세요.' : nativeFence.state === 'settled' ? '이전에 저장한 결과를 다시 불러온 뒤 편집할 수 있습니다.' : '이전 저장 결과를 확인할 수 없습니다. 같은 설정을 다시 저장하지 말고, 원래 연결에서 저장 작업이 끝났는지 확인하세요.' }),
         (nativeFence.state === 'unknown' || (nativeFence.state === 'pending' && !applyPending)) && !nativeFence.foreignScope ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.6rem' }, children: [
@@ -4950,7 +5023,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.11.3',
+  version: '0.11.4',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

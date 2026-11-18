@@ -25,7 +25,7 @@ def register(ctx):
             return False
 
     def cli_setup(parser):
-        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "apply", "role-proposal-context", "role-proposal", "profile-jobs-status", "profile-jobs-configure"])
+        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "apply", "stage", "role-proposal-context", "role-proposal", "profile-jobs-status", "profile-jobs-configure"])
         parser.add_argument("--body", default="{}")
 
     def cli_handler(args):
@@ -43,6 +43,16 @@ def register(ctx):
             body = json.loads(args.body)
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
+            if args.operation == "stage":
+                from .model_router import staged_body
+                print("MODEL_ROUTER_JSON:" + json.dumps(staged_body.stage(home, body), separators=(",", ":")))
+                return 0
+            if set(body) == {"staged"}:
+                # A large settings body arrives in pieces staged by earlier calls.
+                from .model_router import staged_body
+                if args.operation not in staged_body.STAGED_OPERATIONS:
+                    raise ValueError("this operation does not accept a staged body")
+                body = staged_body.assemble(home, body)
             def operation(service):
                 def completion_available():
                     try:

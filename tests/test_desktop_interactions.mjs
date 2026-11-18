@@ -63,6 +63,8 @@ function harness(options = {}) {
     const result = await (operation === 'status' ? statusResponder(body) : responder(operation, body))
     return { code: 0, output: `MODEL_ROUTER_JSON:${JSON.stringify(result)}\n` }
   } }
+  const gatewayInstance = { request: (method, args) => host.request(method, args) }
+  host.getGateway = () => gatewayInstance
   host.profileRoutes = async () => ['default', 'claire', 'other'].map(profile => ({ mode: 'local', connectionId: 'local', profile, targetProfile: profile, primary: profile === 'claire' }))
   host.requestProfile = async (descriptor, method, args) => {
     assert.equal(args.profile, descriptor.profile)
@@ -130,7 +132,7 @@ function harness(options = {}) {
   render()
   return { calls, state, host, render, byId, button, click, clickLabel, selected, selectProfile, flush,
     unmount() { for (const cleanup of cleanups.values()) cleanup(); cleanups.clear() },
-    setResponder(fn) { responder = fn }, setStatusResponder(fn) { statusResponder = fn }, setRefetcher(fn) { refetcher = fn }, setData(next) { data = next }, data: () => data,
+    setResponder(fn) { responder = fn }, setStatusResponder(fn) { statusResponder = fn }, setRefetcher(fn) { refetcher = fn }, setQueryError(value) { query.isError = value }, setData(next) { data = next }, data: () => data,
     check(id, value) { byId(id).props.onCheckedChange(value); render() },
     input(id, value) { byId(id).props.onChange({ target: { value } }); render() },
     selectValue(id) { return find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === id)).props.value },
@@ -290,7 +292,6 @@ test('preset click fills exact BAT models in draft only and does not alter custo
   assert.deepEqual(payload.routing_targets, [])
   assert.equal(payload.models.delegation.reasoning, 'max')
   assert.equal(payload.models.compression.reasoning, 'medium')
-  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
   h.click('preset-openai')
   for (const [role, fields] of Object.entries(models)) for (const [field, value] of Object.entries(fields))
     assert.equal(field === 'reasoning' ? h.selectValue(`model-${role}-reasoning`) : h.byId(`model-${role}-${field}`).props.value, value)
@@ -320,9 +321,9 @@ test('single save validates then applies once without a preview or confirmation 
   h.click('global-save'); await h.flush()
   assert.deepEqual(h.calls.map(c => c.operation), ['preview', 'apply'])
   assert.deepEqual(h.calls[1].body, { plan_id: 'test-plan' })
-  assert.equal(h.byId('preset-non-openai').props.disabled, true)
-  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  // A confirmed save reloads the saved state by itself; editing continues without a manual refresh.
   assert.equal(h.byId('preset-non-openai').props.disabled, false)
+  assert.throws(() => h.button('실제 상태 확인 후 편집 재개'))
 })
 
 test('save locks editing and duplicate clicks even while validation is pending', async () => {
@@ -1256,6 +1257,8 @@ test('profiles with task routing off get a separate re-enable save that changes 
   g.check('routing-reenable-other', true); g.input('model-main-model', 'model-only')
   g.click('model-section-save'); await g.flush()
   assert.deepEqual(g.calls[0].body.routing_profiles, ['claire'], 'the model save never changes membership')
+  assert.equal(g.byId('routing-reenable-other').props.checked, true, 'a pending re-enable choice survives a model save (no automatic reload over it)')
+  assert.equal(g.calls.filter(call => call.operation === 'status').length, 0)
 })
 
 test('a review slot on the same model as complex code says so without blocking the save', () => {
@@ -1276,11 +1279,9 @@ test('a hand-picked target list persists, but its copy intent ends with a profil
   h.input('model-main-model', 'new-main')
   h.click('global-save'); await h.flush()
   assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [], 'slot models are not copied without an edit or a fresh choice')
-  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
   h.click('model-target-all')
   h.click('global-save'); await h.flush()
   assert.deepEqual(h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets, ['default', 'claire', 'other'])
-  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
   h.input('model-main-model', 'next-main')
   h.click('global-save'); await h.flush()
   assert.deepEqual(h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets, [])
@@ -1469,9 +1470,38 @@ test('a target that stops being editable between the click and the fresh status 
   assert.match(text(h.byId('model-section-targets')), /저장되지 않았습니다\. 원본 또는 선택한 프로필의 설정이 바뀌었습니다/)
 })
 
-test('a request too large for the backend is refused up front with the reason, before anything is sent', async () => {
+test('a body longer than one command line is staged in pieces and sent by reference', async () => {
   const h = harness({ data: slotFixture() })
-  h.input('model-main-model', 'm'.repeat(17000))
+  h.setResponder(operation => operation === 'stage' ? { staged: true } : operation === 'apply' ? { status: 'applied' } : { plan_id: 'big-plan', changes: [] })
+  h.input('model-main-model', 'm'.repeat(17000) + '😀"\\')
+  h.click('model-section-save'); await h.flush()
+  const stages = h.calls.filter(c => c.operation === 'stage'), preview = h.calls.find(c => c.operation === 'preview')
+  assert.ok(stages.length >= 2)
+  assert.ok(stages.every(c => JSON.stringify(c.body).length <= 12000), 'each piece fits one command line')
+  assert.deepEqual(stages.map(c => c.body.index), stages.map((_, index) => index))
+  assert.ok(stages.every(c => c.body.id === stages[0].body.id && c.body.total === stages.length && /^[0-9a-f]{32}$/.test(c.body.id)))
+  const text = stages.map(c => c.body.chunk).join('')
+  assert.deepEqual(preview.body, { staged: { id: stages[0].body.id, total: stages.length, length: text.length } })
+  assert.equal(JSON.parse(text).models.main.model, 'm'.repeat(17000) + '😀"\\')
+  assert.deepEqual(h.calls.filter(c => c.operation === 'apply').map(c => c.body), [{ plan_id: 'big-plan' }])
+})
+
+test('a gateway switch during a staged transfer stops before any later piece or the request is sent', async () => {
+  const h = harness({ data: slotFixture() })
+  let pieces = 0
+  h.setResponder(operation => {
+    if (operation === 'stage') { pieces += 1; if (pieces === 1) h.host.getGateway = () => ({ request: async () => { throw new Error('sent to the new gateway') } }); return { staged: true } }
+    return operation === 'apply' ? { status: 'applied' } : { plan_id: 'p', changes: [] }
+  })
+  h.input('model-main-model', 'm'.repeat(30000))
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls.map(c => c.operation), ['stage'])
+  assert.match(text(h.byId('model-section-targets')), /연결 또는 프로필이 바뀌어 전달을 멈췄습니다/)
+})
+
+test('a request too large even for staging is refused up front with the reason, before anything is sent', async () => {
+  const h = harness({ data: slotFixture() })
+  h.input('model-main-model', 'm'.repeat(410000))
   h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls, [])
   assert.match(text(h.byId('model-section-targets')), /저장되지 않았습니다\. 한 번에 저장하기에는 내용이 너무 큽니다\. 적용 대상 프로필을 줄여/)
@@ -1484,4 +1514,24 @@ test('the restart reminder shows only before any slot setting was ever saved', (
   assert.throws(() => harness({ data: stored }).byId('slot-first-save-note'))
   const spare = slotFixture(); spare.profiles[2].native_delegation.policy_schema = 2
   assert.throws(() => harness({ data: spare }).byId('slot-first-save-note'))
+})
+
+test('a failed status read: error screen for an ordinary refresh; after a save the outcome stays locked until a retry succeeds', async () => {
+  // Ordinary failed refresh with cached data: the error screen, nothing editable or saveable.
+  const plain = harness()
+  plain.setQueryError(true); plain.render()
+  assert.throws(() => plain.byId('model-main-model'))
+  assert.throws(() => plain.byId('global-save'))
+  assert.match(text(plain.render()), /설정 서비스를 사용할 수 없습니다/)
+  // After a confirmed save whose automatic reload fails.
+  const h = harness()
+  h.input('model-main-model', 'saved-main')
+  h.setRefetcher(async () => { h.setQueryError(true); return { data: h.data(), error: new Error('refresh failed') } })
+  h.click('global-save'); await h.flush()
+  assert.deepEqual(h.calls.map(c => c.operation), ['preview', 'apply'])
+  assert.match(text(h.render()), /자동으로 다시 불러오지 못했습니다/)
+  assert.equal(h.byId('model-main-model').props.disabled, true)
+  h.setRefetcher(async () => { h.setQueryError(false); return { data: h.data() } })
+  h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
+  assert.equal(h.byId('model-main-model').props.disabled, false)
 })
