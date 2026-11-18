@@ -112,19 +112,19 @@ def test_known_sensitive_source_is_omitted_before_preview_or_model(environment):
     (target / 'SOUL.md').write_text('## Role\nAnalyze evidence\nAPI_KEY = fixture-sensitive-credential-value\n', encoding='utf-8')
     review, req = request(service, root, body)
     assert 'fixture-sensitive' not in json.dumps(review)
-    assert review['source']['soul_role_excerpt'] == ''
+    assert review['source']['soul_text'] == ''
     assert 'soul_sensitive' in review['source']['omitted_sources']
     (target / 'profile.yaml').write_text('description: "API_KEY = fixture-sensitive-credential-value"\n', encoding='utf-8')
     dto = rm.resolve(service, 'worker')
     assert dto['state'] == 'unavailable' and dto['default_description'] == ''
 
 
-def test_fenced_example_role_is_not_source_material(environment):
+def test_whole_soul_is_sent_verbatim_including_fenced_examples(environment):
     service, root, target, body = environment
-    (target / 'SOUL.md').write_text('```markdown\n## Role\nPRIVATE_FENCED_EXAMPLE\n```\n## Role\nCollect evidence\n## Other\nPRIVATE_OTHER\n', encoding='utf-8')
+    text = '```markdown\n## Role\nFENCED_EXAMPLE\n```\n## Role\nCollect evidence\n## Other\nOTHER\n'
+    (target / 'SOUL.md').write_text(text, encoding='utf-8')
     review, _ = request(service, root, body)
-    assert review['source']['soul_role_excerpt'] == 'Collect evidence'
-    assert 'PRIVATE_' not in json.dumps(review)
+    assert review['source']['soul_text'] == text.strip()
 
 
 def test_hardlinked_skill_entry_is_not_followed_or_sent(environment):

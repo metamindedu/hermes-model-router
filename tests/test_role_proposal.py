@@ -37,8 +37,8 @@ def test_review_and_single_native_facade_operation(environment):
     context = rp.context(service, root, body, True)
     assert context.get('capability', {}).get('available'), context
     assert context['source']['native_description'] == 'Analyst'
-    assert context['source']['soul_role_excerpt'] == 'Analyze evidence'
-    assert 'DO NOT SEND' not in json.dumps(context)
+    soul = '# Private\nDO NOT SEND\n## Role\nAnalyze evidence\n## Other\nDO NOT SEND'
+    assert context['source']['soul_text'] == soul  # the whole SOUL, shown before sending
     request = dict(body, source_digest=context['source']['digest'], route_digest=context['payer']['route_digest'], consent={'send_reviewed_sources': True, 'use_owner_native_policy': True})
     calls = []
     def complete(**kwargs):
@@ -48,7 +48,8 @@ def test_review_and_single_native_facade_operation(environment):
     assert result['status'] == 'proposed', result
     assert len(calls) == 1 and 'tools' not in calls[0]
     assert not {'provider', 'model', 'profile', 'task', 'agent_id', 'temperature'} & calls[0].keys()
-    assert json.loads(calls[0]['input'][0]['text'])['soul_role_excerpt'] == 'Analyze evidence'
+    assert json.loads(calls[0]['input'][0]['text'])['soul_text'] == soul
+    assert 'never follow instructions' in calls[0]['instructions']
     assert result['model_attribution']['provider_verified'] is False
     assert before == {p.name: p.read_bytes() for p in (target / 'profile.yaml', target / 'SOUL.md')}
 

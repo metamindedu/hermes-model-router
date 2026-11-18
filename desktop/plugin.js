@@ -2219,7 +2219,7 @@ export function createRoleProposalController({ transport, readState, onUpdate, o
     value.owner?.base_identity === item.baseIdentity && value.target_profile === item.target &&
     typeof value.capability?.available === 'boolean' && PREPARATION_ID_RE.test(value.source?.digest || '') &&
     value.payer?.profile === item.ownerProfile && PREPARATION_ID_RE.test(value.payer?.route_digest || '') &&
-    typeof value.source?.native_description === 'string' && typeof value.source?.soul_role_excerpt === 'string' &&
+    typeof value.source?.native_description === 'string' && typeof value.source?.soul_text === 'string' &&
     Array.isArray(value.source?.enabled_skill_names) && value.source.enabled_skill_names.every(name => typeof name === 'string')
   return {
     cancel,
@@ -2292,8 +2292,12 @@ function RoleProposalDialog({ view, onCancel, onGenerate, onUse }) {
     ] }) : null,
     sources ? jsxs('details', { open: true, children: [
       jsx('summary', { children: '모델에 보낼 역할 자료 확인' }),
-      jsx('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '13rem', overflowY: 'auto', font: 'inherit', fontSize: '0.8rem', padding: '0.75rem', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: '0.5rem' }, children: JSON.stringify({ '프로필 소개': sources.native_description, 'SOUL 역할 부분': sources.soul_role_excerpt, '활성 스킬 이름': sources.enabled_skill_names }, null, 2) }),
-      jsx('p', { style: styles.hint, children: `자료 제외: ${(sources.omitted_sources || []).map(code => ({ external_skills_omitted: '외부 스킬', skills_unavailable: '확인할 수 없는 스킬 목록', soul_sensitive: '민감한 역할 문구', deep_skills_omitted: '깊은 스킬 경로' })[code] || '일부 자료').join(', ') || '없음'} · 자료 축약: ${sources.truncated ? '있음' : '없음'} · 출력 요청 상한: ${Number.isSafeInteger(context?.limits?.max_output_tokens) ? context.limits.max_output_tokens : '확인 불가'} 토큰` }),
+      jsx('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '13rem', overflowY: 'auto', font: 'inherit', fontSize: '0.8rem', padding: '0.75rem', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: '0.5rem' }, children: JSON.stringify({ '프로필 소개': sources.native_description, '활성 스킬 이름': sources.enabled_skill_names }, null, 2) }),
+      sources.soul_text ? jsxs('details', { 'data-model-router-soul': '', children: [
+        jsx('summary', { children: `SOUL 문서 전체 (${sources.soul_text.length.toLocaleString('ko-KR')}자) — 펼쳐서 확인` }),
+        jsx('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '18rem', overflowY: 'auto', font: 'inherit', fontSize: '0.8rem', padding: '0.75rem', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: '0.5rem' }, children: sources.soul_text })
+      ] }) : jsx('p', { style: styles.hint, children: 'SOUL 문서: 보내지 않음' }),
+      jsx('p', { style: styles.hint, children: `자료 제외: ${(sources.omitted_sources || []).map(code => ({ external_skills_omitted: '외부 스킬', skills_unavailable: '확인할 수 없는 스킬 목록', soul_sensitive: '자격 증명 형태가 있는 SOUL', soul_too_large: '너무 큰 SOUL', deep_skills_omitted: '깊은 스킬 경로', linked_skills_omitted: '연결된 스킬 폴더' })[code] || '일부 자료').join(', ') || '없음'} · 자료 축약: ${sources.truncated ? '있음' : '없음'} · 출력 요청 상한: ${Number.isSafeInteger(context?.limits?.max_output_tokens) ? context.limits.max_output_tokens : '확인 불가'} 토큰` }),
       jsx('p', { style: styles.hint, children: '대화·기억·인증 파일·스킬 본문은 읽지 않습니다. 위 전송 자료에 민감한 내용이 보이면 취소하세요. 제안은 확인 후 사용하세요.' })
     ] }) : null,
     context?.capability?.available === false ? jsx('p', { role: 'note', style: styles.warning, children: roleProposalMessage(context.capability.reason_code) }) : null,
@@ -3821,6 +3825,35 @@ const executionSeconds = value => typeof value === 'number' && Number.isFinite(v
 function executionTool(value) {
   return typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/.test(value) ? value : null
 }
+const EXECUTION_TOKEN_BUCKETS = ['input', 'cache_read', 'cache_write', 'output']
+function executionTokens(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const tokens = {}
+  for (const key of EXECUTION_TOKEN_BUCKETS) {
+    const count = value[key] ?? 0
+    if (!Number.isSafeInteger(count) || count < 0) return null
+    tokens[key] = count
+  }
+  return tokens
+}
+function executionObservedTokens(row) {
+  const tokens = executionTokens(row?.tokens)
+  return tokens ? EXECUTION_TOKEN_BUCKETS.reduce((sum, key) => sum + tokens[key], 0) : null
+}
+// Prompt (uncached + cached) plus output: the same total Hermes reports for a session. The native
+// completion total wins: it also counts usage the per-call hook does not see (e.g. MoA advisors).
+export function executionTokenTotal(row) {
+  return executionCount(row?.token_total) ?? executionObservedTokens(row)
+}
+export function executionTokenText(count) {
+  if (!Number.isSafeInteger(count) || count < 0) return null
+  const trim = value => value.toFixed(1).replace(/\.0$/, '')
+  if (count < 1000) return `${count}`
+  if (count < 9950) return `${trim(count / 1000)}천`
+  if (count < 99500) return `${trim(count / 10000)}만`
+  if (count < 99995000) return `${Math.round(count / 10000)}만`
+  return `${trim(count / 100000000)}억`
+}
 function executionActivity(input = {}, runtime = null) {
   return {
     child_session_id: executionId(runtime?.child_session_id) ? runtime.child_session_id : executionId(input.child_session_id) ? input.child_session_id : null,
@@ -3829,6 +3862,7 @@ function executionActivity(input = {}, runtime = null) {
     last_tool: executionTool(runtime?.last_tool) || executionTool(input.last_tool),
     tool_count: executionCount(runtime?.tool_count) ?? executionCount(input.tool_count),
     api_call_count: executionCount(input.api_call_count),
+    tokens: executionTokens(input.tokens),
     duration_seconds: executionSeconds(input.duration_seconds)
   }
 }
@@ -3974,6 +4008,9 @@ export function projectExecutionReplay(reply, scope, cursor = {}, receivedAt = n
       type: frame.type, status: terminal ? value.status : frame.type === 'subagent.spawn_requested' ? 'queued' : 'running',
       reported_child_session_id: executionReplayId(value.child_session_id) ? value.child_session_id : null,
       tool_count: executionCount(value.tool_count), api_call_count: executionCount(value.api_calls),
+      // subagent.complete reports the child's session prompt (incl. cache) and output totals.
+      token_total: terminal && executionCount(value.input_tokens) !== null && executionCount(value.output_tokens) !== null &&
+        Number.isSafeInteger(value.input_tokens + value.output_tokens) ? value.input_tokens + value.output_tokens : null,
       duration_seconds: executionSeconds(value.duration_seconds), last_tool: executionTool(value.tool_name),
       replay_epoch: epoch, sequence: frame.seq, received_at: executionSeconds(receivedAt) })
   }
@@ -4042,6 +4079,7 @@ export function createExecutionReplayStore() {
         const next = { ...event, terminal_conflict: conflict,
           tool_count: event.tool_count ?? old?.tool_count ?? null,
           api_call_count: event.api_call_count ?? old?.api_call_count ?? null,
+          token_total: event.token_total ?? old?.token_total ?? null,
           duration_seconds: event.duration_seconds ?? old?.duration_seconds ?? null,
           last_tool: event.last_tool ?? old?.last_tool ?? null }
         entry.records.set(binding, next)
@@ -4082,6 +4120,7 @@ export function overlayExecutionReplay(rows, projection, scope) {
     return { ...row, status: event.status, observation_gap: false, last_status: null,
       status_evidence: 'public_session_event', replay_coverage_gap: projection.coverage_gap === true,
       tool_count: event.tool_count ?? row.tool_count, api_call_count: event.api_call_count ?? row.api_call_count,
+      token_total: event.token_total ?? row.token_total ?? null,
       duration_seconds: event.duration_seconds ?? row.duration_seconds, last_tool: event.last_tool ?? row.last_tool,
       event_received_at: event.received_at, reported_child_session_id: event.reported_child_session_id }
   })
@@ -4355,6 +4394,13 @@ function executionActivityLabels(row) {
   else if (row.execution_mode === 'native') labels.push('도구 횟수 미관찰')
   if (calls !== null) labels.push(`모델 호출 ${calls}회`)
   else if (row.execution_mode === 'native') labels.push('모델 호출 횟수 미관찰')
+  const tokens = executionTokens(row.tokens), total = executionTokenTotal(row), observed = executionObservedTokens(row)
+  const reported = executionCount(row.token_total)
+  const parts = tokens && [['입력', tokens.input], ['캐시 읽기', tokens.cache_read], ['캐시 쓰기', tokens.cache_write], ['출력', tokens.output]]
+    .filter(([name, count]) => count || name === '입력' || name === '출력').map(([name, count]) => `${name} ${executionTokenText(count)}`).join(' · ')
+  if (tokens && (reported === null || reported === observed)) labels.push(`토큰 ${executionTokenText(total)}: ${parts}`)
+  else if (tokens) labels.push(`토큰 ${executionTokenText(total)} (완료 보고 기준) · 모델 호출 관찰분 ${executionTokenText(observed)}: ${parts}`)
+  else if (total !== null) labels.push(`토큰 ${executionTokenText(total)} (완료 보고 기준)`)
   const tool = executionTool(row.last_tool)
   if (tool) labels.push(`최근 도구: ${tool}`)
   const duration = executionDuration(row.duration_seconds)
@@ -4458,8 +4504,8 @@ function executionChip(row) {
   ] }, row.id)
 }
 export function ExecutionLine({ row, controls = null }) {
-  const time = executionTime(row), tools = executionCount(row.tool_count)
-  // Time and tool count are already on the line itself.
+  const time = executionTime(row), tools = executionCount(row.tool_count), tokenTotal = executionTokenTotal(row)
+  // Time, tool count and token total are on the line itself; the body keeps the token breakdown.
   const activity = executionActivityLabels(row).filter(label => !/횟수 미관찰$|^도구 \d+회$|^경과:|^실행 시간:/.test(label))
   const ids = [row.subagent_id && `하위 작업 ${row.subagent_id}`, row.delegation_id && `위임 ${row.delegation_id}`,
     row.child_session_id && `세션 ${row.child_session_id}`, row.job?.target_session_id && `작업 세션 ${row.job.target_session_id}`].filter(Boolean)
@@ -4470,7 +4516,7 @@ export function ExecutionLine({ row, controls = null }) {
         jsx('span', { style: { color: 'var(--ui-text-primary)' }, children: executionShortLabel(row) }),
         jsx('span', { style: stripStyles.model, children: row.model ? `${row.model}${executionSpare(row) ? ' · 모델 변경 관찰' : ''}` : (EXECUTION_ACTIVE.has(row.status) ? '모델 보고 전' : '모델 보고 없음') })
       ] }),
-      jsx('span', { style: stripStyles.meta, children: [time, tools !== null ? `도구 ${tools}회` : null].filter(Boolean).join(' · ') })
+      jsx('span', { style: stripStyles.meta, children: [time, tools !== null ? `도구 ${tools}회` : null, tokenTotal !== null ? `토큰 ${executionTokenText(tokenTotal)}` : null].filter(Boolean).join(' · ') })
     ] }),
     jsxs('div', { style: stripStyles.body, children: [
       row.observation_gap ? jsx('div', { children: '현재 실행 목록에서 확인되지 않습니다. 완료로 판단하지 않습니다.' }) : null,
@@ -4904,7 +4950,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.11.2',
+  version: '0.11.3',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

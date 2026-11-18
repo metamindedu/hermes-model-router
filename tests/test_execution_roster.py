@@ -376,3 +376,19 @@ def test_activity_does_not_reconcile_all_finished_children(env, monkeypatch):
     r.api_pre(session_id='child', model='fixture-model', provider='fixture')
     assert count < 2000
     assert rows(r)[0]['api_call_count'] == 1
+
+
+def test_token_usage_is_summed_per_child_from_post_api_request(env):
+    r, _, _ = env
+    pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='short')
+    post(r, {'status': 'dispatched', 'subagent_ids': ['short'], 'delegation_id': 'unit'})
+    usage = {'input_tokens': 100, 'output_tokens': 20, 'cache_read_tokens': 1000, 'cache_write_tokens': 5,
+             'reasoning_tokens': 7, 'prompt_tokens': 1105, 'total_tokens': 1125}
+    r.api_post(session_id='child', usage=usage)
+    r.api_post(session_id='child', usage=usage)
+    assert rows(r)[0]['tokens'] == {'input': 200, 'cache_read': 2000, 'cache_write': 10, 'output': 40}
+    r.api_post(session_id='child', usage={'input_tokens': -5})
+    r.api_post(session_id='child', usage=None)
+    r.api_post(session_id='other', usage=usage)
+    assert rows(r)[0]['tokens'] == {'input': 200, 'cache_read': 2000, 'cache_write': 10, 'output': 40}

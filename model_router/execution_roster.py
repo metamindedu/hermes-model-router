@@ -24,6 +24,11 @@ _PURPOSES = {'implementation': 'light', 'mechanical': 'light', 'preliminary-revi
 _BACKENDS = {'model-router', 'model-router-auto', 'model-router-profiles'}
 
 
+# input = uncached prompt; cache_read/cache_write = cached prompt; output includes reasoning where the
+# provider counts it there.
+_TOKEN_BUCKETS = ('input', 'cache_read', 'cache_write', 'output')
+
+
 def _safe(value):
     return value if isinstance(value, str) and '..' not in value and _SAFE.fullmatch(value) else None
 
@@ -139,6 +144,8 @@ class ExecutionRoster:
                           'api_call_count', 'duration_seconds', 'model', 'provider'):
                 if field in child:
                     row[field] = child[field]
+            if child.get('tokens'):
+                row['tokens'] = dict(child['tokens'])
             if child.get('models'):
                 row['models'] = copy.deepcopy(child['models'])
                 row['models_truncated'] = bool(child.get('models_truncated'))
@@ -312,7 +319,29 @@ class ExecutionRoster:
             pass
         return None
 
-    def api_post(self, session_id=None, **kwargs):
+    def api_post(self, session_id=None, usage=None, **kwargs):
+        # Host-normalized token buckets of one API call (CanonicalUsage); summed per child.
+        try:
+            if not self._owner() or not isinstance(usage, dict):
+                return None
+            session = _safe(session_id)
+            buckets = {}
+            for key in _TOKEN_BUCKETS:
+                value = usage.get(f'{key}_tokens', 0)
+                if type(value) is not int or value < 0 or value > 10**12:
+                    return None
+                buckets[key] = value
+            with self.lock:
+                child = self._child(session) if session else None
+                if not child:
+                    return None
+                tokens = child.setdefault('tokens', dict.fromkeys(_TOKEN_BUCKETS, 0))
+                for key, value in buckets.items():
+                    tokens[key] = min(tokens[key] + value, 10**15)
+                self._reconcile(child)
+                self._notify_parent(child['parent'])
+        except Exception:
+            pass
         return None
 
     def pre(self, tool_name='', args=None, session_id=None, conversation_id=None, tool_call_id=None, **kwargs):

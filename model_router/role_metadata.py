@@ -35,8 +35,11 @@ def read_bounded(path: Path, root: Path, limit=32768):
     before_info, before = _inspect(path, 'file', base=root)
     if before_info is None:
         return None, before
-    if not stat.S_ISREG(before_info.st_mode) or before_info.st_nlink != 1 or before_info.st_size > limit:
+    if not stat.S_ISREG(before_info.st_mode) or before_info.st_nlink != 1:
         raise ValueError('unsafe_source')
+    if before_info.st_size > limit:
+        # Distinct from unsafe_source: only raised for an otherwise safe regular single-link file.
+        raise ValueError('source_too_large')
     fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0))
     try:
         first = os.fstat(fd)
@@ -65,6 +68,75 @@ def read_bounded(path: Path, root: Path, limit=32768):
     return data, before
 
 
+# A Desktop-written profile.yaml (UI metadata) is ~45 tokens/KiB and depth <= 8. These budgets stop a
+# hostile or runaway file early, before safe_load; results are cached by content hash because status
+# and tool-schema construction call resolve() repeatedly.
+_YAML_TOKEN_BUDGET = 40_000
+_YAML_DEPTH_BUDGET = 32
+_parsed_cache: dict[str, tuple] = {}
+
+
+def _metadata_fields(raw):
+    key = hashlib.sha256(raw).hexdigest()
+    hit = _parsed_cache.get(key)
+    if hit is not None:
+        return hit
+    try:
+        import yaml
+        tokens = yaml.scan(raw)
+        events = lambda: yaml.parse(raw)
+        tok, ev = yaml.tokens, yaml.events
+        loader = yaml.safe_load
+    except ModuleNotFoundError as exc:
+        if exc.name != 'yaml':
+            raise
+        import hermes_yaml
+        from ruamel.yaml import YAML
+        from ruamel.yaml import tokens as tok, events as ev
+        tokens = YAML(typ='safe', pure=True).scan(raw.decode('utf-8-sig'))
+        events = lambda: YAML(typ='safe', pure=True).parse(raw.decode('utf-8-sig'))
+        loader = hermes_yaml.safe_load
+    opens = (tok.BlockMappingStartToken, tok.BlockSequenceStartToken, tok.FlowMappingStartToken, tok.FlowSequenceStartToken)
+    closes = (tok.BlockEndToken, tok.FlowMappingEndToken, tok.FlowSequenceEndToken)
+    count = depth = 0
+    for token in tokens:
+        count += 1
+        # Aliases can inflate deeply and are not needed by native metadata.
+        if count > _YAML_TOKEN_BUDGET or isinstance(token, (tok.AliasToken, tok.AnchorToken)):
+            raise ValueError('invalid_metadata')
+        if isinstance(token, opens):
+            depth += 1
+            if depth > _YAML_DEPTH_BUDGET:
+                raise ValueError('invalid_metadata')
+        elif isinstance(token, closes):
+            depth -= 1
+    # Indentless block sequences open a collection with no start token, so the real nesting
+    # depth is measured on parser events.
+    count = depth = 0
+    for event in events():
+        count += 1
+        if count > _YAML_TOKEN_BUDGET or isinstance(event, ev.AliasEvent) or getattr(event, 'anchor', None):
+            raise ValueError('invalid_metadata')
+        if isinstance(event, ev.CollectionStartEvent):
+            depth += 1
+            if depth > _YAML_DEPTH_BUDGET:
+                raise ValueError('invalid_metadata')
+        elif isinstance(event, ev.CollectionEndEvent):
+            depth -= 1
+    data = loader(raw.decode('utf-8-sig'))
+    if data is None:
+        data = {}
+    if not isinstance(data, dict) or not isinstance(data.get('description', ''), str):
+        raise ValueError('invalid_metadata')
+    if sensitive_text(data.get('description', '')):
+        raise ValueError('sensitive_metadata')
+    result = (clean_text(data.get('description', '').strip()), bool(data.get('description_auto', False)))
+    if len(_parsed_cache) >= 64:
+        _parsed_cache.clear()
+    _parsed_cache[key] = result
+    return result
+
+
 def resolve(service, name):
     from .native_delegation import _profile, _inventory
     state, text, auto, reason, signature = 'unavailable', '', False, 'unsafe_profile', None
@@ -72,36 +144,13 @@ def resolve(service, name):
         _profile(name)
         if not _inventory(service, name):
             raise ValueError('unsafe_profile')
-        raw, signature = read_bounded(service._profile_home(name) / 'profile.yaml', service.root)
+        # Hermes Desktop also keeps its UI metadata in profile.yaml, so the default profile's file
+        # can exceed the 32 KiB source cap; only `description` is read from it.
+        raw, signature = read_bounded(service._profile_home(name) / 'profile.yaml', service.root, 512 * 1024)
         if raw is None:
             state, reason = 'missing', 'metadata_missing'
         else:
-            try:
-                import yaml
-                tokens = yaml.scan(raw)
-                alias_types = (yaml.tokens.AliasToken, yaml.tokens.AnchorToken)
-                loader = yaml.safe_load
-            except ModuleNotFoundError as exc:
-                if exc.name != 'yaml':
-                    raise
-                import hermes_yaml
-                from ruamel.yaml import YAML
-                from ruamel.yaml.tokens import AliasToken, AnchorToken
-                tokens = YAML(typ='safe', pure=True).scan(raw.decode('utf-8-sig'))
-                alias_types = (AliasToken, AnchorToken)
-                loader = hermes_yaml.safe_load
-            # Aliases can inflate deeply and are not needed by native metadata.
-            if any(isinstance(token, alias_types) for token in tokens):
-                raise ValueError('invalid_metadata')
-            data = loader(raw.decode('utf-8-sig'))
-            if data is None:
-                data = {}
-            if not isinstance(data, dict) or not isinstance(data.get('description', ''), str):
-                raise ValueError('invalid_metadata')
-            if sensitive_text(data.get('description', '')):
-                raise ValueError('sensitive_metadata')
-            text = clean_text(data.get('description', '').strip())
-            auto = bool(data.get('description_auto', False))
+            text, auto = _metadata_fields(raw)
             state, reason = ('available', None) if text else ('missing', 'description_missing')
     except Exception:
         state, text, auto, reason = 'unavailable', '', False, 'metadata_unavailable'

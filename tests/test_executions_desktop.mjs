@@ -16,7 +16,7 @@ function load(overrides = {}) {
     useState: value => [value, () => {}], useRef: value => ({ current: value }), useEffect: effect => effects.push(effect),
     useQuery: options => { queryOptions = options; return query }, useValue: atom => atom.get(), ...overrides })
   const code = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '').replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '').replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-  const api = new Function(...Object.keys(params), code + '\nreturn {executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,executionSpare,composerShowsFocused,pluginDefinition}')( ...Object.values(params))
+  const api = new Function(...Object.keys(params), code + '\nreturn {executionTokenText,executionTokenTotal,executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,executionSpare,composerShowsFocused,pluginDefinition}')( ...Object.values(params))
   // Leaf rendering/invalidation fixture. Actual observer transport/fences are
   // exercised separately in test_active_execution_observer.mjs.
   const observer = { cacheId: 'leaf-fixture', revisionAtom: { get: () => 1 }, eligible: selected => Boolean(api.executionScopeKey(selected)),
@@ -533,4 +533,34 @@ test('replay retention is globally bounded and never persists or creates routes'
   const unsupported = api.createActiveExecutionObserver(api.host, {})
   assert.equal(unsupported.eligible(scope()),false)
   assert.deepEqual(api.reads,[]); unsupported.dispose()
+})
+
+test('each execution shows its token total on the line and the breakdown in the body', () => {
+  const api = load()
+  assert.deepEqual([0, 999, 1234, 9949, 9999, 12345, 99499, 99950, 553000, 99994999, 99999999, 123456789].map(api.executionTokenText),
+    ['0', '999', '1.2천', '9.9천', '1만', '1.2만', '9.9만', '10만', '55만', '9999만', '1억', '1.2억'])
+  const data = snapshot(); data.rows[0] = { ...data.rows[0], status: 'completed', tool_count: 16,
+    tokens: { input: 121159, cache_read: 427648, cache_write: 0, output: 2693 } }
+  const [row] = api.mergeExecutionRows(data, { subagents: [] }, 'claire')
+  assert.equal(api.executionTokenTotal(row), 551500)
+  const line = text(api.ExecutionLine({ row }))
+  assert.match(line, /도구 16회 · 토큰 55만/)
+  assert.match(line, /토큰 55만: 입력 12만 · 캐시 읽기 43만 · 출력 2.7천/)
+  assert.doesNotMatch(line, /캐시 쓰기/, 'zero cache buckets are omitted')
+  const bad = snapshot(); bad.rows[0] = { ...bad.rows[0], tokens: { input: -1, output: 2 } }
+  const [badRow] = api.mergeExecutionRows(bad, { subagents: [] }, 'claire')
+  assert.equal(api.executionTokenTotal(badRow), null)
+  assert.doesNotMatch(text(api.ExecutionLine({ row: badRow })), /토큰/)
+  // MoA advisors: the hook sees the aggregator only, the native completion total counts all.
+  const store = api.createExecutionReplayStore(), token = bootReplay(api, store)
+  store.accept(scope(), token, replayReply([replayFrame(1, { status: 'completed', tool_count: 2, api_calls: 1, input_tokens: 700, output_tokens: 200 })]), 100)
+  const moa = snapshot(); moa.rows[0] = { ...moa.rows[0], tokens: { input: 60, output: 40 } }
+  const live = { subagents: [{ subagent_id: 'sa-0-native', delegation_id: 'deleg-native', status: 'running' }] }
+  const [moaRow] = api.overlayExecutionReplay(api.mergeExecutionRows(moa, live, 'claire'), store.snapshot(scope()), scope())
+  assert.equal(api.executionTokenTotal(moaRow), 900)
+  const moaLine = text(api.ExecutionLine({ row: moaRow }))
+  assert.match(moaLine, /도구 2회 · 토큰 900/)
+  assert.match(moaLine, /토큰 900 \(완료 보고 기준\) · 모델 호출 관찰분 100: 입력 60 · 출력 40/)
+  const same = { ...moaRow, token_total: 100 }
+  assert.match(text(api.ExecutionLine({ row: same })), /토큰 100: 입력 60 · 출력 40/)
 })

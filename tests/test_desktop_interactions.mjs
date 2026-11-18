@@ -741,7 +741,7 @@ test('legacy origin refuses new inheritance but permits old blank, removal or ex
 })
 
 function roleContext() { return { schema: 1, owner: { profile: 'claire', base_identity: 'd'.repeat(64) }, target_profile: 'other',
-  capability: { available: true, reason_code: null }, source: { digest: 'e'.repeat(64), native_description: 'Reviewed role', soul_role_excerpt: '', enabled_skill_names: [], omitted_sources: [], truncated: false },
+  capability: { available: true, reason_code: null }, source: { digest: 'e'.repeat(64), native_description: 'Reviewed role', soul_text: '', enabled_skill_names: [], omitted_sources: [], truncated: false },
   payer: { profile: 'claire', basis: 'owner_saved_main', provider: 'fixture', model: 'owner-saved-model', fallback_policy: [], native_recovery: 'host_managed', route_digest: 'f'.repeat(64), estimate_usd: null }, limits: { input_bytes: 8192, max_output_tokens: 512, request_timeout_seconds: 30 } } }
 function roleAIReply(operation) {
   const context = roleContext()

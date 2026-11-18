@@ -61,7 +61,7 @@ for (const topology of ['primary', 'shared', 'isolated']) test(`actual SDK ${top
     const operation = params.argv[3], body = JSON.parse(params.argv.at(-1)); invocations.push({ operation, body })
     assert.equal(body.owner_profile, 'future'); assert.equal(body.target_profile, 'specialist')
     const context = { schema: 1, owner: { profile: 'future', base_identity: 'a'.repeat(64) }, target_profile: 'specialist', capability: { available: true },
-      source: { digest: 'b'.repeat(64), native_description: 'Fixture specialist', soul_role_excerpt: '', enabled_skill_names: [] },
+      source: { digest: 'b'.repeat(64), native_description: 'Fixture specialist', soul_text: '', enabled_skill_names: [] },
       payer: { profile: 'future', route_digest: 'c'.repeat(64) } }
     const value = operation === 'role-proposal-context' ? context : { schema: 1, status: 'proposed', owner: context.owner, target_profile: 'specialist',
       source_digest: context.source.digest, route_digest: context.payer.route_digest, proposal: { description: 'Fixture role proposal' }, stale: false }

@@ -23,7 +23,7 @@ test('editing role only records a local draft intent and never copies native int
  assert.equal(changed.profile_routes.profiles[0].description,'new');assert.equal(changed.descriptionEdits.p1,true)
  const cleared=a.editProfileRoleDescription(changed,'p1','');assert.equal(cleared.profile_routes.profiles[0].description,'');assert.equal(cleared.allowProfileAccess,false)
 })
-function context(){return{schema:1,owner:{profile:'owner',base_identity:id('a')},target_profile:'target',capability:{available:true,reason_code:null},source:{digest:id('b'),native_description:'evidence',soul_role_excerpt:'',enabled_skill_names:[],omitted_sources:[],truncated:false},payer:{profile:'owner',basis:'owner_saved_main',provider:'fixture',model:'saved',fallback_policy:[],native_recovery:'host_managed',route_digest:id('c'),estimate_usd:null},limits:{input_bytes:8192,max_output_tokens:512,request_timeout_seconds:30}}}
+function context(){return{schema:1,owner:{profile:'owner',base_identity:id('a')},target_profile:'target',capability:{available:true,reason_code:null},source:{digest:id('b'),native_description:'evidence',soul_text:'',enabled_skill_names:[],omitted_sources:[],truncated:false},payer:{profile:'owner',basis:'owner_saved_main',provider:'fixture',model:'saved',fallback_policy:[],native_recovery:'host_managed',route_digest:id('c'),estimate_usd:null},limits:{input_bytes:8192,max_output_tokens:512,request_timeout_seconds:30}}}
 function env(){
  const a=api();let live={connectionId:'local',ownerProfile:'owner',scopeKey:'local|owner',baseIdentity:id('a'),template:'template',draft:'initial',blocked:false},view=null,used=[],calls=[],next=null
  const routes=[{mode:'local',connectionId:'local',profile:'owner',targetProfile:'owner',primary:true}]

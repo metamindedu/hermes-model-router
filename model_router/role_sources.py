@@ -46,7 +46,8 @@ def local_skill_names(service, target):
             with os.scandir(directory) as iterator:
                 for entry in iterator:
                     count += 1
-                    if count > 512:
+                    # Directory entries only (no file bodies); bundled skill trees exceed 512.
+                    if count > 4096:
                         raise ValueError('skill_inventory_budget')
                     entries.append(entry)
             for entry in sorted(entries, key=lambda e: e.name.casefold()):
@@ -62,11 +63,20 @@ def local_skill_names(service, target):
                         signatures.append(sig)
                 elif _IDENTIFIER.fullmatch(entry.name) and entry.name.casefold() not in _SKIP:
                     if entry.is_symlink():
-                        raise ValueError('unsafe_skill_entry')
+                        # Never followed; leaving it out only sends fewer names.
+                        omitted.append('linked_skills_omitted')
+                        continue
                     if entry.is_dir(follow_symlinks=False):
                         if depth >= 3:
                             omitted.append('deep_skills_omitted')
                         else:
+                            try:
+                                _inspect(path, 'dir', base=service.root)
+                            except Exception:
+                                # A linked/junctioned skill folder is not traversed. Leaving it out
+                                # only sends fewer names; it never widens what is read.
+                                omitted.append('linked_skills_omitted')
+                                continue
                             visit(path, depth + 1)
             _, after = _inspect(directory, 'dir', base=service.root)
             if before != after:
