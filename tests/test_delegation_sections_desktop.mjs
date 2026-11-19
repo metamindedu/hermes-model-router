@@ -182,4 +182,14 @@ test('save coverage is computed field by field from the bodies actually sent to 
   // Conversation fallback: every update carries the drafted chain.
   assert.equal(has([{ operation: '/fallback-preview', body: { updates: [{ profile: 'claire', native_fallback: { enabled: true, chain: [] } }] } }], 'fallback:native'), true)
   assert.equal(has([{ operation: '/fallback-preview', body: { updates: [{ profile: 'claire', native_fallback: { enabled: false, chain: [] } }] } }], 'fallback:native'), false)
+  // Since v0.12.1 the page sends them in the model section's combined store plan (no save_scope); the
+  // same plan also covers the section's pending copy of them.
+  const combined = updates => ({ operation: '/preview', body: { profile: 'claire', models: { main: 'm1' }, model_targets: [], routing: { heavy: 'h', light: 'l' }, routing_targets: [], routing_profiles: [], fallback_updates: updates } })
+  const drafted = { enabled: true, chain: [] }
+  for (const key of ['fallback:native', 'copy.fallback']) {
+    assert.equal(has([combined([{ profile: 'claire', native_fallback: drafted }, { profile: 'other', native_fallback: drafted }])], key), true, key)
+    assert.equal(has([combined([{ profile: 'claire', native_fallback: drafted }, { profile: 'other', native_fallback: { enabled: false, chain: [] } }])], key), false, `${key}: one target got another value`)
+    assert.equal(has([combined([])], key), false, `${key}: nothing sent covers nothing`)
+    assert.equal(has([models], key), false, `${key}: a models-scope body never carries them`)
+  }
 })

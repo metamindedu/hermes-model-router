@@ -219,12 +219,19 @@ test('timeout target eligibility is DTO-backed; source-only and manual nonempty 
   assert.doesNotMatch(text(h.tree), /전체 저장에 복사 의도 포함/)
 })
 
-test('model section save ignores dirty timeout, re-enable and fallback drafts and uses stored routing baselines', async () => {
+// A conversation spare-model edit is part of the model section's save (see test_fallback_desktop.mjs);
+// these saves of other parts must leave it out.
+function draftConversationSpare(h) {
+  h.select('native-fallback-mode', 'custom')
+  h.input('native-chain-0-provider', 'spare-provider')
+  h.input('native-chain-0-model', 'spare-model')
+}
+
+test('model section save ignores dirty timeout and re-enable drafts and uses stored routing baselines', async () => {
   const h = harness()
   h.input('model-main-model', 'unsaved-model-draft')
   h.input('routed-light-total-minutes', '9999')
   h.check('routing-reenable-other', true)
-  h.check('native-fallback-enabled', true)
   await h.click('model-section-save')
   await h.flush()
   const body = lastPreview(h).body
@@ -249,7 +256,7 @@ test('re-enable save changes activation membership only, with baseline models, r
   h.input('delegate-total-minutes', '12345')
   h.click('model-target-all')
   h.check('routing-reenable-other', true)
-  h.check('native-fallback-enabled', true)
+  draftConversationSpare(h)
   await h.click('routing-reenable-save')
   await h.flush()
   const body = lastPreview(h).body
@@ -291,7 +298,7 @@ test('timeout-only save copies unchanged values to a frozen manual subset and om
   h.check('timeout-target-other', true)
   h.input('model-main-model', 'dirty-model')
   h.check('routing-reenable-other', true)
-  h.check('native-fallback-enabled', true)
+  draftConversationSpare(h)
   await h.click('timeouts-save')
   await h.flush()
   const body = lastPreview(h).body

@@ -883,7 +883,7 @@ test('a selected target that disappears stays ticked and blocks by name; one tha
   const next = structuredClone(h.data()); next.profiles[2].native_delegation.editable = false
   h.setData(next); h.render()
   assert.match(text(h.byId('model-section-skipped')), /other/)
-  assert.match(text(h.byId('model-section-targets')), /맡기는 방식과 예비 모델은 적용하지 않습니다\. 이 프로필은 설정을 변경할 수 없습니다/)
+  assert.match(text(h.byId('model-section-targets')), /맡기는 방식과 슬롯 예비 모델은 적용하지 않습니다\. 이 프로필은 설정을 변경할 수 없습니다/)
   h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls[0].body.updates.map(row => row.profile), ['default', 'claire'])
   assert.deepEqual(h.calls[4].body.model_targets, ['default', 'claire', 'other'])
@@ -1197,6 +1197,129 @@ test('copying slot spare models refuses nothing silently: an older target is ski
     assert.deepEqual(update.slot_policy['code-complex'], { mode: 'off', chain: [] })
     assert.equal(Object.hasOwn(update, 'policy'), false)
     assert.equal(update.allow_additional_cost, true)
+  }
+})
+
+test('priority buttons reorder a slot spare chain and the model section save sends the new order', async () => {
+  const h = harness({ data: slotFixture() })
+  const first = { provider: 'first-service', model: 'first/model' }, second = { provider: 'second-service', model: 'second/model' }
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', first.provider); h.input('slot-design-spare-model-0', first.model)
+  h.click('slot-design-fallback-add')
+  h.input('slot-design-spare-provider-1', second.provider); h.input('slot-design-spare-model-1', second.model)
+  assert.equal(h.byId('slot-design-spare-up-0').props.disabled, true, 'the first one cannot move up')
+  assert.equal(h.byId('slot-design-spare-down-1').props.disabled, true, 'the last one cannot move down')
+  assert.equal(text(h.byId('slot-design-spare-up-1')), '위로')
+  assert.equal(text(h.byId('slot-design-spare-down-0')), '아래로')
+  h.click('slot-design-spare-down-0')
+  assert.equal(h.byId('slot-design-spare-model-0').props.value, second.model)
+  assert.equal(h.byId('slot-design-spare-model-1').props.value, first.model)
+  h.click('slot-design-spare-up-1')
+  assert.equal(h.byId('slot-design-spare-model-0').props.value, first.model)
+  h.click('slot-design-spare-up-1')
+  assert.deepEqual(h.calls, [], 'reordering edits the draft only')
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls[0].body.updates[0].slot_policy.design, { mode: 'custom', chain: [second, first] })
+  assert.deepEqual(h.calls[0].body.updates[0].slot_policy['code-complex'], { mode: 'off', chain: [] })
+})
+
+const CAPABILITIES = { native_trigger: 'hermes_runtime', native_execution: 'continue_conversation', native_reasoning: 'profile_overrides',
+  routing_trigger: 'subscription_exhaustion_before_tools', routing_execution: 'fresh_task', routing_max_retries: 1 }
+const nativeSpares = (overrides = {}) => ({ managed: true, editable: true, enabled: false, chain: [], actual_chain: [], drift: false, warnings: [], consent: null, ...overrides })
+const withSpares = data => {
+  data.fallback_capabilities = { ...CAPABILITIES }
+  for (const row of data.profiles) row.fallbacks = { native: nativeSpares() }
+  return data
+}
+const spareReply = operation => ['delegation-preview', 'preview', 'fallback-preview'].includes(operation) ? { plan_id: `${operation}-plan`, changes: [], warnings: [] }
+  : operation === 'apply' ? { status: 'applied', revision: 8 } : { status: 'applied', revision: 7 }
+
+test('with a method change the model section saves the method, then the models, then the conversation spare models', async () => {
+  const h = harness({ data: withSpares(nativeBatchFixture()) })
+  h.select('native-delegation-backend', 'model-router')
+  h.input('model-main-model', 'edited-main-model')
+  h.select('native-fallback-mode', 'custom')
+  h.input('native-chain-0-provider', 'spare-service'); h.input('native-chain-0-model', 'spare-model')
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  // claire's main model changes, so the spare models are planned only after the models applied.
+  assert.deepEqual(h.calls.map(call => call.operation), ['delegation-preview', 'preview', 'status', 'apply', 'preview', 'apply', 'fallback-preview', 'apply'])
+  assert.equal(JSON.stringify(h.calls[0].body).includes('spare-model'), false, 'the method save never carries the conversation spare models')
+  const store = h.calls[4].body
+  assert.deepEqual(h.calls[1].body, store, 'the store plan validated before the method apply is the one sent afterwards')
+  assert.equal(store.save_scope, 'models')
+  assert.equal(store.models.main.model, 'edited-main-model')
+  assert.deepEqual(store.model_targets, ['claire'])
+  assert.equal(Object.hasOwn(store, 'fallback_updates'), false)
+  const spare = h.calls[6].body
+  assert.deepEqual(spare, { expected_revision: 8,
+    updates: [{ profile: 'claire', native_fallback: { enabled: true, chain: [{ provider: 'spare-service', model: 'spare-model' }] } }],
+    confirmations: [{ profile: 'claire', scope: 'native', allow_additional_cost: true, allow_task_rerun: false }],
+    expected: [{ profile: 'claire', native_fallback: { enabled: false, chain: [], actual_chain: [] } }] })
+  const outcome = text(h.render())
+  assert.match(outcome, /적용 요청이 완료되었습니다/)
+  assert.match(outcome, /대화 예비 모델 변경/)
+})
+
+test('a spare-model step that fails after the models applied is reported exactly: saved, not saved, never retried', async () => {
+  const h = harness({ data: withSpares(nativeBatchFixture()) })
+  h.input('model-delegation-model', 'edited-delegation')
+  h.select('native-fallback-mode', 'custom')
+  h.input('native-chain-0-provider', 'spare-service'); h.input('native-chain-0-model', 'spare-model')
+  let spares = 0
+  h.setResponder(operation => operation === 'fallback-preview' && ++spares === 2
+    ? { error: 'ExternalChange', conflict: { profile: 'claire', field: 'native_fallback' }, message: 'x' } : spareReply(operation))
+  h.click('model-section-save'); await h.flush()
+  // The main model is unchanged, so the spare models were validated before the first write.
+  assert.deepEqual(h.calls.map(call => call.operation), ['preview', 'fallback-preview', 'apply', 'fallback-preview'])
+  const outcome = text(h.render())
+  assert.match(outcome, /일부 설정만 적용되었을 수 있습니다/)
+  // The refusal is scoped to the step that failed; the saved step stays reported as saved.
+  assert.match(outcome, /‘모델 변경’: 저장했습니다\. ‘대화 예비 모델 변경’: 다른 곳에서 바뀌어 저장하지 않았습니다\. claire 프로필의 대화 예비 모델 값이 이 화면을 연 뒤 바뀌었습니다\./)
+  assert.doesNotMatch(outcome, /아무것도 저장하지 않았습니다/, 'the models step was saved')
+  assert.doesNotMatch(outcome, /은\(는\)/)
+  assert.equal(h.byId('model-delegation-model').props.disabled, true, 'locked until the real state is reloaded')
+  const before = h.calls.length
+  h.byId('model-section-save').props.onClick?.(); await h.flush()
+  assert.equal(h.calls.length, before)
+})
+
+// Each target's summary line names exactly what the bodies write to it.
+function writtenParts(name, calls) {
+  const native = calls.find(call => call.operation === 'delegation-preview')?.body.updates.find(update => update.profile === name)
+  const store = calls.filter(call => call.operation === 'preview').at(-1)?.body
+  const spare = calls.filter(call => call.operation === 'fallback-preview').at(-1)?.body.updates.find(update => update.profile === name)
+  const scope = store?.save_scope ?? null
+  return [
+    store && (scope === null || scope === 'models') && store.model_targets.includes(name) ? '대화 모델' : '',
+    store && (scope === null || scope === 'routing') && Object.hasOwn(store.routing, 'slots') && (store.routing_targets || [store.profile]).includes(name) ? '작업 슬롯 모델' : '',
+    native ? '맡기는 방식(' : '',
+    native && Object.hasOwn(native, 'slot_policy') ? '슬롯 예비 모델' : '',
+    spare ? `대화 예비 모델(${spare.native_fallback.enabled ? `${spare.native_fallback.chain.length}개 사용` : '사용 안 함'})` : ''
+  ].filter(Boolean)
+}
+
+test('each target summary line matches what the bodies write to that target', async () => {
+  // Repro: `other` has task routing off and its own enabled conversation spares; the loaded profile's spares are off.
+  const data = withSpares(slotFixture())
+  const other = data.profiles.find(row => row.name === 'other')
+  other.routing.enabled = false
+  other.fallbacks.native = nativeSpares({ enabled: true, chain: [{ provider: 'own', model: 'own-spare' }], actual_chain: [{ provider: 'own', model: 'own-spare' }] })
+  const h = harness({ data })
+  h.check('model-target-other', true)
+  const lines = Object.fromEntries(['claire', 'other'].map(name => [name, text(h.byId(`model-section-write-${name}`))]))
+  assert.doesNotMatch(text(h.byId('model-section-summary')), /모델 값만 저장합니다/)
+  assert.match(lines.other, /^other: 대화 모델, 작업 슬롯 모델, 대화 예비 모델\(사용 안 함\) 저장 · 맡기는 방식·슬롯 예비 모델은 그대로 둠\(이 프로필의 작업 분담이 꺼져 있습니다/)
+  assert.match(lines.claire, /^claire: 대화 모델, 작업 슬롯 모델, 맡기는 방식\(.+\), 슬롯 예비 모델, 대화 예비 모델\(사용 안 함\) 저장$/)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls.filter(call => call.operation === 'fallback-preview').at(-1).body.updates.find(update => update.profile === 'other'),
+    { profile: 'other', native_fallback: { enabled: false, chain: [] } }, 'the summary named this write')
+  for (const name of ['claire', 'other']) {
+    const parts = writtenParts(name, h.calls)
+    const listed = lines[name].replace(/^[^:]+: /, '').split(' · ')[0].replace(/ 저장$/, '')
+    assert.equal(listed.split(', ').length, parts.length, `${name}: ${listed} vs ${parts.join(', ')}`)
+    for (const part of parts) assert.ok(listed.includes(part), `${name}: ${part} is written but not listed`)
   }
 })
 
@@ -1956,7 +2079,9 @@ test('the follow-up store write of a combined save carries the frozen expectatio
   const [first, second] = h.calls.filter(call => call.operation === 'preview').map(call => call.body)
   assert.deepEqual(second.expected, first.expected, 'not re-read after the first write')
   assert.deepEqual(second.expected.find(item => item.profile === 'claire').actual_models, frozen)
-  assert.match(text(h.render()), /맡기는 방식과 예비 모델’: 저장했습니다\. ‘모델 변경’: 저장하지 않았습니다\..*다른 곳에서 변경됨 — 다시 불러오세요\. claire 프로필의 실제 모델 설정\(대화 모델\)/)
+  const outcome = text(h.render())
+  assert.match(outcome, /맡기는 방식과 예비 모델’: 저장했습니다\. ‘모델 변경’: 다른 곳에서 바뀌어 저장하지 않았습니다\. claire 프로필의 실제 모델 설정\(대화 모델\) 값이 이 화면을 연 뒤 바뀌었습니다/)
+  assert.doesNotMatch(outcome, /아무것도 저장하지 않았습니다/, 'the method step was saved')
 })
 
 test('a model-save callback kept from an earlier render does not dispatch once drift disables saving', async () => {

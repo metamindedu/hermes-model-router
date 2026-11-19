@@ -173,7 +173,7 @@ function harness(initial = statusFixture()) {
   }
   render()
   return {
-    calls, state, render, byId, click, clickLabel, input, check, selectProfile, flush,
+    calls, state, render, byId, find, click, clickLabel, input, check, selectProfile, flush,
     get tree() { return tree },
     data: () => data,
     setData(value) { data = value },
@@ -404,7 +404,7 @@ test('connection change during timeout validation cancels the old scope without 
   assert.equal(h.byId('routed-light-total-minutes').props.value, 60)
 })
 
-test('independent fallback save does not copy or save total-runtime limits', async () => {
+test('the model section save of conversation spare models does not copy or save total-runtime limits', async () => {
   const h = harness()
   h.input('routed-light-total-minutes', '9999')
   const newer = structuredClone(h.data())
@@ -412,13 +412,15 @@ test('independent fallback save does not copy or save total-runtime limits', asy
   h.setData(newer)
   h.render()
   assert.equal(h.byId('routed-light-total-minutes').props.disabled, true)
-  h.click('native-fallback-preset-audited-non-openai')
-  h.check('native-fallback-enabled', true)
-  h.click('native-fallback-save')
+  h.find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === 'native-fallback-mode')).props.onValueChange('custom'); h.render()
+  h.input('native-chain-0-provider', 'xiaomi')
+  h.input('native-chain-0-model', 'mimo-v2.6-pro')
+  h.click('model-section-save')
   await h.flush()
-  const body = h.calls.find(call => call.operation === 'fallback-preview').body
+  assert.deepEqual(h.calls.map(call => call.operation), ['fallback-preview', 'apply'])
+  const body = h.calls[0].body
   assert.equal('timeout_updates' in body, false)
-  assert.equal(h.calls.some(call => call.operation === 'preview'), false)
+  assert.deepEqual(body.updates.map(update => update.profile), ['claire'])
 })
 
 test('actual legacy handler preserves original fractional and large raw seconds while another role is edited', async () => {

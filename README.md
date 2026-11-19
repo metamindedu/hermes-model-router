@@ -6,7 +6,7 @@ Profile-scoped model management and **Hermes-native subagent routing**, with a n
 
 A delegated task's model is now chosen per **task slot** instead of from two Heavy/Light tiers. The six built-in slots are design, complex code, simple code, simple verification, complex verification and computer use; each has its own primary model and its own optional spare models. The purposes an agent sends are unchanged (`plan`, `implementation`, `mechanical`, `preliminary-review`, `semantic-final`, `independent-review`) plus the new `computer-use`, and a purpose runs on the model of its slot. Heavy/Light remains only as the review class of a purpose, the two routed runtime limits and the runtime label; a slot nobody has set keeps resolving through its tier's existing declaration, so an untouched install behaves as before. `computer-use` selects a model suited to driving a screen; it grants no tools the parent session lacks.
 
-The settings page has one **모델** section: conversation models, the conversation spare models (**대화 예비 모델**, with their own target list and save button since 0.12.0), the delegation method, six slot cards, one target list (the loaded profile by default) and one save button. Since 0.12.0 the specialist-profile allow-list, its descriptions and the account-use consent live in a separate **전문 프로필 위임** section with its own targets and save button; it is editable only while the loaded profile is stored on a profile method. The routed-job and default-delegation spare-model cards and the `기본 위임 모델 사용` method are no longer on the page; their stored values are kept and never sent ([docs/releases/v0.12.0.md](docs/releases/v0.12.0.md)). The routing on/off control is gone from the page; a profile that already has task routing off is offered a separate re-enable action. Sections further down this README that describe a `Heavy / Light` editor, a routing membership list or a separate `작업 분담과 예비 모델` card describe releases before 0.11.0.
+The settings page has one **모델** section: conversation models, the conversation spare models (**대화 예비 모델**, directly under the main conversation model since 0.12.1, in the same pattern as the slot spare models), the delegation method, six slot cards, one target list (the loaded profile by default) and one save button that also saves the conversation spare models. Both spare-model lists can be reordered with **위로**/**아래로**. Since 0.12.0 the specialist-profile allow-list, its descriptions and the account-use consent live in a separate **전문 프로필 위임** section with its own targets and save button; it is editable only while the loaded profile is stored on a profile method. The routed-job and default-delegation spare-model cards and the `기본 위임 모델 사용` method are no longer on the page; their stored values are kept and never sent ([docs/releases/v0.12.0.md](docs/releases/v0.12.0.md)). The routing on/off control is gone from the page; a profile that already has task routing off is offered a separate re-enable action. Sections further down this README that describe a `Heavy / Light` editor, a routing membership list or a separate `작업 분담과 예비 모델` card describe releases before 0.11.0.
 
 **Upgrade order.** Slot settings use a newer shared-store format. Update the plugin in every profile, restart every Hermes process (Desktop, gateways, open sessions), and only then save a slot model or a per-slot spare model for the first time. A process still running the previous code cannot read the new format and refuses settings reads and purpose routing until it is restarted; it writes nothing. Details: [docs/releases/v0.11.0.md](docs/releases/v0.11.0.md) and `docs/wiki/task-slots.md`.
 
@@ -111,7 +111,7 @@ For reproducibility, use a reviewed full commit SHA with `--ref <40-character-SH
 ## Features
 
 - Manage main, delegation, compression and title models across explicitly selected installed profiles.
-- Configure the conversation spare models in the model section; stored routed-job and default-delegation fallback values are preserved but no longer edited from the page (0.12.0).
+- Configure the conversation spare models under the main conversation model; they are saved by the model section's save to its targets (0.12.1; in 0.12.0 they had their own target list and save button). Stored routed-job and default-delegation fallback values are preserved but no longer edited from the page (0.12.0).
 - Choose Heavy and Light routes independently of routing-enabled profile membership. Use Heavy for planning and independent semantic review; Light for bounded implementation and mechanical work.
 - Set independent native-child, Light and Heavy total-runtime budgets. The UI uses minutes; APIs and persistence use seconds. Native inactivity timeouts are a different policy.
 - Inherit the **actual parent session's Fast selection** into new native and routed children on supported first-party OpenAI API/Codex paths. Preserve the original bounded expiry; strip inherited paid fields on unsupported/fallback routes.
@@ -122,7 +122,7 @@ For reproducibility, use a reviewed full commit SHA with `--ref <40-character-SH
 
 ![Actual Desktop Fast-inheritance notice, cropped to exclude profile names and conversations](docs/fast-inheritance.png)
 
-Enable the package's Desktop half and open **Settings → Plugins → 모델 및 라우팅** (Models and routing). Load a profile, review actual provider/model availability, select routing-enabled profiles and save only your intended scope. Model/fallback/copy target selections are independent; an initially checked target list does not itself authorize writes. Start a new session for updated Python tools. Existing model presets are editable examples, not live availability recommendations.
+Enable the package's Desktop half and open **Settings → Plugins → 모델 및 라우팅** (Models and routing). Load a profile, review actual provider/model availability, select routing-enabled profiles and save only your intended scope. The model section has one target list (the loaded profile by default) for the conversation models, their spare models, the delegation method and the slot models; profile delegation and time limits have their own lists. An initially checked target list does not itself authorize writes. Start a new session for updated Python tools. Existing model presets are editable examples, not live availability recommendations.
 
 ## Historical process joins (read-only compatibility)
 
@@ -251,10 +251,10 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 
 1. **설정 → 플러그인 → 모델 및 라우팅**을 엽니다. 메인 사이드바의 기존 항목은 제거되며, 명령 팔레트의 바로가기는 새 설정 경로를 엽니다.
 2. 기준 프로필의 설정을 불러오거나 **OpenAI / Non-OpenAI 프리셋**으로 네 모델 역할을 한 번에 채운 뒤, 필요하면 개별 값을 편집합니다. 프리셋 선택만으로 실제 설정은 바뀌지 않습니다.
-3. **모델 설정 적용 대상**은 화면을 처음 열거나 연결 범위가 바뀔 때 **모든 프로필이 선택**됩니다. **전체 선택 / 전체 해제**로 일괄 조정할 수 있습니다. 사용자가 해제한 선택은 기준 프로필 변경이나 상태 새로고침으로 다시 확대하지 않습니다. 라우팅만 변경하려면 모델 적용 대상을 전체 해제하세요.
+3. ‘모델’ 섹션의 **적용 대상**은 처음에 불러온 프로필 하나만 선택됩니다. 대화 모델·대화 예비 모델·맡기는 방식·작업 슬롯 모델은 모두 이 목록을 따르며, 대화 예비 모델을 따로 고르는 목록은 없습니다. **모두 선택 / 모두 해제**로 일괄 조정할 수 있고, 직접 고른 목록은 기준 프로필 변경이나 상태 새로고침으로 다시 넓히지 않습니다. 저장할 내용에는 프로필마다 실제로 저장하는 항목과 그대로 두는 항목이 표시됩니다.
 4. **라우팅 세부 설정 → 고급: 라우팅 일시 중지 및 프로필 사용 여부**에서 필요할 때만 프로필별로 끕니다. **라우팅 활성 프로필**은 이 고급 설정 안의 목록입니다. **Heavy/Light 설정 적용 대상**은 편집한 경로를 복사할 프로필 목록이며, 처음에는 전체 선택됩니다. Heavy/Light 값을 수정하거나 대상 목록을 직접 선택한 뒤 저장하면 지정한 대상에만 경로를 적용합니다. 기존 값 그대로 여러 프로필에 복사하려면 **전체 선택**을 누르고 저장하세요. 단순히 활성 프로필만 바꾸거나 일반 모델만 저장하면 기존 경로는 보존됩니다.
 5. Heavy는 메인 모델, Light는 서브에이전트 모델을 따라가는 것이 기본이며 별도 지정도 가능합니다. Heavy/Light에 동일 모델을 사용해도 각 작업은 별도 컨텍스트로 실행합니다. 따라가기를 복사하면 각 대상 프로필의 모델을 사용합니다. 활성 상태·폴백·비용 허용은 Heavy/Light 복사 대상이 아닙니다. 수동 대상 선택은 불러온 프로필 변경·새로고침 후에도 유지하지만, 일회 복사 의도는 초기화됩니다.
-6. 편집 중 **저장할 내용 · 실시간 참고**에서 대상과 변경 범위를 확인합니다. **모델 설정 저장**, **라우팅 설정 저장**, **시간 제한 저장** 및 각 폴백 카드의 저장 버튼은 해당 범위만 저장합니다. **전체 설정 저장**은 여러 섹션을 함께 저장할 때 사용합니다. 다른 섹션에 남아 있는 편집값은 개별 저장에 포함하지 않습니다. 별도 미리보기 버튼이나 확인 체크 단계는 없습니다. 저장 중에는 편집·중복 저장을 막고 서버에서 최신 상태 충돌을 검사합니다.
+6. 편집 중 **저장할 내용**에서 대상과 변경 범위를 확인합니다. ‘모델’ 섹션의 저장 버튼은 맡기는 방식, 모델, 대화 예비 모델을 차례로 저장하고(대화 예비 모델은 대상 프로필에만 쓰는 별도 요청), **시간 제한 저장**과 **작업 분담 다시 켜기**는 해당 범위만 저장합니다. 중간 단계가 실패하면 어느 부분까지 저장했는지 그대로 알려 줍니다. **전체 설정 저장**은 여러 섹션을 함께 저장할 때 사용합니다. 다른 섹션에 남아 있는 편집값은 개별 저장에 포함하지 않습니다. 별도 미리보기 버튼이나 확인 체크 단계는 없습니다. 저장 중에는 편집·중복 저장을 막고 서버에서 최신 상태 충돌을 검사합니다.
 
 저장한 설정과 실제 프로필 설정이 다른 경우 drift로 표시합니다. 실행 중인 세션의 모델/도구는 즉시 바뀐다고 가정하지 않습니다. 변경 후 라우팅 작업은 새 세션에서 시작하세요.
 
@@ -314,9 +314,9 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 
 ## 폴백 관리
 
-**v0.12.0부터:** 설정 화면에서는 **대화 예비 모델**(‘모델’ 섹션의 대화 모델 바로 아래, 자체 적용 대상과 저장 버튼)만 편집합니다. 작업·검증 라우팅(이전 작업 실행기 전용)과 위임 작업(Hermes 기본 위임 방식 전용)의 예비 모델 카드, 별도의 ‘예비 모델(폴백) 설정’ 섹션은 화면에서 빠졌습니다. 저장된 두 값은 그대로 두며 화면의 어떤 저장도 이 값을 보내지 않습니다. 아래 표와 설명의 두 행은 저장된 값의 의미를 설명합니다. 작업 슬롯의 예비 모델은 각 슬롯 카드에서 설정합니다.
+**v0.12.1부터:** 설정 화면에서는 **대화 예비 모델**만 편집합니다. ‘모델’ 섹션의 기본 대화 모델 바로 아래에서 작업 슬롯의 예비 모델과 같은 방식(‘이 모델을 쓸 수 없을 때’ → ‘예비 모델로 이어가기’, 최대 5개, ‘위로’/‘아래로’로 우선순위 변경)으로 정하고, ‘모델’ 섹션의 적용 대상과 저장 버튼으로 모델과 함께 저장합니다. 대화 예비 모델을 받을 수 없는 대상(읽기 전용·지원 안 함)은 이름을 밝혀 건너뛰며, 그 대상의 대화 예비 모델은 그대로 두고 나머지 설정만 저장합니다. ‘다른 모델로 전환하지 않음’으로 꺼도 목록은 지우지 않고 보관합니다. v0.12.0의 별도 카드(자체 적용 대상과 저장 버튼)와 대화 예비 모델 프리셋은 없앴습니다. 작업·검증 라우팅(이전 작업 실행기 전용)과 위임 작업(Hermes 기본 위임 방식 전용)의 예비 모델 카드, 별도의 ‘예비 모델(폴백) 설정’ 섹션은 화면에서 빠졌습니다. 저장된 두 값은 그대로 두며 화면의 어떤 저장도 이 값을 보내지 않습니다. 아래 표와 설명의 두 행은 저장된 값의 의미를 설명합니다. 작업 슬롯의 예비 모델은 각 슬롯 카드에서 설정하며, v0.12.1부터 ‘위로’/‘아래로’로 순서를 바꿀 수 있습니다.
 
-> 아래 세 범위 설명과 카드 동작은 v0.11.x까지의 화면 기준입니다. v0.12.0 화면에서 편집할 수 있는 것은 ‘일반 대화’(대화 예비 모델)뿐이며, 나머지 두 범위는 저장된 값이 그대로 유지되고 화면에서 바꾸거나 저장하지 않습니다.
+> 아래 세 범위 설명과 카드 동작은 v0.11.x까지의 화면 기준입니다. v0.12.0 이후 화면에서 편집할 수 있는 것은 ‘일반 대화’(대화 예비 모델)뿐이며, 나머지 두 범위는 저장된 값이 그대로 유지되고 화면에서 바꾸거나 저장하지 않습니다.
 
 일반 모델 프리셋과 폴백 설정은 독립적입니다. 폴백은 주 모델을 사용할 수 없을 때 쓰는 예비 모델입니다. **메인 세션의 일반 대화**, **플러그인의 Heavy/Light 작업·검증 라우팅**, **Hermes 네이티브 서브 에이전트(`delegate_task`)**를 각각 나누어 설정합니다. 모델·세 폴백의 적용 대상은 화면을 처음 열 때 모든 프로필이 선택됩니다(폴백의 읽기 전용/지원되지 않는 프로필 제외). 사용자가 부분 선택하거나 전체 해제한 목록은 기준 프로필 변경이나 새로고침에서 확대하지 않습니다. 각 대상 목록은 서로 독립적입니다. 체크만으로 설정이 저장되거나 폴백이 복사되지는 않습니다. **불러온 프로필만**은 위에서 설정을 불러온 프로필 하나만 남기는 선택 단축 버튼이며, 저장·복원 버튼이 아닙니다. **라우팅 활성 프로필**은 적용 대상이 아니라 기능 사용 상태이므로 기존 활성화 설정을 그대로 표시합니다.
 

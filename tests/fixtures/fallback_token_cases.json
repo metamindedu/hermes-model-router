@@ -1,0 +1,37 @@
+{
+  "_comment": "Conversation spare-model tokens and whether the service accepts them. tests/test_model_section_fallback.py checks the service against this list, tests/test_fallback_desktop.mjs checks the page.",
+  "providers": [
+    ["openai-codex", true],
+    ["xiaomi", true],
+    ["Vendor.Name_1:eu", true],
+    ["9lab", true],
+    [" xiaomi", false],
+    ["xiaomi ", false],
+    ["-xiaomi", false],
+    ["x/y", false],
+    ["x y", false],
+    ["KEEP", false],
+    ["keep", false],
+    ["kEeP", false],
+    ["ünicode", false],
+    ["x[1m]", false]
+  ],
+  "models": [
+    ["gpt-6-astra", true],
+    ["vendor/model:tag", true],
+    ["claude-opus-5-5[1m]", true],
+    ["model[beta.2]", true],
+    ["NEW-MAIN", true],
+    [" model", false],
+    ["model ", false],
+    ["/model", false],
+    ["[1m]", false],
+    ["model[]", false],
+    ["model[1m]x", false],
+    ["model[1m][2m]", false],
+    ["model[1 m]", false],
+    ["model[abcdefghijklmnopqrstuvwxyz0123456]", false],
+    ["Keep", false],
+    ["möd", false]
+  ]
+}

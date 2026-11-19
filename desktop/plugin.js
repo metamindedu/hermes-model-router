@@ -358,6 +358,11 @@ export function externalChangeLabel(conflict) {
 export function externalChangeMessage(conflict) {
   return `다른 곳에서 변경됨 — 다시 불러오세요. ${conflict.profile} 프로필의 ${externalChangeLabel(conflict)} 값이 이 화면을 연 뒤 바뀌어 아무것도 저장하지 않았습니다. 상태 새로고침으로 최신 값을 불러온 뒤 다시 편집하세요.`
 }
+// The same refusal for one later step of a save whose earlier steps were saved: it names only that
+// step as not saved, never the whole save.
+export function externalChangeStepMessage(conflict, label) {
+  return `‘${label}’: 다른 곳에서 바뀌어 저장하지 않았습니다. ${conflict.profile} 프로필의 ${externalChangeLabel(conflict)} 값이 이 화면을 연 뒤 바뀌었습니다. 상태 새로고침으로 최신 값을 불러온 뒤 그 부분만 다시 편집해 저장하세요.`
+}
 
 // Values that changed elsewhere since they were frozen, at the same store revision. Early feedback
 // only: the service refuses such a save by itself (see pageExpectation).
@@ -639,24 +644,6 @@ export function readableValue(value) {
   return String(value)
 }
 
-export const NATIVE_FALLBACK_PRESETS = freezeDeep([
-  {
-    id: 'audited-non-openai',
-    name: '비-OpenAI 제공자 조합',
-    description: '대체 순서: Xiaomi 다음 DeepSeek',
-    chain: [
-      { provider: 'xiaomi', model: 'mimo-v2.6-pro' },
-      { provider: 'deepseek', model: 'deepseek-flash' }
-    ]
-  },
-  {
-    id: 'openai-api',
-    name: 'OpenAI API 모델',
-    description: 'API 사용량에 따라 추가 비용이 발생할 수 있습니다.',
-    chain: [{ provider: 'openai-api', model: 'gpt-6-astra' }]
-  }
-])
-
 export const ROUTING_FALLBACK_PRESETS = freezeDeep([
   {
     id: 'openai-api',
@@ -751,10 +738,31 @@ export function copyDelegationFallbackDraft(delegation) {
   return delegationFallbackValidation(draft) ? null : draft
 }
 
-export function applyNativeFallbackPresetDraft(draft, presetId) {
-  const preset = NATIVE_FALLBACK_PRESETS.find(item => item.id === presetId)
-  if (!preset || !draft || typeof draft !== 'object') return null
-  return { ...deepClone(draft), chain: deepClone(preset.chain) }
+// Moves one spare model up (-1) or down (+1) in its priority list; any other move returns the list unchanged.
+export function moveChainEntry(chain, index, delta) {
+  const list = Array.isArray(chain) ? [...chain] : []
+  const to = index + delta
+  if (!Number.isInteger(index) || ![-1, 1].includes(delta) || index < 0 || index >= list.length || to < 0 || to >= list.length) return list
+  ;[list[index], list[to]] = [list[to], list[index]]
+  return list
+}
+
+// The conversation spare-model editor's two modes, like a task slot's: 'off' keeps the stored chain
+// (a fully blank row added while editing is dropped), 'custom' turns it on and needs one row.
+export function nativeFallbackModeDraft(draft, mode) {
+  if (!draft || typeof draft !== 'object' || !Array.isArray(draft.chain) || !['off', 'custom'].includes(mode)) return draft
+  if (mode === 'off') return { ...draft, enabled: false, chain: draft.chain.filter(item => String(item?.provider || '').trim() || String(item?.model || '').trim()) }
+  return { ...draft, enabled: true, chain: draft.chain.length ? draft.chain : [{ provider: '', model: '' }] }
+}
+
+// Why a model-section target cannot take the conversation spare models ('' when it can). Such a
+// target still receives the model values and is named as skipped; it never fails the whole save.
+export function nativeFallbackTargetReason(row, fallbackSupported = true) {
+  if (!fallbackSupported) return '이 연결에서는 대화 예비 모델을 안전하게 바꿀 수 있는지 확인되지 않았습니다.'
+  const native = row?.fallbacks?.native
+  if (!native || typeof native.enabled !== 'boolean' || !Array.isArray(native.chain)) return '이 프로필의 대화 예비 모델 설정을 확인할 수 없습니다.'
+  if (native.editable !== true) return '이 프로필의 대화 예비 모델은 읽기 전용입니다.'
+  return ''
 }
 
 export function applyRoutingFallbackPresetDraft(draft, presetId) {
@@ -820,12 +828,30 @@ export function fallbackTargetNeedsConsent(scope, row, next) {
   return false
 }
 
+// The service's literal-token rules for a conversation spare model (service.py _validate_token with
+// PROVIDER_RE / MODEL_RE): no surrounding whitespace, these characters only, never KEEP. Both
+// patterns are ASCII-only, so lower-casing here equals the service's casefold().
+export const FALLBACK_PROVIDER_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
+export const FALLBACK_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]{1,32}\])?$/
+const foldToken = value => typeof value === 'string' ? value.toLowerCase() : ''
+// The identity the service compares spare models by: provider and model, both case-folded, not trimmed.
+export function foldedRouteIdentity(route) {
+  return route && typeof route.provider === 'string' && typeof route.model === 'string'
+    ? JSON.stringify([foldToken(route.provider), foldToken(route.model)])
+    : ''
+}
+const fallbackTokenValid = (value, pattern) => typeof value === 'string' && pattern.test(value) && foldToken(value) !== 'keep'
+
 export function nativeFallbackValidation(draft) {
   if (!draft || typeof draft.enabled !== 'boolean' || !Array.isArray(draft.chain)) return '대화 예비 모델 설정을 확인할 수 없습니다.'
   if (draft.chain.length > 5) return '대화 예비 모델은 최대 5개까지 지원합니다.'
   if (draft.chain.some(item => !item || typeof item.provider !== 'string' || !item.provider.trim() || typeof item.model !== 'string' || !item.model.trim())) return '각 예비 모델 항목에 공급자와 모델을 입력하세요.'
-  const identities = draft.chain.map(item => JSON.stringify([item.provider, item.model]))
-  if (new Set(identities).size !== identities.length) return '대화 예비 모델 목록에 중복된 공급자·모델 조합이 있습니다.'
+  if (draft.chain.some(item => !fallbackTokenValid(item.provider, FALLBACK_PROVIDER_RE) || !fallbackTokenValid(item.model, FALLBACK_MODEL_RE))) {
+    return '예비 모델의 공급자·모델 ID에 앞뒤 공백이나 쓸 수 없는 문자가 있습니다(KEEP도 쓸 수 없습니다). 영문·숫자와 . _ : - (모델 ID는 / 와 끝의 [태그]도)만 쓰세요.'
+  }
+  // Case-insensitive, as the service checks: 'Vendor/Model' and 'vendor/model' are the same spare.
+  const identities = draft.chain.map(foldedRouteIdentity)
+  if (new Set(identities).size !== identities.length) return '대화 예비 모델 목록에 중복된 공급자·모델 조합이 있습니다(대소문자만 다른 경우 포함).'
   if (draft.enabled && draft.chain.length === 0) return '대화 예비 모델을 켜려면 모델을 하나 이상 추가하세요.'
   return ''
 }
@@ -915,12 +941,15 @@ function fallbackScopeValidation(scope, value, rows, projection) {
     const invalid = nativeFallbackValidation(value)
     if (invalid) return invalid
     if (value.enabled) {
+      // Exactly the service's check (entry['models']['main'], case-folded): a model-copy recipient is
+      // compared with the main model it will have, every other target with its stored main model
+      // (a profile without a stored entry reports its actual models there). Never the actual main
+      // model of a stored entry: the service accepts a spare equal to it.
       for (const row of rows) {
-        const primary = projection?.model_targets?.includes(row.name)
-          ? projection.models?.main
-          : row.actual_models?.main || row.models?.main
-        if (primary && value.chain.some(item => routeIdentity(item) === routeIdentity(primary))) {
-          return `${row.name}의 기본 대화 모델과 대화 예비 모델은 달라야 합니다.`
+        const primary = projection?.model_targets?.includes(row.name) ? projection.models?.main : row.models?.main
+        const folded = foldedRouteIdentity(primary)
+        if (folded && value.chain.some(item => foldedRouteIdentity(item) === folded)) {
+          return `${row.name}의 기본 대화 모델과 대화 예비 모델은 달라야 합니다(대소문자만 다른 경우 포함).`
         }
       }
     }
@@ -1073,18 +1102,63 @@ export const BODY_TOO_LARGE_MESSAGE = '한 번에 저장하기에는 내용이 �
 export const previewBodyTooLarge = body => Boolean(body) && JSON.stringify(body).length > PREVIEW_BODY_LIMIT
 
 // The model section's store save: one scope when only one part changed, otherwise role models
-// and slot models in one plan. Timeouts and the legacy fallback are never part of it.
-export function buildModelSectionPreviewBody(snapshot, storeScope) {
+// and slot models in one plan. Timeouts and every fallback are never part of it: the conversation
+// spare models are saved afterwards through '/fallback-preview' (buildModelSectionFallbackBody), so
+// they never start the store-wide routing pass of an unscoped plan.
+export function buildModelSectionPreviewBody(snapshot, storeScope, revision = snapshot?.revision) {
+  const source = revision === snapshot?.revision ? snapshot : { ...snapshot, revision }
   if (storeScope === 'models' || storeScope === 'routing') {
-    const prepared = buildScopedPreviewBody(snapshot, storeScope)
+    const prepared = buildScopedPreviewBody(source, storeScope)
     return storeScope === 'routing' && snapshot.routingTargetError ? { body: prepared.body, errors: [...prepared.errors, snapshot.routingTargetError] } : prepared
   }
   const baseline = snapshot?.profileBaselines?.[snapshot.profile]
   if (!baseline?.models || !baseline?.routing || !snapshot.draft) return { body: null, errors: ['불러온 기준 설정을 확인할 수 없습니다. 상태를 새로고침하세요.'] }
   const routing = deepClone(snapshot.draft.routing)
-  const body = buildPreviewBody(snapshot.revision, snapshot.profile, { models: deepClone(snapshot.draft.models), routing },
+  const body = buildPreviewBody(revision, snapshot.profile, { models: deepClone(snapshot.draft.models), routing },
     snapshot.modelTargets, snapshot.routingProfiles, snapshot.routingTargets)
   return { body, errors: snapshot.routingTargetError ? [snapshot.routingTargetError] : [] }
+}
+
+// The model section's conversation spare-model save: the narrow '/fallback-preview' body the former
+// card sent (the page adds the frozen `expected` native_fallback), to the section's targets that can
+// take them. It writes only those profiles. `revision` is the store revision after the steps before it.
+export function buildModelSectionFallbackBody(snapshot, revision = snapshot?.revision) {
+  const targets = Array.isArray(snapshot?.fallbackWrite?.targets) ? snapshot.fallbackWrite.targets : []
+  const value = snapshot?.fallbackWrite?.value
+  const errors = [...(snapshot?.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : [])]
+  if (!targets.length || !value) errors.push('대화 예비 모델을 저장할 대상을 확인할 수 없습니다. 상태를 새로고침하세요.')
+  else {
+    // Everything the service refuses deterministically, against the main model each target will have
+    // after the steps before this one: checked before the first write of the save.
+    const rows = targets.map(name => (snapshot.profiles || []).find(row => row.name === name)).filter(Boolean)
+    const issue = fallbackScopeValidation('native', value, rows, { profile: snapshot.profile, models: snapshot.draft?.models, model_targets: snapshot.modelTargets || [] })
+    if (issue) errors.push(`대화 예비 모델: ${issue}`)
+  }
+  if (errors.length) return { body: null, errors }
+  return { body: buildFallbackPreviewBody(revision, 'native', targets, value, snapshot.profiles), errors: [] }
+}
+
+// What one model-section save writes to each profile, read from the request bodies themselves: the
+// delegation-method batch, the store plan and the conversation spare-model plan (each may be null).
+export function modelSectionWriteSet({ native = null, store = null, fallback = null } = {}) {
+  const set = new Map()
+  const entry = name => { if (!set.has(name)) set.set(name, { models: false, slots: false, method: null, slotSpares: false, conversationSpares: null }); return set.get(name) }
+  if (store) {
+    const scope = store.save_scope ?? null
+    if (scope === null || scope === 'models') for (const name of store.model_targets || []) entry(name).models = true
+    if ((scope === null || scope === 'routing') && store.routing && Object.prototype.hasOwnProperty.call(store.routing, 'slots')) {
+      for (const name of Array.isArray(store.routing_targets) ? store.routing_targets : [store.profile]) entry(name).slots = true
+    }
+  }
+  for (const update of native?.updates || []) {
+    const item = entry(update.profile)
+    item.method = update.backend ?? null
+    item.slotSpares = Object.prototype.hasOwnProperty.call(update, 'slot_policy') || Object.prototype.hasOwnProperty.call(update, 'policy')
+  }
+  for (const update of fallback?.updates || []) {
+    if (Object.prototype.hasOwnProperty.call(update, 'native_fallback')) entry(update.profile).conversationSpares = deepClone(update.native_fallback)
+  }
+  return set
 }
 
 export function buildScopedPreviewBody(snapshot, saveScope) {
@@ -2291,10 +2365,10 @@ export function submittedEditCoverage(view, sent) {
       }
       if (Array.isArray(body.timeout_updates) && body.timeout_updates.length) covered.add('timeouts')
       const fallbackUpdates = (body.fallback_updates || []).filter(update => Object.prototype.hasOwnProperty.call(update, 'native_fallback'))
-      if (every(fallbackUpdates, update => sameValue(update.native_fallback, view.nativeFallback))) covered.add('fallback:native')
+      if (every(fallbackUpdates, update => sameValue(update.native_fallback, view.nativeFallback))) { covered.add('fallback:native'); covered.add('copy.fallback') }
     } else if (operation === '/fallback-preview') {
       const updates = body.updates
-      if (every(updates, update => Object.prototype.hasOwnProperty.call(update, 'native_fallback') && sameValue(update.native_fallback, view.nativeFallback))) covered.add('fallback:native')
+      if (every(updates, update => Object.prototype.hasOwnProperty.call(update, 'native_fallback') && sameValue(update.native_fallback, view.nativeFallback))) { covered.add('fallback:native'); covered.add('copy.fallback') }
     } else if (operation === '/delegation-preview' && view.native) {
       const updates = body.updates
       if (part === 'native') {
@@ -2572,7 +2646,11 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
             labels: { picker: `예비 ${index + 1} 모델`, provider: `예비 ${index + 1} 제공자`, model: `예비 ${index + 1} 모델 ID` },
             route, disabled: locked, catalog,
             onChange: (field, value) => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.map((item, at) => at === index ? { ...item, [field]: value } : item) })) }),
-          jsx(Button, { id: `slot-${slot.id}-spare-remove-${index}`, size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: locked, onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })), children: '이 예비 모델 삭제' })
+          jsxs('div', { style: { ...styles.actions, alignSelf: 'flex-start' }, children: [
+            jsx(Button, { id: `slot-${slot.id}-spare-up-${index}`, size: 'sm', variant: 'secondary', disabled: locked || index === 0, onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: moveChainEntry(current.chain, index, -1) })), children: '위로' }),
+            jsx(Button, { id: `slot-${slot.id}-spare-down-${index}`, size: 'sm', variant: 'secondary', disabled: locked || index === spare.chain.length - 1, onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: moveChainEntry(current.chain, index, 1) })), children: '아래로' }),
+            jsx(Button, { id: `slot-${slot.id}-spare-remove-${index}`, size: 'sm', variant: 'secondary', disabled: locked, onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })), children: '이 예비 모델 삭제' })
+          ] })
         ] }, `${slot.id}-${index}`)),
         spare.mode === 'custom' ? jsx(Button, { id: `slot-${slot.id}-fallback-add`, size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: locked || spare.chain.length >= 5,
           onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })), children: '예비 모델 추가' }) : null
@@ -2813,19 +2891,13 @@ function RouterPage({ ctx: pluginContext }) {
   const [routingProfiles, setRoutingProfiles] = useState([])
   // Profiles the operator explicitly ticked to turn task routing back on (sent as reenable_profiles).
   const [reenableChosen, setReenableChosen] = useState([])
-  // Hand-picked conversation spare-model targets, kept apart from the pending copy intent
-  // (fallbackTargetEdits) that a source switch ends.
-  const fallbackTargetsManualRef = useRef(false)
   const [routingTargets, setRoutingTargets] = useState(null)
   const [routingBaseline, setRoutingBaseline] = useState(null)
   const [routingTargetEdited, setRoutingTargetEdited] = useState(false)
+  // The conversation spare models (native fallback) as drafted and as loaded; they are saved by the
+  // model section to its own targets. The routing/delegation values are read only, never written.
   const [fallbackDrafts, setFallbackDrafts] = useState({ native: null, routing: null, delegation: null })
   const [fallbackBaselines, setFallbackBaselines] = useState({ native: null, routing: null, delegation: null })
-  const [fallbackTargets, setFallbackTargets] = useState({ native: null, routing: null, delegation: null })
-  const [fallbackTargetEdits, setFallbackTargetEdits] = useState({ native: false, routing: false, delegation: false })
-  const [fallbackPreview, setFallbackPreview] = useState(null)
-  const [fallbackPreviewPending, setFallbackPreviewPending] = useState(false)
-  const [fallbackError, setFallbackError] = useState('')
   const [preview, setPreview] = useState(null)
   const [previewPending, setPreviewPending] = useState(false)
   const [applyPending, setApplyPending] = useState(false)
@@ -2868,7 +2940,6 @@ function RouterPage({ ctx: pluginContext }) {
     setNeedsReload(true)
     setApplyOutcome({ kind: unknown ? 'unknown' : 'prepared', message: '플러그인 준비로 실행 상태가 바뀌었거나 결과 확인이 필요합니다. 미저장 초안은 유지했습니다. 원래 연결에서 전체 상태를 명시적으로 새로고침한 뒤 적용 대상을 확인하세요. 전체 새로고침은 미저장 편집을 버립니다.' })
     setPreview(null)
-    setFallbackPreview(null)
   }
 
   const statusKey = ['model-router', 'status', scopeKey]
@@ -2919,7 +2990,6 @@ function RouterPage({ ctx: pluginContext }) {
       setRoutingTargetEdited(false)
     }
     setPreview(null)
-    setFallbackPreview(null)
   }, [revisionChanged, timeoutRevisionChanged, draftRevision, timeoutBaseline?.revision, statusQuery.data?.revision, applyPending])
 
   useEffect(() => {
@@ -2951,17 +3021,11 @@ function RouterPage({ ctx: pluginContext }) {
     setModelTargets(null)
     setRoutingProfiles([])
     setReenableChosen([])
-    fallbackTargetsManualRef.current = false
     setRoutingTargets(null)
     setRoutingBaseline(null)
     setRoutingTargetEdited(false)
     setFallbackDrafts({ native: null, routing: null, delegation: null })
     setFallbackBaselines({ native: null, routing: null, delegation: null })
-    setFallbackTargets({ native: null, routing: null, delegation: null })
-    setFallbackTargetEdits({ native: false, routing: false, delegation: false })
-    setFallbackPreview(null)
-    setFallbackPreviewPending(false)
-    setFallbackError('')
     setPageError('')
     if (applyPendingRef.current) {
       const wasApplying = applyPhaseRef.current === 'apply'
@@ -3013,10 +3077,7 @@ function RouterPage({ ctx: pluginContext }) {
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
     setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
     setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
-    setFallbackTargetEdits({ native: false, routing: false, delegation: false })
     setModelTargets([row.name])
-    fallbackTargetsManualRef.current = false
-    setFallbackTargets({ native: null, routing: null, delegation: null })
     setRoutingProfiles(profiles.filter(item => item.routing?.enabled === true).map(item => item.name))
     setReenableChosen([])
     setRoutingTargets(current => reconcileModelTargets(current, profiles.map(item => item.name)))
@@ -3028,9 +3089,6 @@ function RouterPage({ ctx: pluginContext }) {
     setPreview(invalidated.preview)
     setPreviewPending(invalidated.previewPending)
     setReviewed(invalidated.reviewed)
-    setFallbackPreview(null)
-    setFallbackPreviewPending(false)
-    setFallbackError('')
     setSectionErrors({ models: '', routing: '', timeouts: '', profiles: '' })
     setPageError('')
   }
@@ -3055,24 +3113,12 @@ function RouterPage({ ctx: pluginContext }) {
   const profileNames = profiles.map(item => item.name)
   const nativeFence = readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity)
   const nativeStorageAvailable = typeof pluginContext.storage?.get === 'function' && typeof pluginContext.storage?.set === 'function'
-  const nativeFallbackTargets = selectFallbackTargets(fallbackTargets.native, selectedProfile, profileNames, editableFallbackTargets('native', profiles))
-  const routingFallbackTargets = selectFallbackTargets(fallbackTargets.routing, selectedProfile, profileNames, editableFallbackTargets('routing', profiles))
-  const delegationFallbackTargets = selectFallbackTargets(fallbackTargets.delegation, selectedProfile, profileNames, editableFallbackTargets('delegation', profiles))
-  const missingFallbackTargets = vanishedFrom(fallbackTargets.native, fallbackTargetsManualRef.current)
-  const nativeFallbackRows = nativeFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
-  const routingFallbackRows = routingFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
-  const delegationFallbackRows = delegationFallbackTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean)
   const fallbackCapabilities = statusQuery.data?.fallback_capabilities
   const fallbackSupported = fallbackCapabilitiesSupported(fallbackCapabilities)
   const nativeFallbackDraft = fallbackDrafts.native
-  const routingFallbackDraft = fallbackDrafts.routing
-  const delegationFallbackDraft = fallbackDrafts.delegation
+  // Compared with the value frozen when the profile was loaded, never with a refreshed status row.
   const nativeFallbackDraftChanged = Boolean(nativeFallbackDraft && fallbackBaselines.native && !sameValue(nativeFallbackDraft, fallbackBaselines.native))
-  const routingFallbackDraftChanged = Boolean(routingFallbackDraft && fallbackBaselines.routing && !sameValue(routingFallbackDraft, fallbackBaselines.routing))
-  const delegationFallbackDraftChanged = Boolean(delegationFallbackDraft && fallbackBaselines.delegation && !sameValue(delegationFallbackDraft, fallbackBaselines.delegation))
-  const nativeFallbackError = nativeFallbackDraft ? nativeFallbackValidation(nativeFallbackDraft) : '이 프로필의 대화 fallback 상태를 지원하지 않습니다.'
-  const routingFallbackError = routingFallbackDraft ? routingFallbackValidation(routingFallbackDraft, routingFallbackRows) : '이 프로필의 이전 작업 방식 예비 모델 상태를 확인할 수 없습니다.'
-  const delegationFallbackError = delegationFallbackDraft ? delegationFallbackValidation(delegationFallbackDraft) : '이전 기본 위임 방식의 예비 모델 설정을 확인할 수 없습니다.'
+  const nativeFallbackError = nativeFallbackDraft ? nativeFallbackValidation(nativeFallbackDraft) : '이 프로필의 대화 예비 모델 설정을 확인할 수 없습니다.'
   // One target list for the whole model section: role models, slot models, delegation method and spare models.
   const selectedTargets = reconcileModelTargets(modelTargets, profileNames)
   const missingModelTargets = vanishedFrom(modelTargets, nativeTargetsManualRef.current)
@@ -3128,6 +3174,13 @@ function RouterPage({ ctx: pluginContext }) {
       ...(serverConflictRef.current ? [{ fallback: serverConflictRef.current.field === 'native_fallback' }] : [])]
     return items.some(item => kind === 'all' || (kind === 'fallback') === Boolean(item.fallback))
   }
+  // Re-checked at dispatch as well: whether the loaded profile's conversation spare models may still be
+  // edited here (confirmed capabilities and an editable source), read from the newest status.
+  const fallbackSourceEditableNow = () => {
+    const status = statusDataRef.current
+    const row = (status?.profiles || []).find(item => item?.name === selectedProfile)
+    return fallbackCapabilitiesSupported(status?.fallback_capabilities) && row?.fallbacks?.native?.editable === true
+  }
   const storeDriftError = storeDrift.length ? liveDriftMessage(storeDrift) : ''
   const nativeSectionEditable = Boolean(nativeDelegationDraft && currentRow?.native_delegation?.editable === true)
   const nativeSlotCopy = Boolean(nativeSectionEditable && nativeModelMode(nativeDelegationDraft.backend) && nativeSlotDraftReady(nativeDelegationDraft, currentRow.native_delegation))
@@ -3140,14 +3193,51 @@ function RouterPage({ ctx: pluginContext }) {
   const nativeBackendCopyable = Boolean(nativeDelegationDraft && nativeBackendSelectable(nativeDelegationDraft.backend))
   const nativeWriteNeeded = nativeSectionEditable && nativeBackendCopyable && !revisionChanged && nativeWriteTargets.length > 0 && (nativeDraftChanged || routingTargetEdited)
   let nativeDelegationError = ''
+  let nativeBatchBody = null
   if (nativeDraftChanged && selectedTargets.includes(selectedProfile) && nativeTargetReasons[selectedProfile]) {
     // The loaded profile's own change must never be dropped silently.
     nativeDelegationError = `${selectedProfile}: ${nativeTargetReasons[selectedProfile]}`
   } else if (nativeWriteNeeded) {
-    try { buildNativeDelegationBatchBody(draftRevision, selectedProfile, nativeWriteTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles, 'native') }
+    try { nativeBatchBody = buildNativeDelegationBatchBody(draftRevision, selectedProfile, nativeWriteTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles, 'native') }
     catch (error) { nativeDelegationError = error.message }
   }
-  const sectionWriteNeeded = modelWriteNeeded || routingCopyPending || nativeWriteNeeded
+  // The conversation spare models belong to the model section: they are written to the section's
+  // targets that can take them when the draft differs from the loaded value, or on the section's copy
+  // intent (a hand-picked target list). A target that cannot take them still receives the models and
+  // is named as skipped; it never fails the save.
+  const nativeFallbackEditable = fallbackSupported && currentRow?.fallbacks?.native?.editable === true && Boolean(nativeFallbackDraft)
+  const nativeFallbackTargetReasons = Object.fromEntries(profiles.map(row => [row.name, nativeFallbackTargetReason(row, fallbackSupported)]))
+  const nativeFallbackCopy = Boolean(routingTargetEdited && nativeFallbackEditable)
+  // Like the former card: nothing is written while the loaded profile's own spare models cannot be
+  // edited here (read-only, unreadable or unconfirmed capabilities), whatever the targets are.
+  const nativeFallbackWriteRequested = nativeFallbackEditable && (nativeFallbackDraftChanged || nativeFallbackCopy)
+  const nativeFallbackWriteTargets = nativeFallbackWriteRequested ? selectedTargets.filter(name => !nativeFallbackTargetReasons[name]) : []
+  const nativeFallbackWriteNeeded = !revisionChanged && nativeFallbackWriteTargets.length > 0
+  // Named before the copy intent is narrowed to the targets that can take them: with an edit or a
+  // hand-picked list, every selected target that will not receive the spare models is listed, also
+  // when the loaded profile's own spare models cannot be copied (for example unconfirmed capabilities).
+  const nativeFallbackIntent = nativeFallbackDraftChanged || routingTargetEdited
+  const nativeFallbackSkipReasons = Object.fromEntries(selectedTargets.map(name => [name, !nativeFallbackIntent ? ''
+    : nativeFallbackWriteRequested ? nativeFallbackTargetReasons[name]
+      : nativeFallbackTargetReasons[name] || `불러온 프로필(${selectedProfile})의 대화 예비 모델은 이 화면에서 바꿀 수 없어 복사하지 않습니다.`]))
+  const nativeFallbackSkippedTargets = selectedTargets.filter(name => nativeFallbackSkipReasons[name])
+  let nativeFallbackTargetError = ''
+  if (nativeFallbackDraftChanged && !nativeFallbackEditable) {
+    // A refreshed status made the loaded profile's spare models non-editable mid-edit: the edit is
+    // never written (not even to other targets) and never dropped silently.
+    nativeFallbackTargetError = `${selectedProfile}: ${nativeFallbackTargetReasons[selectedProfile] || '이 프로필의 대화 예비 모델은 읽기 전용입니다.'} 이 화면을 연 뒤 바뀌어, 바꾼 대화 예비 모델은 어느 프로필에도 저장할 수 없습니다. 상태를 새로고침해 저장된 값을 다시 불러오세요.`
+  } else if (nativeFallbackDraftChanged && selectedTargets.includes(selectedProfile) && nativeFallbackTargetReasons[selectedProfile]) {
+    // The loaded profile's own change must never be dropped silently.
+    nativeFallbackTargetError = `${selectedProfile}: ${nativeFallbackTargetReasons[selectedProfile]} 바꾼 대화 예비 모델을 저장할 수 없습니다.`
+  } else if (nativeFallbackDraftChanged && selectedTargets.length && !nativeFallbackWriteTargets.length) {
+    nativeFallbackTargetError = '바꾼 ‘대화 예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다. 받을 수 있는 프로필을 선택하거나 그 변경을 되돌리세요.'
+  }
+  const fallbackDriftError = fallbackDrift ? liveDriftMessage(driftItems.filter(item => item.fallback)) : ''
+  // The same check the combined body runs: no spare model may equal the main model a target will have.
+  const nativeFallbackIssue = nativeFallbackWriteNeeded ? fallbackScopeValidation('native', fallbackValueForScope('native', nativeFallbackDraft),
+    nativeFallbackWriteTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean), { profile: selectedProfile, models: draft?.models, model_targets: modelWriteTargets }) : ''
+  const nativeFallbackSaveError = nativeFallbackTargetError || (nativeFallbackWriteNeeded ? fallbackDriftError : '') || (nativeFallbackIssue ? `대화 예비 모델: ${nativeFallbackIssue}` : '')
+  const sectionWriteNeeded = modelWriteNeeded || routingCopyPending || nativeWriteNeeded || nativeFallbackWriteNeeded
   // The profile delegation section: editable only while the loaded profile's stored method uses
   // profiles. It saves to its own targets, each keeping its stored method and spare models.
   const profileSectionEditable = Boolean(nativeSectionEditable && nativeProfileMode(currentRow?.native_delegation?.backend))
@@ -3200,11 +3290,13 @@ function RouterPage({ ctx: pluginContext }) {
     'copy.models': Boolean(routingTargetEdited),
     'copy.slots': Boolean(routingTargetEdited && slotCardsVisible && draft?.slots),
     'native.copy': Boolean(routingTargetEdited && nativeBackendCopyable && selectedTargets.some(name => nativeBackendSelectable(nativeDelegationBaselines[name]?.backend))),
+    // ...and of the conversation spare models to the targets that can take them.
+    'copy.fallback': Boolean(nativeFallbackCopy && nativeFallbackWriteTargets.length),
     'native.backend': nativeFieldDirty('backend'), 'native.slotPolicy': nativeFieldDirty('slotPolicy'), 'native.autoSlotPolicy': nativeFieldDirty('autoSlotPolicy'),
     'profiles.list': Boolean(draftRoutes && frozenRoutes && differs(draftRoutes.profiles, frozenRoutes.profiles)),
     'profiles.default': Boolean(draftRoutes && frozenRoutes && differs(draftRoutes.default, frozenRoutes.default)),
     'profiles.targets': Boolean(profileTargetEdited),
-    timeouts: Boolean(timeoutWriteRequested), 'fallback:native': nativeFallbackDraftChanged || Boolean(fallbackTargetEdits.native),
+    timeouts: Boolean(timeoutWriteRequested), 'fallback:native': nativeFallbackDraftChanged,
     reenable: frozenReenable.length > 0 }
   // The drafted value of each edit, for checking what a save actually sent.
   editViewRef.current = { profile: selectedProfile, models: draft?.models ?? null,
@@ -3213,21 +3305,47 @@ function RouterPage({ ctx: pluginContext }) {
       autoSlotPolicy: nativeDelegationDraft.autoSlotPolicy ?? null, profile_routes: nativeDelegationDraft.profile_routes,
       descriptionEdits: nativeDelegationDraft.descriptionEdits || {} } : null,
     nativeFallback: fallbackValueForScope('native', nativeFallbackDraft), reenable: frozenReenable }
-  const noTargetError = (modelDraftChanged || slotDraftChanged || nativeDraftChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
+  const noTargetError = (modelDraftChanged || slotDraftChanged || nativeDraftChanged || nativeFallbackDraftChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
   // A changed delegation method or spare model that no selected profile can take is never dropped silently.
   const noNativeTargetError = nativeDraftChanged && selectedTargets.length && !nativeWriteTargets.length
     ? '바꾼 ‘맡기는 방식·예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다. 받을 수 있는 프로필을 선택하거나 그 변경을 되돌리세요.' : ''
   const sectionSaveError = (missingModelTargets.length && (sectionWriteNeeded || routingTargetEdited) ? vanishedMessage(missingModelTargets) : '') ||
     ((modelWriteNeeded || routingCopyPending) ? storeDriftError : '') || nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
+    nativeFallbackSaveError ||
     (nativeWriteNeeded && !nativeStorageAvailable ? '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.' : '')
   const customSlotCount = draft?.slots ? TASK_SLOTS.filter(slot => draft.slots[slot.id]?.follow === 'custom').length : 0
   const spareSlotCount = nativeSlotCopy ? TASK_SLOTS.filter(slot => nativeDraftSlotPolicy(nativeDelegationDraft)[slot.id].mode === 'custom').length : 0
   const sectionSaveSummary = [
     modelWriteNeeded ? '대화 모델' : null,
     routingCopyPending ? `작업 슬롯 모델(직접 지정 ${customSlotCount}개)` : null,
+    nativeFallbackWriteNeeded ? `대화 예비 모델: ${nativeFallbackDraft.enabled ? `${nativeFallbackDraft.chain.length}개 사용` : '사용 안 함'}` : null,
     nativeWriteNeeded ? `맡기는 방식: ${nativeBackendLabel(nativeDelegationDraft.backend)}${nativeSlotCopy ? ` · 예비 모델을 둔 슬롯 ${spareSlotCount}개` : ''}` : null
   ].filter(Boolean).join(' · ') || '바뀐 내용이 없어 저장할 것이 없습니다. 값을 고치면 그 내용을, 적용 대상을 직접 고르면 현재 값을 그 프로필에 저장합니다.'
   const nativeSkippedTargets = nativeDraftChanged || (nativeSectionEditable && nativeBackendCopyable && routingTargetEdited) ? selectedTargets.filter(name => nativeTargetReasons[name]) : []
+  // What this save writes to each target, read from the very bodies the save sends (built with the
+  // same builders from the current draft), so the per-target summary can never say otherwise.
+  const sectionStoreBody = (modelWriteNeeded || routingCopyPending) && draft && profileBaselines
+    ? buildModelSectionPreviewBody({ revision: draftRevision, profile: selectedProfile, draft: saveDraft, modelTargets: modelWriteTargets,
+      routingProfiles: loadedRoutingProfiles, routingTargets: routingWriteTargets, profileBaselines, routingTargetError },
+    modelWriteNeeded && routingCopyPending ? null : routingCopyPending ? 'routing' : 'models').body : null
+  const sectionFallbackBody = nativeFallbackWriteNeeded ? buildModelSectionFallbackBody({ profiles, profile: selectedProfile, draft: saveDraft, modelTargets: modelWriteTargets,
+    fallbackWrite: { targets: nativeFallbackWriteTargets, value: fallbackValueForScope('native', nativeFallbackDraft) } }, draftRevision).body : null
+  const sectionWriteSet = modelSectionWriteSet({ native: nativeWriteNeeded ? nativeBatchBody : null, store: sectionStoreBody, fallback: sectionFallbackBody })
+  const targetWriteLine = name => {
+    const item = sectionWriteSet.get(name)
+    const parts = item ? [
+      item.models ? '대화 모델' : '',
+      item.slots ? '작업 슬롯 모델' : '',
+      item.method ? `맡기는 방식(${nativeBackendLabel(item.method)})` : '',
+      item.slotSpares ? '슬롯 예비 모델' : '',
+      item.conversationSpares ? `대화 예비 모델(${item.conversationSpares.enabled ? `${item.conversationSpares.chain.length}개 사용` : '사용 안 함'})` : ''
+    ].filter(Boolean) : []
+    const kept = [
+      nativeSkippedTargets.includes(name) ? `맡기는 방식·슬롯 예비 모델은 그대로 둠(${nativeTargetReasons[name]})` : '',
+      nativeFallbackSkipReasons[name] ? `대화 예비 모델은 그대로 둠(${nativeFallbackSkipReasons[name]})` : ''
+    ].filter(Boolean)
+    return `${name}: ${parts.length ? `${parts.join(', ')} 저장` : '저장하는 값 없음'}${kept.length ? ` · ${kept.join(' · ')}` : ''}`
+  }
   const profileRoutesSummary = nativeDelegationDraft?.profile_routes
   const profileSaveSummary = profilesWriteNeeded
     ? `허용할 전문 프로필: ${profileRoutesSummary.profiles.map(entry => entry.name).join(', ') || '없음'}${currentRow?.native_delegation?.backend === 'model-router-profiles' ? ` · 기본: ${profileRoutesSummary.default || '없음'}` : ''}`
@@ -3287,7 +3405,6 @@ function RouterPage({ ctx: pluginContext }) {
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
     setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
     setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
-    setFallbackTargetEdits({ native: false, routing: false, delegation: false })
     // A hand-picked list survives a source switch as picked, vanished names included; only the
     // pending copy intent ends here.
     setModelTargets(current => nativeTargetsManualRef.current ? uniqueProfileNames(current || []) : [name])
@@ -3371,49 +3488,6 @@ function RouterPage({ ctx: pluginContext }) {
     }))
   }
 
-  const updateFallbackTarget = (scope, name, checked) => {
-    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
-    const selected = scope === 'native' ? [...nativeFallbackTargets, ...missingFallbackTargets] : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
-    invalidatePlan()
-    setFallbackTargets(current => ({ ...current, [scope]: toggleName(selected, name, checked) }))
-    setFallbackTargetEdits(current => ({ ...current, [scope]: true }))
-    if (scope === 'native') fallbackTargetsManualRef.current = true
-  }
-
-  const chooseFallbackTargets = (scope, mode) => {
-    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
-    let selected = scope === 'native' ? nativeFallbackTargets : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
-    if (mode === 'source') selected = selectFallbackSourceTarget(selectedProfile, profileNames)
-    if (mode === 'all') {
-      const eligible = editableFallbackTargets(scope, profiles)
-      selected = selectAllModelTargets(eligible)
-    }
-    if (mode === 'none') selected = selectNoModelTargets()
-    invalidatePlan()
-    setFallbackTargets(current => ({ ...current, [scope]: [...selected] }))
-    setFallbackTargetEdits(current => ({ ...current, [scope]: true }))
-    if (scope === 'native') fallbackTargetsManualRef.current = true
-  }
-
-  const canPreviewFallback = scope => {
-    if (!fallbackSupported || disabled || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || fallbackPreviewPending || !selectedProfile || !statusQuery.data) return false
-    const targets = scope === 'native' ? nativeFallbackTargets : scope === 'routing' ? routingFallbackTargets : delegationFallbackTargets
-    const rows = scope === 'native' ? nativeFallbackRows : scope === 'routing' ? routingFallbackRows : delegationFallbackRows
-    if (targets.length === 0 || rows.length !== targets.length) return false
-    if (scope === 'native' && missingFallbackTargets.length) return false
-    if (scope === 'native') {
-      if (!nativeFallbackDraft || fallbackDrift || currentRow?.fallbacks?.native?.editable !== true || rows.some(row => row.fallbacks?.native?.editable !== true)) return false
-      return !nativeFallbackError
-    }
-    if (scope === 'routing') {
-      if (!routingFallbackDraft || rows.some(row => !row.fallbacks?.routing || row.fallbacks.routing.editable === false || row.fallbacks.routing.readonly === true)) return false
-      return !routingFallbackError
-    }
-    if (!delegationFallbackDraft || !validDelegationFallbackState(currentRow?.fallbacks?.delegation) || currentRow.fallbacks.delegation.editable !== true ||
-      rows.some(row => !validDelegationFallbackState(row.fallbacks?.delegation) || row.fallbacks.delegation.editable !== true)) return false
-    return !delegationFallbackError
-  }
-
   const captureSaveSnapshot = () => freezeDeep({
     scopeKey,
     profile: selectedProfile,
@@ -3435,8 +3509,11 @@ function RouterPage({ ctx: pluginContext }) {
     noTargetError,
     fallbackDrafts: deepClone(fallbackDrafts),
     fallbackBaselines: deepClone(fallbackBaselines),
-    fallbackTargets: deepClone(fallbackTargets),
-    fallbackTargetEdits: { ...fallbackTargetEdits },
+    // The conversation spare models go to the model section's targets that can take them, and only
+    // when the draft differs from the loaded value or the section's target list was picked by hand.
+    fallbackTargets: { native: [...nativeFallbackWriteTargets] },
+    fallbackTargetEdits: { native: nativeFallbackWriteNeeded },
+    nativeFallbackTargetError,
     profiles: deepClone(profiles),
     // Frozen at load (never re-read after a write): what each store body expects to overwrite.
     pageExpectations: deepClone(expectationBaselines || {}),
@@ -3489,7 +3566,10 @@ function RouterPage({ ctx: pluginContext }) {
     setNeedsReload(true)
   }
 
-  const runSave = async ({ operation, scope = null, snapshot, prepare, beforeApply = null, nativeWrite = false, followUp = null }) => {
+  // `followUps` are further transactions of one save, in order ({ operation, label, prepare(revision),
+  // prevalidate }); `firstLabel` names the first one. Each later step is planned only after the step
+  // before it applied, at the store revision that apply reported, and is never retried.
+  const runSave = async ({ operation, scope = null, snapshot, prepare, beforeApply = null, nativeWrite = false, followUps = [], firstLabel = '' }) => {
     if (!snapshot || setupPendingRef.current || profilePreparationLocked() || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity) || applyPendingRef.current || needsReloadRef.current) return
     const token = ++generationRef.current
     applyPendingRef.current = true
@@ -3497,12 +3577,8 @@ function RouterPage({ ctx: pluginContext }) {
     applyPhaseRef.current = 'preview'
     setApplyPending(true)
     setPreview(null)
-    setFallbackPreview(null)
     setPageError('')
-    setFallbackError('')
-    if (scope && operation !== '/fallback-preview') {
-      setSectionErrors(current => ({ ...current, [scope]: '' }))
-    }
+    if (scope) setSectionErrors(current => ({ ...current, [scope]: '' }))
     let applyStarted = false
     let cleanSave = false
     // Reloading replaces every draft, so it runs by itself only when the bodies this save actually
@@ -3511,7 +3587,10 @@ function RouterPage({ ctx: pluginContext }) {
     const viewAtStart = editViewRef.current
     const sent = []
     let nativeFenceRecord = null
-    const skippedNote = followUp ? `‘${followUp.secondLabel}’ 저장은 시작하지 않았습니다. 새로고침하면 저장하지 않은 편집은 사라지므로 다시 입력해 저장하세요.` : ''
+    const followLabels = followUps.map(step => `‘${step.label}’`).join(', ')
+    const skippedNote = followUps.length ? `${followLabels} 저장은 시작하지 않았습니다. 새로고침하면 저장하지 않은 편집은 사라지므로 다시 입력해 저장하세요.` : ''
+    // A store or spare-model apply reports the store revision it left; the delegation method does not move it.
+    const revisionAfter = (current, op, receipt) => ['/preview', '/fallback-preview'].includes(op) && Number.isInteger(receipt?.revision) && receipt.revision >= current ? receipt.revision : current
     // Every store body carries the frozen expectations of the profiles and fields it writes. The
     // follow-up of a combined save uses the same frozen values: its first write (the delegation
     // method) touches none of them, so nothing is advanced.
@@ -3524,7 +3603,7 @@ function RouterPage({ ctx: pluginContext }) {
       return conflict
     }
     try {
-      const rawPrepared = prepare()
+      const rawPrepared = prepare(snapshot.revision)
       const prepared = { ...rawPrepared, body: rawPrepared.errors?.length ? rawPrepared.body : withExpected(operation, rawPrepared.body) }
       if (prepared.errors?.length) throw new Error(prepared.errors.join(' '))
       if (previewBodyTooLarge(prepared.body)) throw new Error(BODY_TOO_LARGE_MESSAGE)
@@ -3533,7 +3612,7 @@ function RouterPage({ ctx: pluginContext }) {
       if (!isSaveCurrent(snapshot, token)) return
       if (timeoutUpdates.length && !timeoutSnapshotStillCurrent(snapshot, timeoutUpdates)) {
         const message = '저장 검증 중 대상 프로필의 시간 제한 revision이 바뀌었습니다. 적용하지 않았습니다. 상태를 새로고침한 뒤 다시 편집하세요.'
-        if (scope && operation !== '/fallback-preview') setSectionErrors(current => ({ ...current, [scope]: message }))
+        if (scope) setSectionErrors(current => ({ ...current, [scope]: message }))
         else setPageError(message)
         return
       }
@@ -3543,13 +3622,15 @@ function RouterPage({ ctx: pluginContext }) {
       const planId = result.plan_id
       if (!isSaveCurrent(snapshot, token)) return
       if (beforeApply && !beforeApply()) throw new Error('선택한 프로필의 설정이 저장 준비 중에 바뀌었습니다. 상태를 다시 불러온 뒤 저장하세요.')
-      if (followUp) {
-        // Validate the second transaction before the first one writes anything.
-        const checkRaw = followUp.prepare()
+      for (const step of followUps) {
+        // Validate the later transactions before the first one writes anything, unless a step
+        // depends on what an earlier one writes (then only after that one applied).
+        const checkRaw = step.prepare(snapshot.revision)
         if (checkRaw.errors?.length) throw new Error(checkRaw.errors.join(' '))
-        const check = { ...checkRaw, body: withExpected(followUp.operation, checkRaw.body) }
+        const check = { ...checkRaw, body: withExpected(step.operation, checkRaw.body) }
         if (previewBodyTooLarge(check.body)) throw new Error(BODY_TOO_LARGE_MESSAGE)
-        const checked = await ctx.rest(followUp.operation, { method: 'POST', body: check.body })
+        if (step.prevalidate === false) continue
+        const checked = await ctx.rest(step.operation, { method: 'POST', body: check.body })
         if (!isSaveCurrent(snapshot, token)) return
         if (!checked || typeof checked.plan_id !== 'string' || !Array.isArray(checked.changes)) throw new Error('저장 계획 응답이 올바르지 않습니다. 설정은 변경되지 않았습니다.')
       }
@@ -3581,45 +3662,66 @@ function RouterPage({ ctx: pluginContext }) {
       }
       applyStarted = true
       applyPhaseRef.current = 'apply'
-      sent.push({ operation, part: snapshot.nativePart || null, body: prepared.body })
       const receipt = await ctx.rest('/apply', { method: 'POST', body: { plan_id: planId }, timeoutMs: 180000 })
+      // Only a body whose apply was confirmed counts towards the saved edits.
+      if (!isPartialReceipt(receipt) && ['applied', 'no_change'].includes(receipt?.status)) sent.push({ operation, part: snapshot.nativePart || null, body: prepared.body })
       if (nativeFenceRecord) writeNativeSaveFence(pluginContext.storage, snapshot.scopeKey,
         { ...nativeFenceRecord, state: isPartialReceipt(receipt) || ['applied', 'no_change'].includes(receipt?.status) ? 'settled' : 'unknown' }, nativeFenceRecord.id)
       if (!isSaveCurrent(snapshot, token)) {
         markApplyUnknown(snapshot, '저장 도중 연결 또는 프로필이 바뀌어 결과를 확인할 수 없습니다. 다시 저장하지 마세요. 원래 연결·프로필로 돌아가 실제 상태를 새로고침하세요.')
         return
       }
-      if (!followUp || isPartialReceipt(receipt) || !['applied', 'no_change'].includes(receipt?.status)) {
+      if (!followUps.length || isPartialReceipt(receipt) || !['applied', 'no_change'].includes(receipt?.status)) {
         // A partial or unknown first receipt ends the chain; nothing else is attempted.
-        recordApplyReceipt(snapshot, receipt, followUp ? skippedNote : '')
-        cleanSave = !followUp && !isPartialReceipt(receipt) && ['applied', 'no_change'].includes(receipt?.status)
+        recordApplyReceipt(snapshot, receipt, followUps.length ? skippedNote : '')
+        cleanSave = !followUps.length && !isPartialReceipt(receipt) && ['applied', 'no_change'].includes(receipt?.status)
         return
       }
-      // The first apply does not move the store revision, but a plan made before it is not reused.
-      let secondStarted = false
-      try {
-        const nextRaw = followUp.prepare()
-        if (nextRaw.errors?.length) throw new Error(nextRaw.errors.join(' '))
-        const next = { ...nextRaw, body: withExpected(followUp.operation, nextRaw.body) }
-        const plan = await ctx.rest(followUp.operation, { method: 'POST', body: next.body })
-        if (!isSaveCurrent(snapshot, token)) throw new Error('저장 도중 연결 또는 프로필이 바뀌었습니다.')
-        if (!plan || typeof plan.plan_id !== 'string' || !Array.isArray(plan.changes)) throw new Error('저장 계획 응답이 올바르지 않습니다.')
-        secondStarted = true
-        sent.push({ operation: followUp.operation, part: null, body: next.body })
-        const second = await ctx.rest('/apply', { method: 'POST', body: { plan_id: plan.plan_id }, timeoutMs: 180000 })
-        if (!isSaveCurrent(snapshot, token)) throw new Error('저장 도중 연결 또는 프로필이 바뀌었습니다.')
-        if (isPartialReceipt(second) || !['applied', 'no_change'].includes(second?.status)) throw new Error(second?.error || '적용 결과를 확인할 수 없습니다.')
-        setApplyOutcome({ kind: 'success', result: { [followUp.firstLabel]: receipt, [followUp.secondLabel]: second } })
+      // A plan made before an earlier apply is never reused: each step is planned again, at the
+      // revision the step before it left, and the chain stops at the first step that does not apply.
+      const done = [{ label: firstLabel, receipt }]
+      let revision = revisionAfter(snapshot.revision, operation, receipt)
+      let failure = null
+      for (let index = 0; index < followUps.length && !failure; index++) {
+        const step = followUps[index]
+        let started = false
+        try {
+          const nextRaw = step.prepare(revision)
+          if (nextRaw.errors?.length) throw new Error(nextRaw.errors.join(' '))
+          const next = { ...nextRaw, body: withExpected(step.operation, nextRaw.body) }
+          if (previewBodyTooLarge(next.body)) throw new Error(BODY_TOO_LARGE_MESSAGE)
+          const plan = await ctx.rest(step.operation, { method: 'POST', body: next.body })
+          if (!isSaveCurrent(snapshot, token)) throw new Error('저장 도중 연결 또는 프로필이 바뀌었습니다.')
+          if (!plan || typeof plan.plan_id !== 'string' || !Array.isArray(plan.changes)) throw new Error('저장 계획 응답이 올바르지 않습니다.')
+          started = true
+          const result = await ctx.rest('/apply', { method: 'POST', body: { plan_id: plan.plan_id }, timeoutMs: 180000 })
+          if (!isSaveCurrent(snapshot, token)) throw new Error('저장 도중 연결 또는 프로필이 바뀌었습니다.')
+          if (isPartialReceipt(result) || !['applied', 'no_change'].includes(result?.status)) throw new Error(result?.error || '적용 결과를 확인할 수 없습니다.')
+          sent.push({ operation: step.operation, part: null, body: next.body })
+          done.push({ label: step.label, receipt: result })
+          revision = revisionAfter(revision, step.operation, result)
+        } catch (error) {
+          failure = { index, step, started, error }
+        }
+      }
+      if (!failure) {
+        setApplyOutcome({ kind: 'success', result: Object.fromEntries(done.map(item => [item.label, item.receipt])) })
         cleanSave = true
-      } catch (error) {
-        const firstDone = receipt.status === 'no_change' ? `‘${followUp.firstLabel}’: 바뀐 내용이 없었습니다.` : `‘${followUp.firstLabel}’: 저장했습니다.`
-        // A compare-and-set refusal is checked before the second write: nothing of it was written.
-        const conflict = noteConflict(error)
-        const reason = `(사유: ${conflict ? externalChangeMessage(conflict) : error?.message || '알 수 없는 오류'})`
-        setApplyOutcome({ kind: 'partial', result: { [followUp.firstLabel]: receipt },
-          message: secondStarted && !conflict
-            ? `${firstDone} ‘${followUp.secondLabel}’: 저장 결과를 확인할 수 없습니다. 다시 저장하지 말고 상태를 새로고침해 실제 반영 여부를 확인하세요. ${reason}`
-            : `${firstDone} ‘${followUp.secondLabel}’: 저장하지 않았습니다. 상태를 새로고침한 뒤 저장되지 않은 부분만 다시 편집해 저장하세요. ${reason}` })
+      } else {
+        // Exactly what was saved, what is unknown and what was never started.
+        const saved = done.map(item => item.receipt.status === 'no_change' ? `‘${item.label}’: 바뀐 내용이 없었습니다.` : `‘${item.label}’: 저장했습니다.`).join(' ')
+        // A compare-and-set refusal is checked before a step writes: nothing of that step was written.
+        // Its message names that step only; the steps before it were saved.
+        const conflict = noteConflict(failure.error)
+        const rest = followUps.slice(failure.index + 1).map(step => `‘${step.label}’`)
+        const notStarted = rest.length ? ` ${rest.join(', ')}: 시작하지 않았습니다.` : ''
+        const reason = `(사유: ${failure.error?.message || '알 수 없는 오류'})`
+        setApplyOutcome({ kind: 'partial', result: Object.fromEntries(done.map(item => [item.label, item.receipt])),
+          message: conflict
+            ? `${saved} ${externalChangeStepMessage(conflict, failure.step.label)}${notStarted}`
+            : failure.started
+              ? `${saved} ‘${failure.step.label}’: 저장 결과를 확인할 수 없습니다.${notStarted} 다시 저장하지 말고 상태를 새로고침해 실제 반영 여부를 확인하세요. ${reason}`
+              : `${saved} ‘${failure.step.label}’: 저장하지 않았습니다.${notStarted} 상태를 새로고침한 뒤 저장되지 않은 부분만 다시 편집해 저장하세요. ${reason}` })
       }
       needsReloadRef.scopeKey = snapshot.scopeKey
       needsReloadRef.current = true
@@ -3630,16 +3732,14 @@ function RouterPage({ ctx: pluginContext }) {
       const conflict = !nativeFenceRecord ? noteConflict(error) : null
       if (conflict && isSaveCurrent(snapshot, token)) {
         const message = externalChangeMessage(conflict)
-        if (operation === '/fallback-preview') setFallbackError({ scope, message })
-        else if (scope) setSectionErrors(current => ({ ...current, [scope]: message }))
+        if (scope) setSectionErrors(current => ({ ...current, [scope]: message }))
         else setPageError(message)
       } else if (applyStarted) {
         if (nativeFenceRecord) writeNativeSaveFence(pluginContext.storage, snapshot.scopeKey, { ...nativeFenceRecord, state: 'unknown' }, nativeFenceRecord.id)
         markApplyUnknown(snapshot, `${error?.message || '저장 결과를 확인할 수 없습니다. 다시 저장하지 말고 실제 상태를 새로고침하세요.'}${skippedNote ? ` ${skippedNote}` : ''}`)
       } else if (isSaveCurrent(snapshot, token)) {
         const message = `저장되지 않았습니다. ${error?.message || '설정 검증에 실패했습니다.'}`
-        if (operation === '/fallback-preview') setFallbackError({ scope, message })
-        else if (scope) setSectionErrors(current => ({ ...current, [scope]: message }))
+        if (scope) setSectionErrors(current => ({ ...current, [scope]: message }))
         else setPageError(message)
       }
     } finally {
@@ -3661,52 +3761,63 @@ function RouterPage({ ctx: pluginContext }) {
     }
   }
 
-  const saveFallback = scope => {
-    // Only the conversation fallback is saved from the page; stored routing/delegation values stay as they are.
-    if (!PAGE_FALLBACK_SCOPES.includes(scope) || (scope === 'native' && driftNow('fallback'))) return
-    if (renderGeneration !== generationRef.current || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || !canPreviewFallback(scope)) return
-    const snapshot = captureSaveSnapshot()
-    const targetNames = scope === 'native' ? [...nativeFallbackTargets] : scope === 'routing' ? [...routingFallbackTargets] : [...delegationFallbackTargets]
-    const value = deepClone(scope === 'native' ? nativeFallbackDraft : scope === 'routing' ? routingFallbackDraft : delegationFallbackDraft)
-    return runSave({
-      operation: '/fallback-preview', scope, snapshot,
-      prepare: () => ({ body: buildFallbackPreviewBody(snapshot.revision, scope, targetNames, value, snapshot.profiles), errors: [] })
-    })
-  }
-
   const updateNativeDelegationDraft = updater => {
     if (!editFromThisRender() || setupPendingRef.current || profilePreparationLocked() || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity) || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlanForEdit()
     setNativeDelegationDraft(current => current ? updater(current) : current)
   }
 
-  // One button for the model section. The delegation method and spare models live in each
-  // profile's config, the role and slot models in the shared plugin store: two transactions,
-  // native first because it does not move the store revision.
+  // One button for the model section, up to three transactions in this order, each from its own
+  // frozen snapshot: the delegation method and slot spare models ('/delegation-preview', which does
+  // not move the store revision), the role and slot models (a store '/preview'), then the
+  // conversation spare models through the narrow '/fallback-preview' path. The spare models never
+  // travel in an unscoped store plan: its routing pass would write profiles the save does not target.
   const saveModelSection = () => {
     if (renderGeneration !== generationRef.current || revisionChanged || !currentRow || !draft || !statusQuery.data ||
       setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || refreshPendingRef.current || !profileBaselines) return
     const slotsNeeded = routingCopyPending
+    const storeNeeded = modelWriteNeeded || slotsNeeded
+    const fallbackNeeded = nativeFallbackWriteNeeded
     const storeScope = modelWriteNeeded && slotsNeeded ? null : slotsNeeded ? 'routing' : 'models'
     if (!sectionWriteNeeded || sectionSaveError) return
     // Checked again now, against the newest status: this callback may come from an earlier render.
-    if ((modelWriteNeeded || slotsNeeded) && driftNow('store')) return
-    const snapshot = freezeDeep({ ...captureSaveSnapshot(), nativePart: 'native',
+    if (storeNeeded && driftNow('store')) return
+    if (fallbackNeeded && driftNow('fallback')) return
+    if ((fallbackNeeded || nativeFallbackDraftChanged) && !fallbackSourceEditableNow()) return
+    const base = captureSaveSnapshot()
+    const nativeSnapshot = freezeDeep({ ...base, nativePart: 'native',
       nativeDraft: nativeDelegationDraft ? deepClone(nativeDelegationDraft) : null,
       nativeTargets: [...nativeWriteTargets], nativeBaselines: deepClone(nativeDelegationBaselines),
       nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
-    const store = { operation: '/preview', firstLabel: '맡기는 방식과 예비 모델', secondLabel: '모델 변경',
-      prepare: () => buildModelSectionPreviewBody(snapshot, storeScope) }
-    if (!nativeWriteNeeded) return runSave({ operation: '/preview', scope: 'models', snapshot, prepare: store.prepare })
-    // The method is always sent; spare models only for the method whose slot cards are on screen.
+    const storeSnapshot = base
+    const fallbackSnapshot = freezeDeep({ ...base, fallbackWrite: { targets: [...nativeFallbackWriteTargets], value: fallbackValueForScope('native', nativeFallbackDraft) } })
+    const storeStep = { operation: '/preview', label: '모델 변경', prepare: revision => buildModelSectionPreviewBody(storeSnapshot, storeScope, revision) }
+    // The service checks the spare models against each target's stored main model. When the models
+    // step changes that model for a spare-model target, the check is valid only after that step.
+    const mainChangedFor = name => base.modelTargets.includes(name) && (() => {
+      const row = base.profiles.find(item => item.name === name)
+      return routeIdentity(base.draft.models?.main) !== routeIdentity(row?.models?.main) || routeIdentity(base.draft.models?.main) !== routeIdentity(row?.actual_models?.main)
+    })()
+    const fallbackStep = { operation: '/fallback-preview', label: '대화 예비 모델 변경',
+      prevalidate: !(storeNeeded && fallbackSnapshot.fallbackWrite.targets.some(mainChangedFor)),
+      prepare: revision => buildModelSectionFallbackBody(fallbackSnapshot, revision) }
+    const steps = [...(storeNeeded ? [storeStep] : []), ...(fallbackNeeded ? [fallbackStep] : [])]
+    if (!nativeWriteNeeded) {
+      const [first, ...followUps] = steps
+      if (!first) return
+      return runSave({ operation: first.operation, scope: 'models', snapshot: first === storeStep ? storeSnapshot : fallbackSnapshot,
+        prepare: first.prepare, firstLabel: first.label, followUps })
+    }
+    // The method is always sent; slot spare models only for the method whose slot cards are on screen.
     if (nativeDelegationError || !nativeStorageAvailable || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity) ||
-      !nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current)) return
-    return runSave({ operation: '/delegation-preview', scope: 'models', snapshot, nativeWrite: true,
-      beforeApply: () => nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current),
-      prepare: () => ({ body: buildNativeDelegationBatchBody(snapshot.revision, snapshot.profile, snapshot.nativeTargets,
-        snapshot.nativeDraft, snapshot.nativeBaselines, snapshot.profiles, 'native'), errors: [] }),
-      followUp: modelWriteNeeded || slotsNeeded ? store : null })
+      !nativeDelegationSnapshotCurrent(nativeSnapshot, statusDataRef.current)) return
+    return runSave({ operation: '/delegation-preview', scope: 'models', snapshot: nativeSnapshot, nativeWrite: true, firstLabel: '맡기는 방식과 예비 모델',
+      beforeApply: () => nativeDelegationSnapshotCurrent(nativeSnapshot, statusDataRef.current),
+      prepare: () => ({ body: buildNativeDelegationBatchBody(nativeSnapshot.revision, nativeSnapshot.profile, nativeSnapshot.nativeTargets,
+        nativeSnapshot.nativeDraft, nativeSnapshot.nativeBaselines, nativeSnapshot.profiles, 'native'), errors: [] }),
+      followUps: steps })
   }
+
 
   // The profile delegation section's own save: the same '/delegation-preview' path and save fence,
   // with only the allow-list, descriptions and consent taken from the draft.
@@ -3760,6 +3871,8 @@ function RouterPage({ ctx: pluginContext }) {
 
   const saveAll = () => {
     if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || liveDrift.length || pageVanished.length || driftNow('all') || !currentRow || !draft || !statusQuery.data || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
+    // The whole-page save carries the conversation spare models too: same dispatch-time source check.
+    if ((nativeFallbackWriteNeeded || nativeFallbackDraftChanged) && !fallbackSourceEditableNow()) return
     const snapshot = captureSaveSnapshot()
     return runSave({
       operation: '/preview', snapshot,
@@ -3798,7 +3911,8 @@ function RouterPage({ ctx: pluginContext }) {
           model_targets: combined.body.model_targets,
           routing_targets: combined.body.routing_targets
         }, routingUpdates)
-        return { body: combined.body, errors: [...new Set([...combined.errors, ...projectedErrors, ...(snapshot.routingTargetError ? [snapshot.routingTargetError] : []), ...(snapshot.noTargetError ? [snapshot.noTargetError] : [])])] }
+        return { body: combined.body, errors: [...new Set([...combined.errors, ...projectedErrors, ...(snapshot.routingTargetError ? [snapshot.routingTargetError] : []), ...(snapshot.noTargetError ? [snapshot.noTargetError] : []),
+          ...(snapshot.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : [])])] }
       }
     })
   }
@@ -3841,7 +3955,6 @@ function RouterPage({ ctx: pluginContext }) {
     generationRef.current += 1
     setPreview(null)
     setReviewed(false)
-    setFallbackPreview(null)
     setProfileBaselines(copyProfileBaselines(rows))
     setExpectationBaselines(copyPageExpectations(rows))
     setServerConflict(null)
@@ -3863,11 +3976,6 @@ function RouterPage({ ctx: pluginContext }) {
       return !item || item.routing?.enabled === false || routingSkillEnabled(item) === false
     }))
     setRoutingTargets(current => reconcileModelTargets(current, rows.map(item => item.name)))
-    setFallbackTargets(current => ({
-      native: fallbackTargetsManualRef.current && Array.isArray(current.native) ? uniqueProfileNames(current.native) : null,
-      routing: reconcileFallbackTargets(current.routing, rows.map(item => item.name)),
-      delegation: reconcileFallbackTargets(current.delegation, rows.map(item => item.name))
-    }))
     setDraftRevision(response.data.revision)
     if (row) {
       const nextDraft = copyProfileDraft(row)
@@ -3882,7 +3990,6 @@ function RouterPage({ ctx: pluginContext }) {
       const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
       setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
       setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
-    setFallbackTargetEdits({ native: false, routing: false, delegation: false })
     } else {
       setSelectedProfile(null)
       setDraft(null)
@@ -3893,8 +4000,6 @@ function RouterPage({ ctx: pluginContext }) {
       setFallbackDrafts({ native: null, routing: null, delegation: null })
       setFallbackBaselines({ native: null, routing: null, delegation: null })
     }
-    setFallbackError('')
-    setFallbackTargetEdits({ native: false, routing: false, delegation: false })
     needsReloadRef.current = false
     needsReloadRef.scopeKey = null
     applyScopeRef.current = null
@@ -3943,6 +4048,46 @@ function RouterPage({ ctx: pluginContext }) {
     ]
   }) : null
 
+  // The conversation spare models (native fallback_providers), directly under the main conversation
+  // model and in the task slots' pattern. They are saved by the model section's save, to its targets.
+  const nativeFallbackStatus = currentRow?.fallbacks?.native
+  const nativeFallbackLocked = disabled || !nativeFallbackEditable
+  const nativeChainText = chain => Array.isArray(chain) && chain.length
+    ? chain.map(item => `${item?.provider || '—'}/${item?.model || '—'}`).join(' → ')
+    : '없음'
+  const nativeFallbackSameAsMain = Boolean(nativeFallbackDraft?.enabled && draft?.models?.main &&
+    nativeFallbackDraft.chain.some(item => foldedRouteIdentity(item) && foldedRouteIdentity(item) === foldedRouteIdentity(draft.models.main)))
+  const nativeFallbackInlineError = nativeFallbackDraft ? nativeFallbackError || (nativeFallbackSameAsMain ? '대화 모델과 같은 모델은 예비 모델로 둘 수 없습니다.' : '') : ''
+  const moveNativeChain = (index, delta) => updateFallbackDraft('native', current => ({ ...current, chain: moveChainEntry(current.chain, index, delta) }))
+  const conversationFallback = jsxs('div', { id: 'conversation-fallback', style: { borderTop: '1px solid var(--ui-stroke-tertiary)', paddingTop: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.65rem', minWidth: 0 }, children: [
+    nativeFallbackDraft ? jsx(ChoiceField, { id: 'native-fallback-mode', label: '이 모델을 쓸 수 없을 때', value: nativeFallbackDraft.enabled ? 'custom' : 'off', disabled: nativeFallbackLocked,
+      options: [{ value: 'off', label: '다른 모델로 전환하지 않음' }, { value: 'custom', label: '예비 모델로 이어가기' }],
+      onChange: mode => updateFallbackDraft('native', current => nativeFallbackModeDraft(current, mode)) }) : null,
+    ...(nativeFallbackDraft?.enabled ? nativeFallbackDraft.chain.map((entry, index) => jsxs('div', { style: { ...styles.modelRoute, alignItems: 'stretch' }, children: [
+      jsx(ModelRouteField, {
+        ids: { picker: `native-chain-${index}-picker`, provider: `native-chain-${index}-provider`, model: `native-chain-${index}-model` },
+        labels: { picker: `예비 ${index + 1} 모델`, provider: `예비 ${index + 1} 제공자`, model: `예비 ${index + 1} 모델 ID` },
+        route: entry, disabled: nativeFallbackLocked, catalog: modelCatalog,
+        onChange: (field, value) => updateFallbackDraft('native', current => ({ ...current, chain: current.chain.map((item, at) => at === index ? { ...item, [field]: value } : item) })) }),
+      jsxs('div', { style: { ...styles.actions, alignSelf: 'flex-start' }, children: [
+        jsx(Button, { id: `native-chain-${index}-up`, size: 'sm', variant: 'secondary', disabled: nativeFallbackLocked || index === 0, onClick: () => moveNativeChain(index, -1), children: '위로' }),
+        jsx(Button, { id: `native-chain-${index}-down`, size: 'sm', variant: 'secondary', disabled: nativeFallbackLocked || index === nativeFallbackDraft.chain.length - 1, onClick: () => moveNativeChain(index, 1), children: '아래로' }),
+        jsx(Button, { id: `native-chain-${index}-remove`, size: 'sm', variant: 'secondary', disabled: nativeFallbackLocked, onClick: () => updateFallbackDraft('native', current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })), children: '이 예비 모델 삭제' })
+      ] })
+    ] }, `native-chain-${index}`)) : []),
+    nativeFallbackDraft?.enabled ? jsx(Button, { id: 'native-chain-add', size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: nativeFallbackLocked || nativeFallbackDraft.chain.length >= 5,
+      onClick: () => updateFallbackDraft('native', current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })), children: '예비 모델 추가' }) : null,
+    nativeFallbackDraft && !nativeFallbackDraft.enabled && nativeFallbackDraft.chain.length ? jsx('p', { id: 'native-fallback-kept', style: styles.hint, children: `꺼 두어도 예비 모델 목록(${nativeChainText(nativeFallbackDraft.chain)})은 지우지 않고 보관합니다.` }) : null,
+    nativeFallbackInlineError ? jsx('p', { id: 'native-fallback-error', role: 'alert', style: styles.warning, children: nativeFallbackInlineError }) : null,
+    !fallbackSupported ? jsx('p', { id: 'native-fallback-unsupported', role: 'note', style: styles.warning, children: '이 연결에서는 대화 예비 모델을 안전하게 바꿀 수 있는지 확인되지 않아 읽기 전용으로 둡니다. 플러그인을 업데이트한 뒤 상태를 새로고침하세요.' }) : null,
+    fallbackSupported && !nativeFallbackDraft ? jsx('p', { id: 'native-fallback-unavailable', role: 'note', style: styles.warning, children: '이 프로필의 대화 예비 모델 설정을 확인할 수 없어 표시하지 않습니다. 기존 값은 그대로 둡니다.' }) : null,
+    fallbackSupported && nativeFallbackDraft && nativeFallbackStatus?.editable !== true ? jsx('p', { id: 'native-fallback-readonly', role: 'note', style: styles.warning, children: '별도의 고급 옵션이나 관리자 고정 설정이 있어 이 화면에서는 바꿀 수 없습니다(읽기 전용). 기존 설정은 그대로 둡니다.' }) : null,
+    nativeFallbackEditable && nativeFallbackStatus?.managed !== true ? jsx('p', { id: 'native-fallback-managed', role: 'note', style: styles.hint, children: '지금 예비 모델은 다른 설정에서 관리됩니다. 여기서 바꿔 저장하면 이 플러그인이 관리하는 설정으로 바뀝니다.' }) : null,
+    nativeFallbackStatus?.drift ? jsx('p', { id: 'native-fallback-drift', role: 'status', style: styles.warning, children: `저장된 예비 모델과 실제로 쓰는 예비 모델이 다릅니다. 실제로 쓰는 목록: ${nativeChainText(nativeFallbackStatus.actual_chain)}` }) : null,
+    Array.isArray(nativeFallbackStatus?.warnings) && nativeFallbackStatus.warnings.length ? jsx('div', { id: 'native-fallback-warnings', role: 'note', style: styles.warning, children: nativeFallbackStatus.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: readableValue(warning) }, index)) }) : null,
+    nativeFallbackDraft?.enabled ? jsx('p', { id: 'native-fallback-cost-note', role: 'note', style: styles.hint, children: '예비 모델로 이어가면 제공자의 요금제에 따라 사용량이나 비용이 늘 수 있습니다.' }) : null
+  ] })
+
   const modelFields = draft ? jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' },
     children: [
@@ -3956,7 +4101,8 @@ function RouterPage({ ctx: pluginContext }) {
           children: [
             jsxs('div', { children: [jsx('h3', { style: styles.roleTitle, children: role.label }), jsx('p', { style: { ...styles.hint, marginTop: '0.25rem' }, children: role.description })] }),
             jsx(RoleRouteFields, { prefix: `model-${role.id}`, route: draft.models?.[role.id], disabled, catalog: modelCatalog, onChange: (field, value) => updateRole(role.id, field, value) }),
-            jsx('p', { style: styles.actual, children: `실제 설정: ${readableValue(currentRow?.actual_models?.[role.id])}` })
+            jsx('p', { style: styles.actual, children: `실제 설정: ${readableValue(currentRow?.actual_models?.[role.id])}` }),
+            role.id === 'main' ? conversationFallback : null
           ]
         }, role.id))
       })
@@ -3968,7 +4114,7 @@ function RouterPage({ ctx: pluginContext }) {
     id: 'model-section-targets', style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '적용 대상' }),
-      jsx('p', { style: styles.hint, children: '위에서 정한 대화 모델, 맡기는 방식, 작업 슬롯의 모델과 예비 모델을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 값을 고치거나 대상을 직접 고른 뒤 저장하면 선택한 프로필에 같은 설정을 복사합니다. ‘대화 예비 모델’은 그 카드의 적용 대상과 저장 버튼을 따로 씁니다.' }),
+      jsx('p', { style: styles.hint, children: '위에서 정한 대화 모델과 그 예비 모델, 맡기는 방식, 작업 슬롯의 모델과 예비 모델을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 값을 고치거나 대상을 직접 고른 뒤 저장하면 선택한 프로필에 같은 설정을 복사합니다.' }),
       jsxs('div', { style: styles.selectionToolbar, children: [
         jsxs('div', { style: styles.statusLine, children: [jsx(Badge, { variant: allTargetsSelected && profileNames.length > 1 ? 'warn' : 'muted', children: targetSummary }), jsx('span', { style: styles.hint, children: `${selectedTargets.length}개 선택` })] }),
         jsxs('div', { style: styles.actions, children: [
@@ -3979,7 +4125,10 @@ function RouterPage({ ctx: pluginContext }) {
       ] }),
       allTargetsSelected && profileNames.length > 1 ? jsx('p', { role: 'note', style: styles.warning, children: `모든 ${profileNames.length}개 프로필이 적용 대상입니다. 저장하면 확인 단계 없이 바로 적용됩니다.` }) : null,
       jsx('div', { style: { ...styles.profileList, alignItems: 'start' }, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${row.name}`, label: row.name,
-        detail: selectedTargets.includes(row.name) && nativeSkippedTargets.includes(row.name) ? `맡기는 방식과 예비 모델은 적용하지 않습니다. ${nativeTargetReasons[row.name]}` : undefined,
+        detail: selectedTargets.includes(row.name) ? [
+          nativeSkippedTargets.includes(row.name) ? `맡기는 방식과 슬롯 예비 모델은 적용하지 않습니다. ${nativeTargetReasons[row.name]}` : '',
+          nativeFallbackSkippedTargets.includes(row.name) ? `대화 예비 모델은 적용하지 않습니다. ${nativeFallbackSkipReasons[row.name]}` : ''
+        ].filter(Boolean).join(' ') || undefined : undefined,
         checked: selectedTargets.includes(row.name), disabled, onChange: checked => toggleModelTarget(row.name, checked) }) }, row.name))
         .concat(missingModelTargets.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${name}`, label: name,
           detail: '이 프로필을 더 이상 찾을 수 없습니다. 체크를 해제하세요.', checked: true, disabled, onChange: checked => toggleModelTarget(name, checked) }) }, `missing:${name}`))) }),
@@ -3987,7 +4136,10 @@ function RouterPage({ ctx: pluginContext }) {
         jsx('strong', { children: '저장할 내용' }),
         jsx('p', { style: styles.hint, children: `적용 대상: ${selectedTargets.join(', ') || '선택 안 됨'}` }),
         jsx('p', { style: styles.hint, children: sectionSaveSummary }),
-        nativeSkippedTargets.length ? jsx('p', { id: 'model-section-skipped', style: styles.hint, children: `맡기는 방식과 예비 모델을 적용하지 않는 프로필: ${nativeSkippedTargets.join(', ')}. 이 프로필에는 모델 값만 저장합니다.` }) : null
+        nativeSkippedTargets.length ? jsx('p', { id: 'model-section-skipped', style: styles.hint, children: `맡기는 방식과 슬롯 예비 모델을 적용하지 않는 프로필: ${nativeSkippedTargets.join(', ')}. 이 프로필의 맡기는 방식과 슬롯 예비 모델은 그대로 둡니다.` }) : null,
+        nativeFallbackSkippedTargets.length ? jsx('p', { id: 'model-section-fallback-skipped', style: styles.hint, children: `대화 예비 모델을 적용하지 않는 프로필: ${nativeFallbackSkippedTargets.join(', ')}. 이 프로필의 대화 예비 모델은 그대로 둡니다.` }) : null,
+        sectionWriteNeeded ? jsx('ul', { id: 'model-section-target-writes', style: { ...styles.hint, margin: 0, paddingLeft: '1.1rem' },
+          children: selectedTargets.map(name => jsx('li', { id: `model-section-write-${name}`, children: targetWriteLine(name) }, name)) }) : null
       ] }),
       sectionSaveError ? jsx('p', { role: 'alert', style: styles.warning, children: sectionSaveError }) : null,
       sectionErrors.models ? jsx('p', { role: 'alert', style: styles.warning, children: sectionErrors.models }) : null,
@@ -4083,92 +4235,6 @@ function RouterPage({ ctx: pluginContext }) {
     ]
   }))
 
-  const fallbackTargetGroup = (scope, selected, allowEditing) => jsx('fieldset', {
-    style: styles.fieldset,
-    children: [
-      jsx('legend', { style: styles.fieldName, children: `${fallbackScopeTitle(scope)} 적용 대상` }),
-      jsx('p', { style: styles.hint, children: '처음 열면 편집 가능한 모든 프로필이 선택됩니다. 선택한 프로필에 이 카드 설정을 적용합니다. 체크만으로 저장되지는 않으며, 아래 ‘모델’ 적용 대상과는 별개입니다. ‘불러온 프로필만’은 위에서 설정을 불러온 프로필 하나만 남깁니다.' }),
-      jsxs('div', { style: styles.selectionToolbar, children: [
-        jsx('span', { style: styles.hint, children: `${selected.length}/${profileNames.length}개 프로필 선택` }),
-        jsxs('div', { style: styles.actions, children: [
-          jsx(Button, { id: `${scope}-fallback-target-source`, size: 'sm', variant: 'secondary', disabled, onClick: () => chooseFallbackTargets(scope, 'source'), children: '불러온 프로필만' }),
-          jsx(Button, { id: `${scope}-fallback-target-all`, size: 'sm', variant: 'secondary', disabled, onClick: () => chooseFallbackTargets(scope, 'all'), children: '전체 선택' }),
-          jsx(Button, { id: `${scope}-fallback-target-none`, size: 'sm', variant: 'secondary', disabled, onClick: () => chooseFallbackTargets(scope, 'none'), children: '모두 해제' })
-        ] })
-      ] }),
-      jsx('div', { style: styles.profileList, children: profiles.map(row => {
-        const supported = scope === 'native'
-          ? row.fallbacks?.native?.editable === true
-          : scope === 'delegation'
-            ? validDelegationFallbackState(row.fallbacks?.delegation) && row.fallbacks.delegation.editable === true
-            : Boolean(row.fallbacks?.routing && row.fallbacks.routing.editable !== false && row.fallbacks.routing.readonly !== true)
-        const checked = selected.includes(row.name)
-        return jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, {
-          id: `${scope}-fallback-target-${row.name}`,
-          label: row.name,
-          detail: supported ? undefined : '설정을 확인할 수 없거나 읽기 전용입니다. 기존 값을 보존합니다.',
-          checked,
-          disabled: disabled || (!supported && !checked),
-          onChange: value => updateFallbackTarget(scope, row.name, value)
-        }) }, row.name)
-      }).concat(scope !== 'native' ? [] : missingFallbackTargets.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, {
-        id: `${scope}-fallback-target-${name}`, label: name, detail: '이 프로필을 더 이상 찾을 수 없습니다. 체크를 해제하세요.', checked: true, disabled,
-        onChange: value => updateFallbackTarget(scope, name, value) }) }, `missing:${name}`))) }),
-      scope === 'native' && missingFallbackTargets.length
-        ? jsx('p', { id: 'native-fallback-targets-missing', role: 'alert', style: styles.warning, children: vanishedMessage(missingFallbackTargets) }) : null
-    ]
-  })
-
-  const nativeStatus = currentRow?.fallbacks?.native
-  const nativeEditable = fallbackSupported && nativeStatus?.editable === true && Boolean(nativeFallbackDraft)
-  const nativeChainText = chain => Array.isArray(chain) && chain.length
-    ? chain.map(item => `${item?.provider || '—'}/${item?.model || '—'}`).join(' → ')
-    : '없음'
-  // The main conversation's spare models (native fallback_providers). It sits in the model section
-  // under the conversation models but keeps its own targets, save button and '/fallback-preview' path.
-  const nativeFallbackPanel = jsxs('article', { id: 'conversation-fallback', style: styles.roleCard, children: [
-    jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '대화 예비 모델' }), jsx(Badge, { variant: nativeStatus?.enabled ? 'warn' : 'muted', children: nativeStatus?.enabled ? '현재 사용' : nativeStatus ? '현재 꺼짐' : '상태 미지원' }), nativeFallbackDraftChanged ? jsx(Badge, { variant: 'muted', children: '초안 변경' }) : null] }),
-    jsx('p', { style: styles.hint, children: '메인 세션에서 나와 대화하는 모델의 예비입니다. 주 모델을 사용할 수 없을 때, Hermes의 전환 조건에 따라 현재 대화 문맥으로 다른 모델을 사용합니다. 이 설정을 저장한다고 진행 중인 응답이 즉시 바뀌지는 않습니다.' }),
-    jsx('p', { id: 'native-fallback-recovery-note', role: 'note', style: styles.hint, children: '사용 제한이 풀리면 다음 응답에서 기본 모델을 다시 시도할 수 있습니다. 복귀 준비 알림은 정상 응답을 확인했다는 뜻은 아닙니다. 아래 목록은 예비 모델 설정이며, 지금 대화 중인 모델을 표시하는 것은 아닙니다.' }),
-    jsx('p', { style: styles.warning, children: '대체 모델을 켜거나 경로를 바꾸면 사용량에 따라 추가 비용이 발생할 수 있습니다. 선택한 범위를 저장할 때만 설정에 반영됩니다.' }),
-    jsxs('div', { style: styles.fields, children: [
-      jsx('p', { style: styles.actual, children: `저장 설정: ${fallbackBaselines.native?.enabled ? nativeChainText(fallbackBaselines.native.chain) : `꺼짐 · 보관 체인 ${nativeChainText(fallbackBaselines.native?.chain)}`}` }),
-      jsx('p', { style: styles.actual, children: `편집 초안: ${nativeFallbackDraft?.enabled ? nativeChainText(nativeFallbackDraft.chain) : `꺼짐 · 보관 체인 ${nativeChainText(nativeFallbackDraft?.chain)}`}` }),
-      jsx('p', { style: styles.actual, children: `실제 적용 경로: ${nativeChainText(nativeStatus?.actual_chain)}` })
-    ] }),
-    nativeStatus?.drift ? jsx('p', { role: 'status', style: styles.warning, children: '저장된 대화 체인과 실제 적용 체인이 다릅니다. 실제 경로를 먼저 확인하세요.' }) : null,
-    Array.isArray(nativeStatus?.warnings) && nativeStatus.warnings.length ? jsx('div', { role: 'note', style: styles.warning, children: nativeStatus.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: readableValue(warning) }, index)) }) : null,
-    !fallbackSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '폴백 설정을 안전하게 변경할 수 있는지 확인되지 않아 읽기 전용으로 표시합니다. 플러그인 업데이트 후 상태를 새로고침하세요.' }) : null,
-    fallbackSupported && nativeStatus && nativeStatus.editable !== true ? jsx('p', { role: 'note', style: styles.warning, children: '별도의 고급 옵션이나 관리자 고정 설정이 있어 이 화면에서 안전하게 변경할 수 없습니다. 기존 설정을 보호하기 위해 읽기 전용으로 표시합니다.' }) : null,
-    nativeEditable ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.85rem' }, children: [
-      jsx(CheckRow, { id: 'native-fallback-enabled', label: '메인 대화에서 대체 체인 사용', detail: '모델 목록을 채우는 것만으로는 켜지지 않습니다.', checked: nativeFallbackDraft.enabled, disabled, onChange: checked => updateFallbackDraft('native', current => ({ ...current, enabled: checked })) }),
-      nativeStatus?.managed !== true ? jsx('p', { role: 'note', style: styles.warning, children: '현재 체인은 다른 설정에서 관리됩니다. 화면을 열거나 값을 편집하는 것만으로 소유권은 바뀌지 않습니다. 이 범위에 명시적으로 적용하면 플러그인 관리 설정으로 전환됩니다.' }) : null,
-      jsx('div', { style: styles.presetGrid, children: NATIVE_FALLBACK_PRESETS.map(preset => jsx('button', { id: `native-fallback-preset-${preset.id}`, type: 'button', disabled, onClick: () => updateFallbackDraft('native', current => applyNativeFallbackPresetDraft(current, preset.id)), style: styles.presetCard, children: [jsx('strong', { children: preset.name }), jsx('span', { style: styles.hint, children: preset.description }), jsx('span', { style: styles.hint, children: `${preset.chain.map(item => `${item.provider}/${item.model}`).join(' → ')} · 선택한 값은 초안에만 반영되며 사용 여부는 별도로 선택합니다.` })] }, preset.id)) }),
-      jsxs('div', { style: styles.fieldset, children: [
-        jsx('strong', { style: styles.fieldName, children: '예비 모델 목록 · 위에서 아래 순서로 시도' }),
-        ...nativeFallbackDraft.chain.map((entry, index) => jsxs('div', { style: styles.roleCard, children: [
-          jsx('strong', { style: styles.roleTitle, children: `우선순위 ${index + 1}` }),
-          jsx(ModelRouteField, {
-            ids: { picker: `native-chain-${index}-picker`, provider: `native-chain-${index}-provider`, model: `native-chain-${index}-model` },
-            labels: { picker: `우선순위 ${index + 1} 모델`, provider: `우선순위 ${index + 1} 공급자 ID`, model: `우선순위 ${index + 1} 모델 ID` },
-            route: entry, disabled, catalog: modelCatalog,
-            onChange: (field, value) => updateFallbackDraft('native', current => ({ ...current, chain: current.chain.map((item, at) => at === index ? { ...item, [field]: value } : item) })) }),
-          jsxs('div', { style: styles.actions, children: [
-            jsx(Button, { id: `native-chain-${index}-up`, size: 'sm', variant: 'secondary', disabled: disabled || index === 0, onClick: () => updateFallbackDraft('native', current => { const chain = [...current.chain]; [chain[index - 1], chain[index]] = [chain[index], chain[index - 1]]; return { ...current, chain } }), children: '위로' }),
-            jsx(Button, { id: `native-chain-${index}-down`, size: 'sm', variant: 'secondary', disabled: disabled || index === nativeFallbackDraft.chain.length - 1, onClick: () => updateFallbackDraft('native', current => { const chain = [...current.chain]; [chain[index + 1], chain[index]] = [chain[index], chain[index + 1]]; return { ...current, chain } }), children: '아래로' }),
-            jsx(Button, { id: `native-chain-${index}-remove`, size: 'sm', variant: 'secondary', disabled, onClick: () => updateFallbackDraft('native', current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })), children: '삭제' })
-          ] })
-        ] }, `native-chain-${index}`)),
-        jsx(Button, { id: 'native-chain-add', size: 'sm', variant: 'secondary', disabled: disabled || nativeFallbackDraft.chain.length >= 5, onClick: () => updateFallbackDraft('native', current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })), children: '모델 추가' }),
-        nativeFallbackError ? jsx('p', { role: 'alert', style: styles.warning, children: nativeFallbackError }) : null
-      ] }),
-      jsx('p', { role: 'note', style: styles.hint, children: '예비 모델을 사용하면 제공자의 요금제에 따라 추가 비용이 발생할 수 있습니다. 아래 저장을 눌러야 적용됩니다.' }),
-      fallbackTargetGroup('native', nativeFallbackTargets, nativeEditable),
-      fallbackError?.scope === 'native' ? jsx('p', { role: 'alert', style: styles.warning, children: fallbackError.message }) : null,
-      jsx(Button, { id: 'native-fallback-save', size: 'sm', variant: 'secondary', disabled: !canPreviewFallback('native'), onClick: () => void saveFallback('native'), children: applyPending ? '저장 중…' : '대화 예비 모델 저장' })
-    ] }) : null
-  ] })
-
   const profileSectionDisabled = disabled || !nativeStorageAvailable
   const profileTargetGroup = profileSectionEditable ? jsxs('fieldset', {
     id: 'profile-section-targets', style: styles.fieldset,
@@ -4210,7 +4276,7 @@ function RouterPage({ ctx: pluginContext }) {
 
   const localCombinedSummary = currentRow && draft && statusQuery.data
     ? buildCombinedPreviewBody(statusQuery.data.revision, selectedProfile, draft, modelWriteTargets, loadedRoutingProfiles,
-      fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported, fallbackTargetEdits, routingWriteTargets,
+      fallbackDrafts, fallbackBaselines, { native: nativeFallbackWriteTargets }, profiles, fallbackSupported, { native: nativeFallbackWriteNeeded }, routingWriteTargets,
       {
         profile: selectedProfile,
         draft: draft.timeouts,
@@ -4232,9 +4298,6 @@ function RouterPage({ ctx: pluginContext }) {
     model_targets: localCombinedSummary.body.model_targets,
     routing_targets: localCombinedSummary.body.routing_targets
   }, summaryRoutingUpdates) : []
-  const modifiedFallbackSummary = [
-    { scope: 'native', label: '대화 예비 모델', changed: nativeFallbackDraftChanged || fallbackTargetEdits.native, count: nativeFallbackTargets.length }
-  ].filter(item => item.changed)
   const timeoutSummary = !timeoutSettingsSupported
     ? '시간 제한을 확인할 수 없어 변경하지 않습니다'
     : !timeoutRoleSupported
@@ -4245,15 +4308,15 @@ function RouterPage({ ctx: pluginContext }) {
           ? '시간 제한의 입력값과 대상 프로필 상태를 다시 확인하세요.'
           : `전체 실행 시간 변경 없음 · 시간 제한 대상 ${selectedTimeoutTargets.length}개 선택 · 불러온 ${selectedProfile} 프로필 값 일반 ${draft?.timeouts?.delegate_total_minutes}분 / 짧은 작업 ${draft?.timeouts?.routed_light_total_minutes}분 / 긴 작업 ${draft?.timeouts?.routed_heavy_total_minutes}분`
   const scopeDraftErrors = [
-    [nativeFallbackDraftChanged || fallbackTargetEdits.native, nativeFallbackError]
+    [nativeFallbackDraftChanged, nativeFallbackError]
   ].filter(([changed, error]) => changed && error).map(([, error]) => error)
-  const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors, ...(routingTargetError ? [routingTargetError] : []), ...(noTargetError ? [noTargetError] : [])])]
-  // The whole-page save writes the model targets, the time-limit targets and the conversation spare
-  // models' targets; a vanished ticked name in any list it would write blocks it by name.
+  const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors, ...(routingTargetError ? [routingTargetError] : []), ...(noTargetError ? [noTargetError] : []),
+    ...(nativeFallbackTargetError ? [nativeFallbackTargetError] : [])])]
+  // The whole-page save writes the model targets (models, slot models and conversation spare models)
+  // and the time-limit targets; a vanished ticked name in any list it would write blocks it by name.
   const pageVanished = [...new Set([
-    ...((modelWriteNeeded || routingCopyPending) ? missingModelTargets : []),
-    ...(timeoutWriteRequested ? missingTimeoutTargets : []),
-    ...((nativeFallbackDraftChanged || fallbackTargetEdits.native) ? missingFallbackTargets : [])])]
+    ...((modelWriteNeeded || routingCopyPending || nativeFallbackWriteRequested) ? missingModelTargets : []),
+    ...(timeoutWriteRequested ? missingTimeoutTargets : [])])]
   const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled && !timeoutRevisionChanged && !liveDrift.length && !pageVanished.length)
 
   return jsxs('main', {
@@ -4265,9 +4328,8 @@ function RouterPage({ ctx: pluginContext }) {
       jsx(ProfilePreparationCard, { pluginContext, data: statusQuery.data, scopeKey, settingsBusy: applyPending || setupPending || statusQuery.isFetching, begin: beginProfilePreparation, finish: finishProfilePreparation, onPrepared: profilePreparationChanged }),
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
       profiles.length ? section('불러올 프로필', '아래에 불러올 설정을 고릅니다. 실제로 바꿀 프로필은 각 카드의 적용 대상에서 따로 선택하세요.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `지금 사용 중인 프로필: ${activeProfile || '확인 중'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
-      profiles.length ? section('모델', '대화에 쓸 모델과 그 예비 모델, 나눠 맡기는 작업에 쓸 모델을 한곳에서 정합니다. 대화 예비 모델은 그 카드의 적용 대상과 저장 버튼을 쓰고, 나머지는 맨 아래 적용 대상에서 고른 프로필에만 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' }, children: [
+      profiles.length ? section('모델', '대화에 쓸 모델과 그 예비 모델, 나눠 맡기는 작업에 쓸 모델을 한곳에서 정합니다. 모두 맨 아래 적용 대상에서 고른 프로필에 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' }, children: [
         jsxs('div', { id: 'conversation-models', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [jsx('h3', { style: styles.roleTitle, children: '대화 모델' }), modelFields] }),
-        nativeFallbackPanel,
         jsx(NativeDelegationCard, { dto: currentRow?.native_delegation, draft: nativeDelegationDraft, catalog: modelCatalog,
           targets: nativeWriteTargets, disabled: disabled || !nativeStorageAvailable,
           slots: { support: slotInfo, draft: draft?.slots || null, models: draft?.models || null, disabled, onFollow: changeSlotFollow, onRoute: updateSlotRoute,
@@ -4291,13 +4353,13 @@ function RouterPage({ ctx: pluginContext }) {
         ] }) : null
       ] }) : null,
       needsReload || nativeFence ? jsx('div', { style: styles.actions, children: jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching || nativeFence?.state === 'pending', onClick: () => void reloadStatus(), children: statusQuery.isFetching ? '상태 확인 중…' : '실제 상태 확인 후 편집 재개' }) }) : null,
-      profiles.length && !needsReload ? section('기본 모델·시간·기타 설정 함께 저장', '위에서 편집한 대화 모델·작업 슬롯 모델·대화 예비 모델·시간 제한을 한 번에 저장합니다. 각 카드에서 고른 적용 대상은 그대로 따릅니다. 맡기는 방식, 슬롯별 예비 모델, 작업 분담 다시 켜기, 전문 프로필 위임은 여기 포함되지 않으며 각 섹션의 버튼으로 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
+      profiles.length && !needsReload ? section('기본 모델·시간·기타 설정 함께 저장', '위에서 편집한 대화 모델과 그 예비 모델, 작업 슬롯 모델, 시간 제한을 한 번에 저장합니다. 모델과 대화 예비 모델은 ‘모델’ 섹션의 적용 대상을, 시간 제한은 시간 제한 적용 대상을 따릅니다. 맡기는 방식, 슬롯별 예비 모델, 작업 분담 다시 켜기, 전문 프로필 위임은 여기 포함되지 않으며 각 섹션의 버튼으로 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
         jsx('div', { id: 'draft-reference-summary', role: 'note', style: styles.section, children: [
           jsx('strong', { children: '현재 초안 요약 · 참고 정보' }),
           jsx('p', { style: styles.hint, children: `대화 모델 적용 ${modelWriteTargets.length}개 (${modelWriteTargets.join(', ') || '바뀐 내용 없음 · 기존 설정 유지'}) · 작업 슬롯 모델 적용 ${routingWriteTargets.length}개 (${routingWriteTargets.join(', ') || '기존 설정 유지'})` }),
-          jsx('p', { style: styles.hint, children: modifiedFallbackSummary.length
-            ? `수정한 예비 모델: ${modifiedFallbackSummary.map(item => `${item.label} ${item.count}개 대상`).join(' · ')}`
-            : '수정한 대화 예비 모델 없음' }),
+          jsx('p', { style: styles.hint, children: nativeFallbackWriteNeeded
+            ? `대화 예비 모델 적용 ${nativeFallbackWriteTargets.length}개 (${nativeFallbackWriteTargets.join(', ')})${nativeFallbackSkippedTargets.length ? ` · 적용하지 않는 프로필: ${nativeFallbackSkippedTargets.join(', ')}` : ''}`
+            : '대화 예비 모델 바뀐 내용 없음 · 기존 설정 유지' }),
           jsx('p', { style: styles.hint, children: timeoutSummary }),
           jsx('p', { style: styles.hint, children: '저장 전 변경 내용을 요약한 참고 정보입니다. 실제 반영 결과는 저장 후 상태를 다시 불러와 확인하세요.' }),
           summaryValidationErrors.length ? jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '확인할 항목' }), jsx('ul', { children: summaryValidationErrors.map((error, index) => jsx('li', { children: error }, index)) })] }) : jsx('p', { role: 'status', style: styles.hint, children: '입력한 내용을 확인했습니다. 저장할 때 최신 설정과 다시 비교합니다.' })
@@ -5477,7 +5539,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.12.0',
+  version: '0.12.1',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
