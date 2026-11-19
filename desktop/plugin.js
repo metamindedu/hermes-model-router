@@ -28,6 +28,9 @@ const ROLES = [
   { id: 'compression', label: '대화 압축', description: '긴 대화 요약과 맥락 압축에 사용합니다.' },
   { id: 'title', label: '제목 생성', description: '대화 제목을 자동으로 만들 때 사용합니다.' }
 ]
+// The roles that get a card. The delegation role (작업 위임) is read for status only: the page no
+// longer edits or sends it, and each profile keeps its stored delegation.model.
+const CONVERSATION_ROLES = ROLES.filter(role => role.id !== 'delegation')
 
 const styles = {
   page: {
@@ -54,6 +57,9 @@ const styles = {
   roleGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 24rem), 1fr))', gap: '0.8rem' },
   roleCard: { minWidth: 0, boxSizing: 'border-box', padding: '1rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', overflowWrap: 'anywhere' },
   roleTitle: { margin: 0, fontSize: '0.95rem', fontWeight: 620 },
+  groupTitle: { margin: 0, fontSize: '0.98rem', fontWeight: 640 },
+  cardPart: { minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.55rem' },
+  cardSpare: { minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.65rem', borderTop: '1px solid var(--ui-stroke-tertiary)', paddingTop: '0.9rem', marginTop: 'auto' },
   choiceGroup: { display: 'flex', flexDirection: 'column', gap: '0.7rem' },
   choiceRow: { display: 'flex', gap: '0.65rem', alignItems: 'flex-start', color: 'var(--ui-text-primary)' },
   choiceCopy: { display: 'flex', flexDirection: 'column', gap: '0.15rem', minWidth: 0, overflowWrap: 'anywhere' },
@@ -137,14 +143,25 @@ function sameValue(left, right) {
     leftKeys.every((key, index) => key === rightKeys[index] && sameValue(left[key], right[key]))
 }
 
-export function selectedModelPreset(models) {
-  return MODEL_PRESETS.find(preset => sameValue(models, preset.models))?.id || 'custom'
+// The model roles this page edits and sends. The delegation role (delegation.model/provider/
+// reasoning) is no longer edited here: it is read where needed and left out of every request, so each
+// profile keeps its own stored value (the service resolves it per target and writes none of its keys).
+export const PAGE_MODEL_ROLES = Object.freeze(['main', 'compression', 'title'])
+export function pageModels(models) {
+  const source = models && typeof models === 'object' ? models : {}
+  return Object.fromEntries(PAGE_MODEL_ROLES.filter(role => Object.prototype.hasOwnProperty.call(source, role)).map(role => [role, deepClone(source[role])]))
 }
 
+export function selectedModelPreset(models) {
+  return MODEL_PRESETS.find(preset => sameValue(pageModels(models), pageModels(preset.models)))?.id || 'custom'
+}
+
+// A preset fills the three roles this page edits; the delegation role keeps its loaded value.
 export function applyModelPresetDraft(draft, presetId) {
   const preset = MODEL_PRESETS.find(item => item.id === presetId)
   if (!preset || !draft || typeof draft !== 'object' || !draft.routing) return null
-  return { ...deepClone(draft), models: deepClone(preset.models) }
+  const next = deepClone(draft)
+  return { ...next, models: { ...(next.models || {}), ...pageModels(preset.models) } }
 }
 
 function uniqueProfileNames(names) {
@@ -296,10 +313,20 @@ export function reconcileTimeoutTargets(selected, profiles) {
 export function pageExpectation(row) {
   if (!row || typeof row.name !== 'string' || !row.models || !row.routing) return null
   const native = row.fallbacks?.native
+  const auxiliary = auxiliaryExpectation(row)
   return deepClone({ models: row.models, actual_models: row.actual_models || {},
     routing: { enabled: Boolean(row.routing.enabled), heavy: row.routing.heavy ?? null, light: row.routing.light ?? null, slots: row.routing.slots ?? null,
       skill_enabled: routingSkillEnabled(row) },
-    ...(native ? { native_fallback: { enabled: native.enabled ?? null, chain: native.chain ?? [], actual_chain: native.actual_chain ?? [] } } : {}) })
+    ...(native ? { native_fallback: { enabled: native.enabled ?? null, chain: native.chain ?? [], actual_chain: native.actual_chain ?? [] } } : {}),
+    ...(auxiliary ? { auxiliary_fallback: auxiliary } : {}) })
+}
+
+// The compression and title-generation spare models as the status row reports them (stored chain and
+// the chain Hermes actually uses), or null when the service does not report them.
+function auxiliaryExpectation(row) {
+  const state = row?.auxiliary_fallbacks
+  if (!state || AUXILIARY_TASKS.some(task => !Array.isArray(state[task.id]?.chain) || !Array.isArray(state[task.id]?.actual_chain))) return null
+  return Object.fromEntries(AUXILIARY_TASKS.map(task => [task.id, { chain: deepClone(state[task.id].chain), actual_chain: deepClone(state[task.id].actual_chain) }]))
 }
 
 // The routing skill's own switch in the profile's skills.disabled: the status reports a
@@ -330,14 +357,23 @@ export function pageExpectationsFor(operation, body, frozen, liveNames = []) {
     const scope = body?.save_scope ?? null
     if (scope === null || scope === 'models') for (const name of body?.model_targets || []) { add(name, 'models'); add(name, 'actual_models') }
     if (scope === null || scope === 'routing') for (const name of liveNames) if (frozen?.[name]) add(name, 'routing')
-    for (const update of body?.fallback_updates || []) if (update && Object.prototype.hasOwnProperty.call(update, 'native_fallback')) add(update.profile, 'native_fallback')
+    for (const update of body?.fallback_updates || []) for (const field of ['native_fallback', 'auxiliary_fallback']) if (update && Object.prototype.hasOwnProperty.call(update, field)) add(update.profile, field)
   } else if (operation === '/fallback-preview') {
-    for (const update of body?.updates || []) if (update && Object.prototype.hasOwnProperty.call(update, 'native_fallback')) add(update.profile, 'native_fallback')
+    for (const update of body?.updates || []) for (const field of ['native_fallback', 'auxiliary_fallback']) if (update && Object.prototype.hasOwnProperty.call(update, field)) add(update.profile, field)
+  }
+  // The auxiliary expectation covers only the tasks the body writes for that profile, so a sibling
+  // task changed elsewhere never blocks it (the service compares per task).
+  const auxiliaryTasks = new Map()
+  for (const update of [...(body?.fallback_updates || []), ...(operation === '/fallback-preview' ? body?.updates || [] : [])]) {
+    if (update?.auxiliary_fallback && typeof update.auxiliary_fallback === 'object') auxiliaryTasks.set(update.profile, Object.keys(update.auxiliary_fallback))
   }
   return [...need].map(([name, fields]) => {
     const value = frozen?.[name]
     if (!value || [...fields].some(field => !value[field])) throw new Error(`${name} 프로필은 이 화면에서 확인한 값이 없어 저장하지 않았습니다. 상태 새로고침 후 다시 저장하세요.`)
-    return { profile: name, ...Object.fromEntries([...fields].sort().map(field => [field, deepClone(value[field])])) }
+    const tasks = auxiliaryTasks.get(name)
+    if (fields.has('auxiliary_fallback') && tasks?.some(task => !value.auxiliary_fallback[task])) throw new Error(`${name} 프로필은 이 화면에서 확인한 값이 없어 저장하지 않았습니다. 상태 새로고침 후 다시 저장하세요.`)
+    return { profile: name, ...Object.fromEntries([...fields].sort().map(field => [field, field === 'auxiliary_fallback' && tasks
+      ? Object.fromEntries(tasks.map(task => [task, deepClone(value.auxiliary_fallback[task])])) : deepClone(value[field])])) }
   })
 }
 
@@ -349,10 +385,11 @@ export function externalChangeFromError(error) {
   return typeof profile === 'string' && profile && typeof field === 'string' && EXTERNAL_CHANGE_FIELD_RE.test(field)
     ? { profile, field } : null
 }
-const EXTERNAL_FIELD_LABELS = { models: '저장된 모델', actual_models: '실제 모델 설정', routing: '작업 라우팅', native_fallback: '대화 예비 모델' }
-const EXTERNAL_ROLE_LABELS = { main: '대화 모델', delegation: '작업 모델', compression: '압축 모델', title: '제목 모델' }
+const EXTERNAL_FIELD_LABELS = { models: '저장된 모델', actual_models: '실제 모델 설정', routing: '작업 라우팅', native_fallback: '대화 예비 모델', auxiliary_fallback: '대화 압축·제목 생성 예비 모델' }
+const EXTERNAL_ROLE_LABELS = { main: '대화 모델', delegation: '작업 위임 모델', compression: '압축 모델', title: '제목 모델' }
 export function externalChangeLabel(conflict) {
   const [base, role] = String(conflict?.field || '').split('.')
+  if (base === 'auxiliary_fallback' && role) return `${AUXILIARY_TASKS.find(task => task.id === role)?.label || role} 예비 모델`
   return `${EXTERNAL_FIELD_LABELS[base] || '설정'}${role ? `(${EXTERNAL_ROLE_LABELS[role] || role})` : ''}`
 }
 export function externalChangeMessage(conflict) {
@@ -388,6 +425,12 @@ export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations
     const native = current.fallbacks?.native
     const live = native ? { enabled: native.enabled ?? null, chain: native.chain ?? [], actual_chain: native.actual_chain ?? [] } : null
     if (!same(live, expect.native_fallback)) items.push({ profile: selected, part: '대화 예비 모델', fallback: true })
+  }
+  if (current && expect?.auxiliary_fallback) {
+    const live = auxiliaryExpectation(current)
+    for (const task of AUXILIARY_TASKS) {
+      if (!same(live?.[task.id] ?? null, expect.auxiliary_fallback[task.id] ?? null)) items.push({ profile: selected, part: `${task.label} 예비 모델`, auxiliary: task.id })
+    }
   }
   return items
 }
@@ -563,11 +606,26 @@ export const TASK_SLOTS = [
   { id: 'verify-complex', tier: 'heavy', label: '검증 · 복잡', description: '최종 의미 검토와 독립 검수' },
   { id: 'computer-use', tier: 'light', label: '컴퓨터 유즈', description: '브라우저나 데스크톱 화면을 직접 조작하는 작업' }
 ].map(slot => Object.freeze(slot))
+// What a slot's model can be set to here. 'delegation' (the slot follows the profile's delegation.model)
+// is no longer offered: a slot stored that way is shown with that value as the disabled current
+// option, never switched silently and never copied to another profile (see slotFollowOptions and
+// slotsCopyable).
 export const SLOT_FOLLOW_OPTIONS = [
   { value: 'main', label: '기본 대화 모델과 같게' },
-  { value: 'delegation', label: '작업 위임 모델과 같게' },
   { value: 'custom', label: '직접 지정' }
 ]
+export const LEGACY_SLOT_FOLLOW = 'delegation'
+export const legacySlotFollowLabel = models => `작업 위임 모델(${models?.delegation?.model || '확인할 수 없음'})과 같게 · 이전 설정`
+export function slotFollowOptions(declaration, models) {
+  return declaration?.follow === LEGACY_SLOT_FOLLOW
+    ? [{ value: LEGACY_SLOT_FOLLOW, label: legacySlotFollowLabel(models), disabled: true }, ...SLOT_FOLLOW_OPTIONS]
+    : SLOT_FOLLOW_OPTIONS
+}
+// Slot models are copied to other profiles only when no slot still follows the delegation model:
+// copied, such a slot would follow each target's own (hidden) delegation.model.
+export function slotsCopyable(slots) {
+  return !TASK_SLOTS.some(slot => slots?.[slot.id]?.follow === LEGACY_SLOT_FOLLOW)
+}
 
 // What the loaded profile's installed plugin can do with slots. `available`
 // shows the cards; `editable` is false while another installed profile could
@@ -612,7 +670,8 @@ export function buildPreviewBody(revision, profile, draft, modelTargets, routing
   return {
     expected_revision: revision,
     profile,
-    models: deepClone(draft.models),
+    // Never the delegation role: each target keeps its own (see PAGE_MODEL_ROLES).
+    models: pageModels(draft.models),
     model_targets: Array.isArray(modelTargets) ? [...modelTargets] : [],
     routing: { ...routing, enabled: routingProfiles.includes(profile) },
     routing_profiles: [...routingProfiles],
@@ -765,6 +824,129 @@ export function nativeFallbackTargetReason(row, fallbackSupported = true) {
   return ''
 }
 
+// The two auxiliary tasks whose spare models (Hermes' own auxiliary.{task}.fallback_chain) the page
+// edits. Hermes tries them on rate-limit, connectivity or payment failures of the task's model; a
+// spare that shares the failed provider is skipped after a provider-wide failure; when they are used
+// up Hermes falls back to the main conversation model; for compression a spare whose context window
+// is too small is skipped.
+export const AUXILIARY_TASKS = freezeDeep([
+  { id: 'compression', label: '대화 압축', key: 'auxiliary.compression.fallback_chain' },
+  { id: 'title', label: '제목 생성', key: 'auxiliary.title_generation.fallback_chain' }
+])
+
+// Hermes has no on/off switch for these chains, so the draft's `enabled` is the page's own: on writes
+// the chain, off writes `[]` over a stored chain (an absent key stays absent, nothing is written when
+// it is already off). Rows switched off are kept in the draft only, never in Hermes' config.
+export function copyAuxiliaryFallbackDraft(state) {
+  if (!state || !Array.isArray(state.chain)) return null
+  const chain = state.chain.map(entry => ({ provider: typeof entry?.provider === 'string' ? entry.provider : '', model: typeof entry?.model === 'string' ? entry.model : '' }))
+  return { enabled: chain.length > 0, chain }
+}
+// The value a save writes for one draft: the chain while on, `[]` while off.
+export function auxiliaryFallbackValue(draft) {
+  return draft?.enabled === true && Array.isArray(draft.chain) ? draft.chain.map(({ provider, model }) => ({ provider, model })) : []
+}
+// Why one task's spare models are read-only here, from that task's own status (its warnings are per key).
+export function auxiliaryReadOnlyReason(state) {
+  const codes = Array.isArray(state?.warnings) ? state.warnings : []
+  const has = (...names) => names.some(name => codes.includes(name))
+  if (state?.env_masked === true || has('auxiliary_fallback_env_expression')) return '환경 변수를 쓰는 예비 모델이 있어 값은 표시하지 않습니다(읽기 전용). 기존 설정은 그대로 둡니다.'
+  if (state?.managed_overlay === true || codes.some(code => code.includes('managed'))) return '관리자 고정 설정이 있어 이 화면에서는 바꿀 수 없습니다(읽기 전용). 기존 설정은 그대로 둡니다.'
+  if (has('auxiliary_fallback_advanced_entry')) return 'base_url 같은 고급 항목이 있는 예비 모델이라 이 화면에서는 바꿀 수 없습니다(읽기 전용). Hermes 설정에서 바꾸세요.'
+  if (has('auxiliary_fallback_provider_only', 'auxiliary_fallback_malformed', 'auxiliary_fallback_chain_too_long')) return '저장된 예비 모델이 있지만 이 화면에서는 그대로 나타낼 수 없는 형식입니다(읽기 전용). Hermes 설정에서 바꾸세요. 기존 설정은 그대로 둡니다.'
+  return '이 예비 모델 설정을 확인할 수 없어 바꿀 수 없습니다(읽기 전용). 상태를 새로고침하세요.'
+}
+export function copyAuxiliaryDrafts(row) {
+  return Object.fromEntries(AUXILIARY_TASKS.map(task => [task.id, copyAuxiliaryFallbackDraft(row?.auxiliary_fallbacks?.[task.id])]))
+}
+export function auxiliaryFallbackChanged(draft, baseline) {
+  return Boolean(draft && baseline && !sameValue(auxiliaryFallbackValue(draft), auxiliaryFallbackValue(baseline)))
+}
+// The service's rules for one chain (service.py _validate_auxiliary_chain): at most five literal
+// provider/model tokens, no duplicates (case-folded). Rows kept while off are not written, so they are
+// not checked.
+export function auxiliaryFallbackValidation(draft) {
+  if (!draft || typeof draft.enabled !== 'boolean' || !Array.isArray(draft.chain)) return '예비 모델 설정을 확인할 수 없습니다.'
+  if (!draft.enabled) return ''
+  if (draft.chain.length > 5) return '예비 모델은 최대 5개까지 지원합니다.'
+  if (draft.chain.some(item => !item || typeof item.provider !== 'string' || !item.provider.trim() || typeof item.model !== 'string' || !item.model.trim())) return '각 예비 모델 항목에 공급자와 모델을 입력하세요.'
+  if (draft.chain.some(item => !fallbackTokenValid(item.provider, FALLBACK_PROVIDER_RE) || !fallbackTokenValid(item.model, FALLBACK_MODEL_RE))) {
+    return '예비 모델의 공급자·모델 ID에 앞뒤 공백이나 쓸 수 없는 문자가 있습니다(KEEP도 쓸 수 없습니다). 영문·숫자와 . _ : - (모델 ID는 / 와 끝의 [태그]도)만 쓰세요.'
+  }
+  const identities = draft.chain.map(foldedRouteIdentity)
+  if (new Set(identities).size !== identities.length) return '예비 모델 목록에 중복된 공급자·모델 조합이 있습니다(대소문자만 다른 경우 포함).'
+  if (draft.chain.length === 0) return '예비 모델로 이어가려면 모델을 하나 이상 추가하세요.'
+  return ''
+}
+// The route an auxiliary task runs on, as Hermes resolves auxiliary.{task} (service.py
+// _auxiliary_task_primary), or null when it is not known here: `model: auto` is unset; no provider
+// (or `auto`) and no model is the main model; a provider with a model is exactly that. A provider
+// without a model (its catalog default) and `auto` with a model (auto-detection) are not known, so a
+// spare equal to them is not refused (Hermes skips a spare on the failed backend anyway).
+export function resolveAuxiliaryRoute(route, main) {
+  const provider = typeof route?.provider === 'string' ? route.provider.trim() : ''
+  let model = typeof route?.model === 'string' ? route.model.trim() : ''
+  if (model.toLowerCase() === 'auto') model = ''
+  if (!provider || provider.toLowerCase() === 'auto') {
+    if (model) return null
+    const mainProvider = typeof main?.provider === 'string' ? main.provider : '', mainModel = typeof main?.model === 'string' ? main.model : ''
+    return mainProvider && mainModel ? { provider: mainProvider, model: mainModel } : null
+  }
+  return model ? { provider, model } : null
+}
+// The task's own route each receiving target will have, as the service compares it: the drafted
+// route for a model-copy target, otherwise the primary the status reports for that profile.
+export function auxiliaryPrimaryRoute(row, task, projection = null) {
+  if (projection?.model_targets?.includes(row?.name) && projection.models?.[task] && projection.models?.main) return resolveAuxiliaryRoute(projection.models[task], projection.models.main)
+  const primary = row?.auxiliary_fallbacks?.[task]?.primary
+  return primary && typeof primary.provider === 'string' && typeof primary.model === 'string' ? primary : null
+}
+// Why a target cannot take one task's spare models ('' when it can). Such a target is named as skipped.
+export function auxiliaryTargetReason(row, task) {
+  const state = row?.auxiliary_fallbacks?.[task.id]
+  if (!state || !Array.isArray(state.chain)) return `이 프로필의 ${task.label} 예비 모델을 확인할 수 없습니다.`
+  if (state.editable !== true) return `이 프로필의 ${task.label} 예비 모델은 읽기 전용입니다.`
+  return ''
+}
+// The '/fallback-preview' updates for the auxiliary chains: `auxiliaryWrite` is { [task]: { targets,
+// value } | null }. Everything the service refuses deterministically is refused here first.
+export function auxiliaryFallbackUpdates(auxiliaryWrite, rows, projection = null) {
+  const byName = new Map((Array.isArray(rows) ? rows : []).map(row => [row.name, row]))
+  const updates = new Map()
+  const errors = []
+  for (const task of AUXILIARY_TASKS) {
+    const write = auxiliaryWrite?.[task.id]
+    if (!write) continue
+    const targets = uniqueProfileNames(write.targets)
+    const value = Array.isArray(write.value) ? write.value : null
+    if (!value || !targets.length || typeof write.enabled !== 'boolean') { errors.push(`${task.label} 예비 모델을 저장할 대상을 확인할 수 없습니다. 상태를 새로고침하세요.`); continue }
+    if (!write.enabled && value.length) { errors.push(`${task.label} 예비 모델 설정을 확인할 수 없습니다. 상태를 새로고침하세요.`); continue }
+    // `[]` clears a chain only when the draft was switched off; an on draft without a valid row is an error.
+    const issue = auxiliaryFallbackValidation({ enabled: write.enabled, chain: value })
+    if (issue) { errors.push(`${task.label} 예비 모델: ${issue}`); continue }
+    const problems = targets.flatMap(name => {
+      const row = byName.get(name)
+      const reason = row ? auxiliaryTargetReason(row, task) : '이 프로필을 찾을 수 없습니다.'
+      if (reason) return [`${name}: ${reason}`]
+      const primary = auxiliaryPrimaryRoute(row, task.id, projection)
+      if (!primary) return []  // not known here: not refused, like the service
+      return value.some(item => foldedRouteIdentity(item) === foldedRouteIdentity(primary))
+        ? [`${name}의 ${task.label} 모델과 같은 모델은 예비 모델로 둘 수 없습니다(대소문자만 다른 경우 포함).`] : []
+    })
+    if (problems.length) { errors.push(...problems); continue }
+    for (const name of targets) {
+      const update = updates.get(name) || { profile: name, auxiliary_fallback: {} }
+      update.auxiliary_fallback[task.id] = deepClone(value)
+      updates.set(name, update)
+    }
+  }
+  const list = [...updates.values()]
+  // The save click is the consent, as for the conversation spare models (one short cost line on the card).
+  const confirmations = list.filter(update => Object.values(update.auxiliary_fallback).some(chain => chain.length))
+    .map(update => ({ profile: update.profile, scope: 'auxiliary', allow_additional_cost: true, allow_task_rerun: false }))
+  return { updates: list, confirmations, errors }
+}
+
 export function applyRoutingFallbackPresetDraft(draft, presetId) {
   const preset = ROUTING_FALLBACK_PRESETS.find(item => item.id === presetId)
   if (!preset || !draft || typeof draft !== 'object') return null
@@ -881,7 +1063,8 @@ export function primaryRouteForFallback(row, role, projection = null) {
   const configured = (isRoutingDraft ? projection.routing : row?.routing)?.[role]
   if (configured?.follow === 'custom' && configured.custom) return configured.custom
   const modelRole = role === 'heavy' ? 'main' : 'delegation'
-  if (projection?.model_targets?.includes(row?.name)) return projection.models?.[modelRole] || null
+  // A model copy never changes a target's delegation role, so only the main model is projected.
+  if (modelRole === 'main' && projection?.model_targets?.includes(row?.name)) return projection.models?.[modelRole] || null
   return row?.models?.[modelRole] || row?.actual_models?.[modelRole] || null
 }
 
@@ -975,7 +1158,9 @@ export function buildFallbackPreviewBody(revision, scope, targetNames, value, pr
   return { expected_revision: revision, updates, confirmations }
 }
 
-export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets, timeoutSettings = null) {
+// `auxiliaryWrite` ({ [task]: { targets, value } | null }) adds the compression and title-generation
+// spare models to the same fallback updates (see auxiliaryFallbackUpdates).
+export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets, timeoutSettings = null, auxiliaryWrite = null) {
   const body = buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets)
   const rows = Array.isArray(profiles) ? profiles : []
   const byName = new Map(rows.map(row => [row.name, row]))
@@ -1030,6 +1215,15 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
         confirmations.push({ profile: name, scope, allow_additional_cost: true, allow_task_rerun: scope === 'routing' })
       }
     }
+  }
+
+  if (auxiliaryWrite) {
+    const auxiliary = auxiliaryFallbackUpdates(auxiliaryWrite, rows, projection)
+    errors.push(...auxiliary.errors)
+    for (const update of auxiliary.updates) {
+      updatesByProfile.set(update.profile, { ...(updatesByProfile.get(update.profile) || { profile: update.profile }), auxiliary_fallback: update.auxiliary_fallback })
+    }
+    confirmations.push(...auxiliary.confirmations)
   }
 
   if (updatesByProfile.size) {
@@ -1122,27 +1316,40 @@ export function buildModelSectionPreviewBody(snapshot, storeScope, revision = sn
 // The model section's conversation spare-model save: the narrow '/fallback-preview' body the former
 // card sent (the page adds the frozen `expected` native_fallback), to the section's targets that can
 // take them. It writes only those profiles. `revision` is the store revision after the steps before it.
+// `snapshot.auxiliaryWrite` adds the compression and title-generation spare models to the same body;
+// without `fallbackWrite` the body carries those only (a chain-only edit sends nothing else).
 export function buildModelSectionFallbackBody(snapshot, revision = snapshot?.revision) {
-  const targets = Array.isArray(snapshot?.fallbackWrite?.targets) ? snapshot.fallbackWrite.targets : []
-  const value = snapshot?.fallbackWrite?.value
-  const errors = [...(snapshot?.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : [])]
-  if (!targets.length || !value) errors.push('대화 예비 모델을 저장할 대상을 확인할 수 없습니다. 상태를 새로고침하세요.')
-  else {
-    // Everything the service refuses deterministically, against the main model each target will have
-    // after the steps before this one: checked before the first write of the save.
-    const rows = targets.map(name => (snapshot.profiles || []).find(row => row.name === name)).filter(Boolean)
-    const issue = fallbackScopeValidation('native', value, rows, { profile: snapshot.profile, models: snapshot.draft?.models, model_targets: snapshot.modelTargets || [] })
-    if (issue) errors.push(`대화 예비 모델: ${issue}`)
+  const errors = [...(snapshot?.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : []),
+    ...(snapshot?.auxiliaryFallbackTargetError ? [snapshot.auxiliaryFallbackTargetError] : [])]
+  const projection = { profile: snapshot?.profile, models: snapshot?.draft?.models, model_targets: snapshot?.modelTargets || [] }
+  let native = null
+  if (snapshot?.fallbackWrite || !snapshot?.auxiliaryWrite) {
+    const targets = Array.isArray(snapshot?.fallbackWrite?.targets) ? snapshot.fallbackWrite.targets : []
+    const value = snapshot?.fallbackWrite?.value
+    if (!targets.length || !value) errors.push('대화 예비 모델을 저장할 대상을 확인할 수 없습니다. 상태를 새로고침하세요.')
+    else {
+      // Everything the service refuses deterministically, against the main model each target will have
+      // after the steps before this one: checked before the first write of the save.
+      const rows = targets.map(name => (snapshot.profiles || []).find(row => row.name === name)).filter(Boolean)
+      const issue = fallbackScopeValidation('native', value, rows, projection)
+      if (issue) errors.push(`대화 예비 모델: ${issue}`)
+      else native = buildFallbackPreviewBody(revision, 'native', targets, value, snapshot.profiles)
+    }
   }
+  const auxiliary = snapshot?.auxiliaryWrite ? auxiliaryFallbackUpdates(snapshot.auxiliaryWrite, snapshot.profiles, projection) : { updates: [], confirmations: [], errors: [] }
+  errors.push(...auxiliary.errors)
+  if (!errors.length && !native && !auxiliary.updates.length) errors.push('저장할 예비 모델을 확인할 수 없습니다. 상태를 새로고침하세요.')
   if (errors.length) return { body: null, errors }
-  return { body: buildFallbackPreviewBody(revision, 'native', targets, value, snapshot.profiles), errors: [] }
+  const updates = new Map((native?.updates || []).map(update => [update.profile, { ...update }]))
+  for (const update of auxiliary.updates) updates.set(update.profile, { ...(updates.get(update.profile) || { profile: update.profile }), auxiliary_fallback: update.auxiliary_fallback })
+  return { body: { expected_revision: revision, updates: [...updates.values()], confirmations: [...(native?.confirmations || []), ...auxiliary.confirmations] }, errors: [] }
 }
 
 // What one model-section save writes to each profile, read from the request bodies themselves: the
 // delegation-method batch, the store plan and the conversation spare-model plan (each may be null).
 export function modelSectionWriteSet({ native = null, store = null, fallback = null } = {}) {
   const set = new Map()
-  const entry = name => { if (!set.has(name)) set.set(name, { models: false, slots: false, method: null, slotSpares: false, conversationSpares: null }); return set.get(name) }
+  const entry = name => { if (!set.has(name)) set.set(name, { models: false, slots: false, method: null, slotSpares: false, conversationSpares: null, auxiliarySpares: null }); return set.get(name) }
   if (store) {
     const scope = store.save_scope ?? null
     if (scope === null || scope === 'models') for (const name of store.model_targets || []) entry(name).models = true
@@ -1157,6 +1364,7 @@ export function modelSectionWriteSet({ native = null, store = null, fallback = n
   }
   for (const update of fallback?.updates || []) {
     if (Object.prototype.hasOwnProperty.call(update, 'native_fallback')) entry(update.profile).conversationSpares = deepClone(update.native_fallback)
+    if (Object.prototype.hasOwnProperty.call(update, 'auxiliary_fallback')) entry(update.profile).auxiliarySpares = deepClone(update.auxiliary_fallback)
   }
   return set
 }
@@ -1456,6 +1664,45 @@ function ChoiceField({ id, label, value, onChange, options, disabled, placeholde
       hint ? jsx('span', { style: styles.hint, children: hint }) : null
     ]
   })
+}
+
+// One model card of the '모델' section. Every card (기본 대화, 대화 압축, 제목 생성 and the six task
+// slots) has the same parts in the same order: the title and one-line description, the model (with its
+// reasoning and 'ID 직접 입력'), short notes, and '이 모델을 쓸 수 없을 때' with the spare models.
+function ModelCard({ id, title, description, badge = null, model, notes = [], spare }) {
+  const part = (name, children) => jsx('div', { 'data-card-part': name, style: name === 'spare' ? styles.cardSpare : styles.cardPart, children })
+  return jsxs('article', { id, 'data-model-card': id, style: styles.roleCard, children: [
+    part('header', [
+      jsxs('div', { style: styles.statusLine, children: [jsx('h4', { style: styles.roleTitle, children: title }), badge] }),
+      jsx('p', { style: { ...styles.hint, marginTop: '0.25rem' }, children: description })
+    ]),
+    part('model', model),
+    part('notes', notes.filter(Boolean)),
+    part('spare', spare)
+  ] })
+}
+
+const SPARE_MODE_OPTIONS = freezeDeep([{ value: 'off', label: '다른 모델로 전환하지 않음' }, { value: 'custom', label: '예비 모델로 이어가기' }])
+// The spare-model editor every card uses: the mode, then up to five rows with 위로/아래로/삭제, and 추가.
+// `ids` keeps each card's existing element ids. Rows are shown only while the mode is on.
+function SpareChainEditor({ ids, mode, chain, disabled, catalog, onMode, onEntry, onMove, onRemove, onAdd, notes = [] }) {
+  const rows = mode === 'custom' && Array.isArray(chain) ? chain : []
+  return jsxs('div', { id: ids.root, style: { display: 'flex', flexDirection: 'column', gap: '0.65rem', minWidth: 0 }, children: [
+    mode ? jsx(ChoiceField, { id: ids.mode, label: '이 모델을 쓸 수 없을 때', value: mode, disabled, options: SPARE_MODE_OPTIONS, onChange: onMode }) : null,
+    ...rows.map((route, index) => jsxs('div', { style: { ...styles.modelRoute, alignItems: 'stretch' }, children: [
+      jsx(ModelRouteField, {
+        ids: { picker: ids.picker(index), provider: ids.provider(index), model: ids.model(index) },
+        labels: { picker: `예비 ${index + 1} 모델`, provider: `예비 ${index + 1} 제공자`, model: `예비 ${index + 1} 모델 ID` },
+        route, disabled, catalog, onChange: (field, value) => onEntry(index, field, value) }),
+      jsxs('div', { style: { ...styles.actions, alignSelf: 'flex-start' }, children: [
+        jsx(Button, { id: ids.up(index), size: 'sm', variant: 'secondary', disabled: disabled || index === 0, onClick: () => onMove(index, -1), children: '위로' }),
+        jsx(Button, { id: ids.down(index), size: 'sm', variant: 'secondary', disabled: disabled || index === rows.length - 1, onClick: () => onMove(index, 1), children: '아래로' }),
+        jsx(Button, { id: ids.remove(index), size: 'sm', variant: 'secondary', disabled, onClick: () => onRemove(index), children: '이 예비 모델 삭제' })
+      ] })
+    ] }, `${ids.mode}-${index}`)),
+    mode === 'custom' ? jsx(Button, { id: ids.add, size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: disabled || rows.length >= 5, onClick: onAdd, children: '예비 모델 추가' }) : null,
+    ...notes.filter(Boolean)
+  ] })
 }
 
 function CheckRow({ id, label, detail, checked, onChange, disabled = false }) {
@@ -2343,13 +2590,25 @@ export function submittedEditCoverage(view, sent) {
   const covered = new Set()
   const every = (list, test) => Array.isArray(list) && list.length > 0 && list.every(test)
   const routeNames = routes => (routes?.profiles || []).map(entry => entry?.name)
+  const has = (item, key) => Boolean(item) && Object.prototype.hasOwnProperty.call(item, key)
+  // Conversation spare models, and each auxiliary task's: saved when every update that carries it
+  // carries the drafted value (and at least one does).
+  const coverFallbacks = updates => {
+    const list = Array.isArray(updates) ? updates : []
+    if (every(list.filter(update => has(update, 'native_fallback')), update => sameValue(update.native_fallback, view.nativeFallback))) { covered.add('fallback:native'); covered.add('copy.fallback') }
+    for (const task of AUXILIARY_TASKS) {
+      const carrying = list.filter(update => has(update?.auxiliary_fallback, task.id))
+      if (every(carrying, update => sameValue(update.auxiliary_fallback[task.id], view.auxiliary?.[task.id] ?? null))) { covered.add(`fallback:aux.${task.id}`); covered.add(`copy.aux.${task.id}`) }
+    }
+  }
   for (const { operation, part, body } of Array.isArray(sent) ? sent : []) {
     if (!body || typeof body !== 'object') continue
     if (operation === '/preview') {
       const scope = body.save_scope ?? null
       if ((scope === null || scope === 'models') && Array.isArray(body.model_targets) && body.model_targets.length) {
         covered.add('copy.models')
-        if (sameValue(body.models, view.models)) covered.add('models')
+        // The page sends the roles it edits (never the delegation role).
+        if (sameValue(pageModels(body.models), pageModels(view.models))) covered.add('models')
       }
       if ((scope === null || scope === 'routing') && body.routing) {
         const routingTargets = Array.isArray(body.routing_targets) ? body.routing_targets : [body.profile]
@@ -2364,11 +2623,9 @@ export function submittedEditCoverage(view, sent) {
         if ((view.reenable || []).every(name => Array.isArray(body.reenable_profiles) && body.reenable_profiles.includes(name))) covered.add('reenable')
       }
       if (Array.isArray(body.timeout_updates) && body.timeout_updates.length) covered.add('timeouts')
-      const fallbackUpdates = (body.fallback_updates || []).filter(update => Object.prototype.hasOwnProperty.call(update, 'native_fallback'))
-      if (every(fallbackUpdates, update => sameValue(update.native_fallback, view.nativeFallback))) { covered.add('fallback:native'); covered.add('copy.fallback') }
+      coverFallbacks(body.fallback_updates)
     } else if (operation === '/fallback-preview') {
-      const updates = body.updates
-      if (every(updates, update => Object.prototype.hasOwnProperty.call(update, 'native_fallback') && sameValue(update.native_fallback, view.nativeFallback))) { covered.add('fallback:native'); covered.add('copy.fallback') }
+      coverFallbacks(body.updates)
     } else if (operation === '/delegation-preview' && view.native) {
       const updates = body.updates
       if (part === 'native') {
@@ -2615,16 +2872,14 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
     const coder = slot.id === 'verify-complex' ? slotResolvedRoute(slots.draft['code-complex'], slots.models) : null
     const sameAsCoder = Boolean(coder && resolved && coder.model && coder.provider === resolved.provider && coder.model === resolved.model)
     const primaryLocked = slots.disabled || !slots.support.editable
+    // A slot stored as following the delegation model: shown as that value (disabled in the picker),
+    // never switched by the page; the operator may pick another basis, and go back to the stored one.
+    const legacy = declaration.follow === LEGACY_SLOT_FOLLOW
+    const storedLegacy = slots.frozen?.[slot.id]?.follow === LEGACY_SLOT_FOLLOW
     const spare = spareReady ? nativeDraftSlotPolicy(draft)[slot.id] : null
-    return jsxs('article', { id: `slot-${slot.id}`, style: { ...styles.roleCard, gap: '0.9rem' }, children: [
-      jsxs('div', { children: [
-        jsxs('div', { style: styles.statusLine, children: [
-          jsx('h3', { style: styles.roleTitle, children: slot.label }),
-          jsx(Badge, { variant: 'muted', children: slot.tier === 'heavy' ? '긴 작업 제한' : '짧은 작업 제한' })
-        ] }),
-        jsx('p', { style: { ...styles.hint, marginTop: '0.25rem' }, children: slot.description })
-      ] }),
-      jsx(ChoiceField, { id: `slot-${slot.id}-follow`, label: '기본 모델', value: declaration.follow, disabled: primaryLocked, options: SLOT_FOLLOW_OPTIONS, onChange: follow => slots.onFollow(slot.id, follow) }),
+    const model = [
+      jsx(ChoiceField, { id: `slot-${slot.id}-follow`, label: '모델 기준', value: declaration.follow, disabled: primaryLocked,
+        options: slotFollowOptions(declaration, slots.models), onChange: follow => slots.onFollow(slot.id, follow) }),
       declaration.follow === 'custom'
         ? jsx(ModelRouteField, {
           ids: { picker: `slot-${slot.id}-picker`, provider: `slot-${slot.id}-provider`, model: `slot-${slot.id}-model`, reasoning: `slot-${slot.id}-reasoning` },
@@ -2635,31 +2890,30 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
           jsx('strong', { id: `slot-${slot.id}-resolved`, style: { overflowWrap: 'anywhere', fontSize: '0.95rem' }, children: resolved?.model || '모델이 설정되지 않았습니다.' }),
           resolved?.model ? jsx('span', { style: styles.hint, children: `연결된 서비스: ${resolved.provider || '—'} · 추론 강도: ${resolved.reasoning || '—'}` }) : null
         ] }),
-      sameAsCoder ? jsx('p', { id: 'slot-verify-same-model-note', role: 'note', style: styles.hint, children: '‘코드 · 복잡’과 같은 모델입니다. 같은 모델이 하는 검수는 다른 모델이 하는 검수와 같지 않습니다.' }) : null,
-      spare ? jsxs('div', { style: { borderTop: '1px solid var(--ui-stroke-tertiary)', paddingTop: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.65rem' }, children: [
-        jsx(ChoiceField, { id: `slot-${slot.id}-fallback-mode`, label: '이 모델을 쓸 수 없을 때', value: spare.mode, disabled: locked,
-          options: [{ value: 'off', label: '다른 모델로 전환하지 않음' }, { value: 'custom', label: '예비 모델로 이어가기' }],
-          onChange: mode => updateSparePolicy(slot.id, current => ({ mode, chain: mode === 'off' ? [] : current.chain.length ? current.chain : [{ provider: '', model: '' }] })) }),
-        ...spare.chain.map((route, index) => jsxs('div', { style: { ...styles.modelRoute, alignItems: 'stretch' }, children: [
-          jsx(ModelRouteField, {
-            ids: { picker: `slot-${slot.id}-spare-picker-${index}`, provider: `slot-${slot.id}-spare-provider-${index}`, model: `slot-${slot.id}-spare-model-${index}` },
-            labels: { picker: `예비 ${index + 1} 모델`, provider: `예비 ${index + 1} 제공자`, model: `예비 ${index + 1} 모델 ID` },
-            route, disabled: locked, catalog,
-            onChange: (field, value) => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.map((item, at) => at === index ? { ...item, [field]: value } : item) })) }),
-          jsxs('div', { style: { ...styles.actions, alignSelf: 'flex-start' }, children: [
-            jsx(Button, { id: `slot-${slot.id}-spare-up-${index}`, size: 'sm', variant: 'secondary', disabled: locked || index === 0, onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: moveChainEntry(current.chain, index, -1) })), children: '위로' }),
-            jsx(Button, { id: `slot-${slot.id}-spare-down-${index}`, size: 'sm', variant: 'secondary', disabled: locked || index === spare.chain.length - 1, onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: moveChainEntry(current.chain, index, 1) })), children: '아래로' }),
-            jsx(Button, { id: `slot-${slot.id}-spare-remove-${index}`, size: 'sm', variant: 'secondary', disabled: locked, onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })), children: '이 예비 모델 삭제' })
-          ] })
-        ] }, `${slot.id}-${index}`)),
-        spare.mode === 'custom' ? jsx(Button, { id: `slot-${slot.id}-fallback-add`, size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: locked || spare.chain.length >= 5,
-          onClick: () => updateSparePolicy(slot.id, current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })), children: '예비 모델 추가' }) : null
-      ] }) : null
-    ] }, slot.id)
+      storedLegacy && !legacy ? jsx(Button, { id: `slot-${slot.id}-follow-revert`, size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: primaryLocked,
+        onClick: () => slots.onRevertFollow(slot.id), children: '저장된 설정으로 되돌리기' }) : null
+    ]
+    const notes = [
+      legacy ? jsx('p', { id: `slot-${slot.id}-legacy-note`, role: 'note', style: styles.hint, children: '이전 설정이라 그대로 둡니다. 다른 프로필에는 복사하지 않습니다. 바꾸려면 위에서 기준을 고르세요.' }) : null,
+      sameAsCoder ? jsx('p', { id: 'slot-verify-same-model-note', role: 'note', style: styles.hint, children: '‘코드 · 복잡’과 같은 모델입니다. 같은 모델이 하는 검수는 다른 모델이 하는 검수와 같지 않습니다.' }) : null
+    ]
+    const ids = { root: `slot-${slot.id}-fallback`, mode: `slot-${slot.id}-fallback-mode`, add: `slot-${slot.id}-fallback-add`,
+      picker: index => `slot-${slot.id}-spare-picker-${index}`, provider: index => `slot-${slot.id}-spare-provider-${index}`, model: index => `slot-${slot.id}-spare-model-${index}`,
+      up: index => `slot-${slot.id}-spare-up-${index}`, down: index => `slot-${slot.id}-spare-down-${index}`, remove: index => `slot-${slot.id}-spare-remove-${index}` }
+    const spareEditor = spare ? jsx(SpareChainEditor, { ids, mode: spare.mode, chain: spare.chain, disabled: locked, catalog,
+      onMode: mode => updateSparePolicy(slot.id, current => ({ mode, chain: mode === 'off' ? [] : current.chain.length ? current.chain : [{ provider: '', model: '' }] })),
+      onEntry: (index, field, value) => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.map((item, at) => at === index ? { ...item, [field]: value } : item) })),
+      onMove: (index, delta) => updateSparePolicy(slot.id, current => ({ ...current, chain: moveChainEntry(current.chain, index, delta) })),
+      onRemove: index => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })),
+      onAdd: () => updateSparePolicy(slot.id, current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })) })
+      : jsx('p', { style: styles.hint, children: '이 슬롯의 예비 모델은 플러그인을 업데이트한 뒤 설정할 수 있습니다.' })
+    return jsx(ModelCard, { id: `slot-${slot.id}`, title: slot.label, description: slot.description,
+      badge: jsx(Badge, { variant: 'muted', children: slot.tier === 'heavy' ? '긴 작업 제한' : '짧은 작업 제한' }),
+      model, notes, spare: spareEditor }, slot.id)
   }
   return jsxs('div', { id: 'native-delegation-settings', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem', minWidth: 0 }, children: [
-    jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.roleTitle, children: '작업 모델' }), jsx(Badge, { variant: 'muted', style: { maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere' }, children: `저장된 방식: ${nativeBackendLabel(dto?.backend)}` })] }),
-    jsx('p', { style: styles.hint, children: '간단한 작업은 메인 모델이 직접 처리합니다. 나눠 맡기는 편이 유리한 작업만 아래 방식으로 맡기며, 저장한 내용은 새 대화부터 적용됩니다. 진행 중인 대화나 작업은 중단하지 않습니다.' }),
+    jsxs('div', { style: styles.statusLine, children: [jsx('h3', { style: styles.groupTitle, children: '작업 슬롯' }), jsx(Badge, { variant: 'muted', style: { maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere' }, children: `저장된 방식: ${nativeBackendLabel(dto?.backend)}` })] }),
+    jsx('p', { style: styles.hint, children: '간단한 작업은 메인 모델이 직접 처리하고, 나눠 맡기는 편이 나은 작업만 아래 방식으로 맡깁니다. 저장한 내용은 새 대화부터 적용되며 진행 중인 작업은 멈추지 않습니다.' }),
     stale ? jsx('p', { role: 'alert', style: styles.warning, children: '다른 곳에서 설정이 바뀌었습니다. 입력한 내용은 남겨 두었으니 상태를 다시 불러온 뒤 저장하세요.' }) : null,
     !draft ? jsx('p', { role: 'note', style: styles.warning, children: '이 기능의 설정을 불러오지 못했습니다. Hermes와 플러그인 설치 상태를 확인한 뒤 다시 불러오세요. 기존 값은 바꾸지 않습니다.' }) : jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1rem' }, children: [
       jsx(ChoiceField, { id: 'native-delegation-backend', label: '작업을 맡기는 방식', value: draft.backend, disabled: locked,
@@ -2667,16 +2921,16 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
         onChange: backend => { if (nativeBackendSelectable(backend)) onChange(current => ({ ...current, backend })) } }),
       canRevertBackend ? jsx(Button, { id: 'native-backend-revert', size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start', whiteSpace: 'normal', height: 'auto', minHeight: '2rem' }, disabled: locked,
         onClick: () => onChange(current => ({ ...current, backend: dto.backend })), children: `저장된 방식(${nativeBackendLabel(dto.backend)})으로 되돌리기` }) : null,
-      draft.backend === 'model-router-auto' ? jsx('p', { id: 'native-auto-explanation', role: 'note', style: styles.hint, children: '같은 대화에서 에이전트가 작업마다 아래 작업 슬롯의 모델 또는 허용한 전문 프로필을 고릅니다. 전문 프로필은 그 프로필의 기존 기본 모델·추론 설정을 사용하며 슬롯 모델을 쓰지 않습니다. 필수 검수는 슬롯 모델로 수행합니다. 이 방식의 예비 모델은 모델 전용 방식과 따로 저장됩니다.' }) : null,
-      draft.backend === 'default' ? jsx('p', { id: 'native-default-explanation', role: 'note', style: styles.warning, children: '이 프로필은 이전의 ‘기본 위임 모델 사용’ 방식으로 저장되어 있습니다. 이 방식은 더 이상 고를 수 없지만, 저장된 값은 그대로 두며 맡기는 작업도 지금처럼 위의 ‘작업 위임’ 모델을 사용합니다. 작업 종류별 슬롯이나 전문 프로필을 쓰려면 위에서 다른 방식을 고른 뒤 저장하세요. 적용 대상을 넓혀 저장해도 이 방식은 다른 프로필에 복사하지 않습니다.' }) : null,
+      draft.backend === 'model-router-auto' ? jsx('p', { id: 'native-auto-explanation', role: 'note', style: styles.hint, children: '에이전트가 작업마다 아래 슬롯 모델이나 허용한 전문 프로필을 고릅니다. 전문 프로필은 그 프로필의 기존 기본 모델·추론 설정을 쓰고, 필수 검수는 슬롯 모델로 합니다. 이 방식의 예비 모델은 슬롯 전용 방식과 따로 저장됩니다.' }) : null,
+      draft.backend === 'default' ? jsx('p', { id: 'native-default-explanation', role: 'note', style: styles.warning, children: '이 프로필은 이전의 ‘기본 위임 모델 사용’ 방식으로 저장되어 있습니다. 이 방식은 더 이상 고를 수 없지만, 저장된 값은 그대로 두며 맡기는 작업도 지금처럼 Hermes의 작업 위임 모델(delegation.model)을 사용합니다. 그 모델은 이 화면에서 바꾸지 않으며, 바꾸려면 Hermes 설정에서 바꾸세요. 작업 종류별 슬롯이나 전문 프로필을 쓰려면 위에서 다른 방식을 고른 뒤 저장하세요. 적용 대상을 넓혀 저장해도 이 방식은 다른 프로필에 복사하지 않습니다.' }) : null,
       !nativeBackendSelectable(draft.backend) && draft.backend !== 'default' ? jsx('p', { id: 'native-unlisted-explanation', role: 'note', style: styles.hint, children: '이 프로필에는 이 화면에서 다루지 않는 방식이 저장되어 있습니다. 저장된 값은 그대로 두며, 적용 대상을 넓혀 저장해도 다른 프로필에 복사하지 않습니다. 바꾸려면 위에서 방식을 고른 뒤 저장하세요.' }) : null,
       nativeModelMode(draft.backend) ? jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' }, children: [
-        jsx('p', { style: styles.hint, children: '에이전트가 작업 종류에 맞는 슬롯을 고르고, 각 슬롯은 아래에서 정한 모델로 실행합니다. 코드뿐 아니라 복잡한 조사·문서 작업도 같은 슬롯으로 맡기며, 단순 글쓰기·번역·요약은 맡기지 않고 메인 모델이 처리합니다. 슬롯마다 다른 모델을 지정할 수 있고, 다른 프로필에는 적용 대상으로 고른 경우에만 복사합니다.' }),
+        jsx('p', { style: styles.hint, children: '에이전트가 작업 종류에 맞는 슬롯을 고르고, 각 슬롯은 아래에서 정한 모델로 실행합니다. 코드뿐 아니라 복잡한 조사·문서 작업도 같은 슬롯으로 맡기며, 단순 글쓰기·번역·요약은 맡기지 않고 메인 모델이 처리합니다.' }),
         !slots.support.available ? jsx('p', { id: 'slot-update-note', role: 'note', style: styles.warning, children: '이 프로필에 설치된 플러그인은 작업 슬롯을 지원하지 않습니다. 플러그인을 업데이트하면 슬롯별 모델과 예비 모델을 설정할 수 있습니다. 지금 저장해도 기존 모델과 예비 모델 설정은 그대로 유지합니다.' }) : null,
-        slots.support.available && !slots.support.editable ? jsx('p', { id: 'slot-blocked-note', role: 'note', style: styles.warning, children: `다음 프로필의 플러그인을 먼저 업데이트해야 슬롯별 모델을 저장할 수 있습니다: ${slots.support.blocking.join(', ')}. 그때까지 아래 기본 모델은 읽기 전용입니다.` }) : null,
+        slots.support.available && !slots.support.editable ? jsx('p', { id: 'slot-blocked-note', role: 'note', style: styles.warning, children: `다음 프로필의 플러그인을 먼저 업데이트해야 슬롯별 모델을 저장할 수 있습니다: ${slots.support.blocking.join(', ')}. 그때까지 아래 슬롯 모델은 읽기 전용입니다.` }) : null,
         slots.support.available && !spareReady ? jsx('p', { id: 'slot-spare-update-note', role: 'note', style: styles.hint, children: '슬롯별 예비 모델은 이 프로필의 플러그인을 업데이트한 뒤 설정할 수 있습니다.' }) : null,
         slots.support.available && slots.support.editable && slots.firstSave ? jsx('p', { id: 'slot-first-save-note', role: 'note', style: styles.warning, children: '슬롯 설정을 처음 저장하기 전에: 플러그인을 업데이트한 뒤 다시 시작하지 않은 Hermes 창이나 게이트웨이가 있으면 먼저 다시 시작하세요. 이전 버전으로 실행 중인 곳은 슬롯 설정을 읽지 못해, 다시 시작할 때까지 맡긴 작업을 거절합니다.' }) : null,
-        slots.support.available && slots.draft ? jsx('div', { style: styles.roleGrid, children: TASK_SLOTS.map(slotCard) }) : null,
+        slots.support.available && slots.draft ? jsx('div', { id: 'task-slot-cards', style: styles.roleGrid, children: TASK_SLOTS.map(slotCard) }) : null,
         spareReady && TASK_SLOTS.some(slot => nativeDraftSlotPolicy(draft)[slot.id].mode === 'custom') ? jsx('p', { id: 'slot-spare-cost-note', role: 'note', style: styles.warning, children: `예비 모델을 저장하면 선택한 ${selected.length}개 프로필에서 필요할 때 그 모델로 이어서 실행합니다. 제공자의 요금제에 따라 사용량이나 비용이 늘 수 있습니다.` }) : null
       ] }) : null,
 
@@ -2898,6 +3152,10 @@ function RouterPage({ ctx: pluginContext }) {
   // model section to its own targets. The routing/delegation values are read only, never written.
   const [fallbackDrafts, setFallbackDrafts] = useState({ native: null, routing: null, delegation: null })
   const [fallbackBaselines, setFallbackBaselines] = useState({ native: null, routing: null, delegation: null })
+  // The compression and title-generation spare models (auxiliary.{task}.fallback_chain), as drafted and
+  // as loaded; saved by the model section to its targets, like the conversation spare models.
+  const [auxiliaryDrafts, setAuxiliaryDrafts] = useState({ compression: null, title: null })
+  const [auxiliaryBaselines, setAuxiliaryBaselines] = useState({ compression: null, title: null })
   const [preview, setPreview] = useState(null)
   const [previewPending, setPreviewPending] = useState(false)
   const [applyPending, setApplyPending] = useState(false)
@@ -3026,6 +3284,8 @@ function RouterPage({ ctx: pluginContext }) {
     setRoutingTargetEdited(false)
     setFallbackDrafts({ native: null, routing: null, delegation: null })
     setFallbackBaselines({ native: null, routing: null, delegation: null })
+    setAuxiliaryDrafts({ compression: null, title: null })
+    setAuxiliaryBaselines({ compression: null, title: null })
     setPageError('')
     if (applyPendingRef.current) {
       const wasApplying = applyPhaseRef.current === 'apply'
@@ -3077,6 +3337,8 @@ function RouterPage({ ctx: pluginContext }) {
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
     setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
     setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
+    setAuxiliaryDrafts(copyAuxiliaryDrafts(row))
+    setAuxiliaryBaselines(copyAuxiliaryDrafts(row))
     setModelTargets([row.name])
     setRoutingProfiles(profiles.filter(item => item.routing?.enabled === true).map(item => item.name))
     setReenableChosen([])
@@ -3134,9 +3396,34 @@ function RouterPage({ ctx: pluginContext }) {
   // `routingTargetEdited` is the section's copy intent: the operator picked targets by hand.
   // Slot models are copied on fresh intent only while their cards are on screen (a model mode).
   const slotCardsVisible = Boolean(nativeDelegationDraft && nativeModelMode(nativeDelegationDraft.backend))
-  const routingCopyPending = !revisionChanged && slotInfo.editable && Boolean(draft?.slots) && (slotDraftChanged || (routingTargetEdited && slotCardsVisible))
-  const routingWriteTargets = routingCopyPending ? selectedTargets : []
-  const routingTargetError = routingCopyPending ? slotDraftIssue || (!selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : '') : ''
+  // A slot still following the delegation model (an earlier setting) is never copied to another
+  // profile: the slot models then go to the loaded profile only, and every other target is named as
+  // keeping its own slot models. No copy intent is pending for them.
+  const slotsCopyOk = slotsCopyable(draft?.slots)
+  // ...and never over another profile's own slot that still follows the delegation model: the slot
+  // map is replaced as a whole, so such a target keeps all its slot models and is named as skipped.
+  // Only a slot the receiving profile has explicitly stored that way (slots.stored); a never-saved slot
+  // merely shown through its tier's default link is not a setting to protect (as service.py keeps).
+  const legacySlotTarget = name => {
+    if (name === selectedProfile) return false
+    const row = profiles.find(item => item.name === name)
+    return (Array.isArray(row?.slots?.stored) ? row.slots.stored : []).some(id => row?.slots?.declarations?.[id]?.follow === LEGACY_SLOT_FOLLOW)
+  }
+  const slotTargetsAllowed = slotsCopyOk ? selectedTargets.filter(name => !legacySlotTarget(name)) : selectedTargets.filter(name => name === selectedProfile)
+  // Copy intent alone sends slot models only while some chosen target can take them; otherwise the
+  // rest is saved and every chosen target is named as keeping its own slot models.
+  const routingCopyPending = !revisionChanged && slotInfo.editable && Boolean(draft?.slots) &&
+    (slotDraftChanged || (routingTargetEdited && slotCardsVisible && slotsCopyOk && slotTargetsAllowed.length > 0))
+  const routingWriteTargets = routingCopyPending ? slotTargetsAllowed : []
+  const slotSkippedTargets = slotInfo.editable && Boolean(draft?.slots) && (slotDraftChanged || (routingTargetEdited && slotCardsVisible))
+    ? selectedTargets.filter(name => !slotTargetsAllowed.includes(name)) : []
+  const slotSkipReason = '이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 다른 프로필에는 복사하지 않음'
+  const targetSlotSkipReason = '이 프로필에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않음'
+  const slotSkipReasonFor = name => slotsCopyOk ? targetSlotSkipReason : slotSkipReason
+  const routingTargetError = routingCopyPending ? slotDraftIssue || (!selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.'
+    : !slotTargetsAllowed.length ? (slotsCopyOk
+      ? `작업 슬롯 모델: 선택한 프로필(${selectedTargets.join(', ')})에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않습니다. 불러온 프로필(${selectedProfile})을 적용 대상에 넣거나 다른 프로필을 고르세요.`
+      : `작업 슬롯 모델: ${slotSkipReason}입니다. 불러온 프로필(${selectedProfile})을 적용 대상에 넣거나, 그 슬롯의 모델 기준을 다시 고르세요.`) : '') : ''
   const modelWriteNeeded = modelDraftChanged || routingTargetEdited
   // Role models go to the target list only while there is an edit or fresh copy intent; a list that
   // merely persisted across a reload or profile change copies nothing.
@@ -3162,17 +3449,28 @@ function RouterPage({ ctx: pluginContext }) {
   // Saving would write the old draft over them, so each save that writes such a part is blocked.
   // Values changed elsewhere since they were frozen (early feedback; the service refuses such a save
   // by itself through `expected`), plus a refusal the service already reported for this page.
-  const serverDrift = serverConflict ? [{ profile: serverConflict.profile, part: externalChangeLabel(serverConflict), fallback: serverConflict.field === 'native_fallback' }] : []
+  // Each drift item belongs to one kind of write: the store ('store'), the conversation spare models
+  // ('fallback') or one auxiliary task's spare models ('auxiliary').
+  const conflictDrift = conflict => ({ profile: conflict.profile, part: externalChangeLabel(conflict), fallback: conflict.field === 'native_fallback',
+    ...(String(conflict.field).startsWith('auxiliary_fallback') ? { auxiliary: String(conflict.field).split('.')[1] || 'all' } : {}) })
+  const driftKind = item => item.fallback ? 'fallback' : item.auxiliary ? 'auxiliary' : 'store'
+  const serverDrift = serverConflict ? [conflictDrift(serverConflict)] : []
   const driftItems = [...pageLiveDrift(profiles, selectedProfile, profileBaselines, expectationBaselines), ...serverDrift]
-  const storeDrift = driftItems.filter(item => !item.fallback)
+  const storeDrift = driftItems.filter(item => driftKind(item) === 'store')
   const fallbackDrift = driftItems.some(item => item.fallback)
+  const auxiliaryDriftFor = task => driftItems.filter(item => item.auxiliary === task || item.auxiliary === 'all')
   const liveDrift = driftItems
   // Re-checked when a save is dispatched, against the newest status, so a callback kept from an
   // earlier render never sends while the current state is blocked.
-  const driftNow = kind => {
+  const driftNow = (kind, tasks = null) => {
     const items = [...pageLiveDrift(statusDataRef.current?.profiles || [], selectedProfile, profileBaselines, expectationBaselines),
-      ...(serverConflictRef.current ? [{ fallback: serverConflictRef.current.field === 'native_fallback' }] : [])]
-    return items.some(item => kind === 'all' || (kind === 'fallback') === Boolean(item.fallback))
+      ...(serverConflictRef.current ? [conflictDrift(serverConflictRef.current)] : [])]
+    return items.some(item => kind === 'all' || (driftKind(item) === kind && (kind !== 'auxiliary' || !tasks || item.auxiliary === 'all' || tasks.includes(item.auxiliary))))
+  }
+  // The same dispatch-time check for one auxiliary task's spare models of the loaded profile.
+  const auxiliarySourceEditableNow = task => {
+    const row = (statusDataRef.current?.profiles || []).find(item => item?.name === selectedProfile)
+    return row?.auxiliary_fallbacks?.[task]?.editable === true
   }
   // Re-checked at dispatch as well: whether the loaded profile's conversation spare models may still be
   // edited here (confirmed capabilities and an editable source), read from the newest status.
@@ -3237,7 +3535,50 @@ function RouterPage({ ctx: pluginContext }) {
   const nativeFallbackIssue = nativeFallbackWriteNeeded ? fallbackScopeValidation('native', fallbackValueForScope('native', nativeFallbackDraft),
     nativeFallbackWriteTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean), { profile: selectedProfile, models: draft?.models, model_targets: modelWriteTargets }) : ''
   const nativeFallbackSaveError = nativeFallbackTargetError || (nativeFallbackWriteNeeded ? fallbackDriftError : '') || (nativeFallbackIssue ? `대화 예비 모델: ${nativeFallbackIssue}` : '')
-  const sectionWriteNeeded = modelWriteNeeded || routingCopyPending || nativeWriteNeeded || nativeFallbackWriteNeeded
+  // The compression and title-generation spare models, task by task, in the conversation spare models'
+  // pattern: written to the section's targets that can take them when the draft's value differs from
+  // the loaded one, or on copy intent while the chain is on (switching a chain off is copied only as
+  // an explicit edit, so a hand-picked list never clears other profiles' chains by itself).
+  const auxiliaryState = currentRow?.auxiliary_fallbacks || null
+  const auxiliaryModelProjection = { profile: selectedProfile, models: draft?.models, model_targets: modelWriteTargets }
+  const auxiliary = Object.fromEntries(AUXILIARY_TASKS.map(task => {
+    const taskDraft = auxiliaryDrafts[task.id]
+    const changed = auxiliaryFallbackChanged(taskDraft, auxiliaryBaselines[task.id])
+    const editable = auxiliaryState?.[task.id]?.editable === true && Boolean(taskDraft)
+    const reasons = Object.fromEntries(profiles.map(row => [row.name, auxiliaryTargetReason(row, task)]))
+    const value = auxiliaryFallbackValue(taskDraft)
+    const copy = Boolean(routingTargetEdited && editable && value.length > 0)
+    const requested = editable && (changed || copy)
+    const targets = requested ? selectedTargets.filter(name => !reasons[name]) : []
+    const writeNeeded = !revisionChanged && targets.length > 0
+    const intent = changed || (routingTargetEdited && value.length > 0)
+    const skipReasons = Object.fromEntries(selectedTargets.map(name => [name, !intent ? ''
+      : requested ? reasons[name] : reasons[name] || `불러온 프로필(${selectedProfile})의 ${task.label} 예비 모델은 이 화면에서 바꿀 수 없어 복사하지 않습니다.`]))
+    let targetError = ''
+    if (changed && !editable) {
+      targetError = `${selectedProfile}: ${reasons[selectedProfile] || `이 프로필의 ${task.label} 예비 모델은 읽기 전용입니다.`} 이 화면을 연 뒤 바뀌어, 바꾼 ${task.label} 예비 모델은 어느 프로필에도 저장할 수 없습니다. 상태를 새로고침해 저장된 값을 다시 불러오세요.`
+    } else if (changed && selectedTargets.includes(selectedProfile) && reasons[selectedProfile]) {
+      targetError = `${selectedProfile}: ${reasons[selectedProfile]} 바꾼 ${task.label} 예비 모델을 저장할 수 없습니다.`
+    } else if (changed && selectedTargets.length && !targets.length) {
+      targetError = `바꾼 ‘${task.label} 예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다. 받을 수 있는 프로필을 선택하거나 그 변경을 되돌리세요.`
+    }
+    const draftError = taskDraft ? auxiliaryFallbackValidation(taskDraft) : ''
+    // An on draft without a valid row never becomes an Off write (see auxiliaryFallbackUpdates).
+    const drift = auxiliaryDriftFor(task.id)
+    return [task.id, { task, draft: taskDraft, changed, editable, reasons, value, copy, requested, targets, writeNeeded, skipReasons,
+      skipped: selectedTargets.filter(name => skipReasons[name]), targetError, draftError,
+      saveError: targetError || (changed && draftError ? `${task.label} 예비 모델: ${draftError}` : '') || (writeNeeded && drift.length ? liveDriftMessage(drift) : '') }]
+  }))
+  const auxiliaryWriteNeeded = AUXILIARY_TASKS.some(task => auxiliary[task.id].writeNeeded)
+  const auxiliaryChanged = AUXILIARY_TASKS.some(task => auxiliary[task.id].changed)
+  const auxiliaryWrite = Object.fromEntries(AUXILIARY_TASKS.map(task => [task.id, auxiliary[task.id].writeNeeded
+    ? { targets: [...auxiliary[task.id].targets], value: deepClone(auxiliary[task.id].value), enabled: auxiliary[task.id].draft?.enabled === true } : null]))
+  const auxiliaryFallbackTargetError = AUXILIARY_TASKS.map(task => auxiliary[task.id].targetError).filter(Boolean).join(' ')
+  // The service's deterministic checks (tokens, duplicates, a spare equal to the task's own model on
+  // each receiving target) before the first write.
+  const auxiliaryIssue = auxiliaryWriteNeeded ? auxiliaryFallbackUpdates(auxiliaryWrite, profiles, auxiliaryModelProjection).errors.join(' ') : ''
+  const auxiliarySaveError = AUXILIARY_TASKS.map(task => auxiliary[task.id].saveError).filter(Boolean).join(' ') || auxiliaryIssue
+  const sectionWriteNeeded = modelWriteNeeded || routingCopyPending || nativeWriteNeeded || nativeFallbackWriteNeeded || auxiliaryWriteNeeded
   // The profile delegation section: editable only while the loaded profile's stored method uses
   // profiles. It saves to its own targets, each keeping its stored method and spare models.
   const profileSectionEditable = Boolean(nativeSectionEditable && nativeProfileMode(currentRow?.native_delegation?.backend))
@@ -3288,7 +3629,8 @@ function RouterPage({ ctx: pluginContext }) {
     // A hand-picked model target list is a pending copy of the role models, of the slot models while
     // their cards are on screen, and of the delegation method to profiles stored on a plugin method.
     'copy.models': Boolean(routingTargetEdited),
-    'copy.slots': Boolean(routingTargetEdited && slotCardsVisible && draft?.slots),
+    // (never while a slot still follows the delegation model: such slot models are not copied)
+    'copy.slots': Boolean(routingTargetEdited && slotCardsVisible && draft?.slots && slotsCopyOk && slotTargetsAllowed.length > 0),
     'native.copy': Boolean(routingTargetEdited && nativeBackendCopyable && selectedTargets.some(name => nativeBackendSelectable(nativeDelegationBaselines[name]?.backend))),
     // ...and of the conversation spare models to the targets that can take them.
     'copy.fallback': Boolean(nativeFallbackCopy && nativeFallbackWriteTargets.length),
@@ -3297,6 +3639,9 @@ function RouterPage({ ctx: pluginContext }) {
     'profiles.default': Boolean(draftRoutes && frozenRoutes && differs(draftRoutes.default, frozenRoutes.default)),
     'profiles.targets': Boolean(profileTargetEdited),
     timeouts: Boolean(timeoutWriteRequested), 'fallback:native': nativeFallbackDraftChanged,
+    // ...and of each auxiliary task's spare models while that chain is on.
+    ...Object.fromEntries(AUXILIARY_TASKS.flatMap(task => [[`fallback:aux.${task.id}`, auxiliary[task.id].changed],
+      [`copy.aux.${task.id}`, Boolean(auxiliary[task.id].copy && auxiliary[task.id].targets.length)]])),
     reenable: frozenReenable.length > 0 }
   // The drafted value of each edit, for checking what a save actually sent.
   editViewRef.current = { profile: selectedProfile, models: draft?.models ?? null,
@@ -3304,14 +3649,15 @@ function RouterPage({ ctx: pluginContext }) {
     native: nativeDelegationDraft ? { backend: nativeDelegationDraft.backend, slotPolicy: nativeDelegationDraft.slotPolicy ?? null,
       autoSlotPolicy: nativeDelegationDraft.autoSlotPolicy ?? null, profile_routes: nativeDelegationDraft.profile_routes,
       descriptionEdits: nativeDelegationDraft.descriptionEdits || {} } : null,
-    nativeFallback: fallbackValueForScope('native', nativeFallbackDraft), reenable: frozenReenable }
-  const noTargetError = (modelDraftChanged || slotDraftChanged || nativeDraftChanged || nativeFallbackDraftChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
+    nativeFallback: fallbackValueForScope('native', nativeFallbackDraft),
+    auxiliary: Object.fromEntries(AUXILIARY_TASKS.map(task => [task.id, auxiliaryFallbackValue(auxiliaryDrafts[task.id])])), reenable: frozenReenable }
+  const noTargetError = (modelDraftChanged || slotDraftChanged || nativeDraftChanged || nativeFallbackDraftChanged || auxiliaryChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
   // A changed delegation method or spare model that no selected profile can take is never dropped silently.
   const noNativeTargetError = nativeDraftChanged && selectedTargets.length && !nativeWriteTargets.length
     ? '바꾼 ‘맡기는 방식·예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다. 받을 수 있는 프로필을 선택하거나 그 변경을 되돌리세요.' : ''
   const sectionSaveError = (missingModelTargets.length && (sectionWriteNeeded || routingTargetEdited) ? vanishedMessage(missingModelTargets) : '') ||
     ((modelWriteNeeded || routingCopyPending) ? storeDriftError : '') || nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
-    nativeFallbackSaveError ||
+    nativeFallbackSaveError || auxiliarySaveError ||
     (nativeWriteNeeded && !nativeStorageAvailable ? '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.' : '')
   const customSlotCount = draft?.slots ? TASK_SLOTS.filter(slot => draft.slots[slot.id]?.follow === 'custom').length : 0
   const spareSlotCount = nativeSlotCopy ? TASK_SLOTS.filter(slot => nativeDraftSlotPolicy(nativeDelegationDraft)[slot.id].mode === 'custom').length : 0
@@ -3319,6 +3665,7 @@ function RouterPage({ ctx: pluginContext }) {
     modelWriteNeeded ? '대화 모델' : null,
     routingCopyPending ? `작업 슬롯 모델(직접 지정 ${customSlotCount}개)` : null,
     nativeFallbackWriteNeeded ? `대화 예비 모델: ${nativeFallbackDraft.enabled ? `${nativeFallbackDraft.chain.length}개 사용` : '사용 안 함'}` : null,
+    ...AUXILIARY_TASKS.map(task => auxiliary[task.id].writeNeeded ? `${task.label} 예비 모델: ${auxiliary[task.id].value.length ? `${auxiliary[task.id].value.length}개 사용` : '사용 안 함'}` : null),
     nativeWriteNeeded ? `맡기는 방식: ${nativeBackendLabel(nativeDelegationDraft.backend)}${nativeSlotCopy ? ` · 예비 모델을 둔 슬롯 ${spareSlotCount}개` : ''}` : null
   ].filter(Boolean).join(' · ') || '바뀐 내용이 없어 저장할 것이 없습니다. 값을 고치면 그 내용을, 적용 대상을 직접 고르면 현재 값을 그 프로필에 저장합니다.'
   const nativeSkippedTargets = nativeDraftChanged || (nativeSectionEditable && nativeBackendCopyable && routingTargetEdited) ? selectedTargets.filter(name => nativeTargetReasons[name]) : []
@@ -3328,8 +3675,9 @@ function RouterPage({ ctx: pluginContext }) {
     ? buildModelSectionPreviewBody({ revision: draftRevision, profile: selectedProfile, draft: saveDraft, modelTargets: modelWriteTargets,
       routingProfiles: loadedRoutingProfiles, routingTargets: routingWriteTargets, profileBaselines, routingTargetError },
     modelWriteNeeded && routingCopyPending ? null : routingCopyPending ? 'routing' : 'models').body : null
-  const sectionFallbackBody = nativeFallbackWriteNeeded ? buildModelSectionFallbackBody({ profiles, profile: selectedProfile, draft: saveDraft, modelTargets: modelWriteTargets,
-    fallbackWrite: { targets: nativeFallbackWriteTargets, value: fallbackValueForScope('native', nativeFallbackDraft) } }, draftRevision).body : null
+  const sectionFallbackBody = nativeFallbackWriteNeeded || auxiliaryWriteNeeded ? buildModelSectionFallbackBody({ profiles, profile: selectedProfile, draft: saveDraft, modelTargets: modelWriteTargets,
+    fallbackWrite: nativeFallbackWriteNeeded ? { targets: nativeFallbackWriteTargets, value: fallbackValueForScope('native', nativeFallbackDraft) } : null,
+    auxiliaryWrite: auxiliaryWriteNeeded ? auxiliaryWrite : null }, draftRevision).body : null
   const sectionWriteSet = modelSectionWriteSet({ native: nativeWriteNeeded ? nativeBatchBody : null, store: sectionStoreBody, fallback: sectionFallbackBody })
   const targetWriteLine = name => {
     const item = sectionWriteSet.get(name)
@@ -3338,11 +3686,15 @@ function RouterPage({ ctx: pluginContext }) {
       item.slots ? '작업 슬롯 모델' : '',
       item.method ? `맡기는 방식(${nativeBackendLabel(item.method)})` : '',
       item.slotSpares ? '슬롯 예비 모델' : '',
-      item.conversationSpares ? `대화 예비 모델(${item.conversationSpares.enabled ? `${item.conversationSpares.chain.length}개 사용` : '사용 안 함'})` : ''
+      item.conversationSpares ? `대화 예비 모델(${item.conversationSpares.enabled ? `${item.conversationSpares.chain.length}개 사용` : '사용 안 함'})` : '',
+      ...AUXILIARY_TASKS.map(task => Array.isArray(item.auxiliarySpares?.[task.id])
+        ? `${task.label} 예비 모델(${item.auxiliarySpares[task.id].length ? `${item.auxiliarySpares[task.id].length}개 사용` : '사용 안 함'})` : '')
     ].filter(Boolean) : []
     const kept = [
+      slotSkippedTargets.includes(name) ? `작업 슬롯 모델은 그대로 둠(${slotSkipReasonFor(name)})` : '',
       nativeSkippedTargets.includes(name) ? `맡기는 방식·슬롯 예비 모델은 그대로 둠(${nativeTargetReasons[name]})` : '',
-      nativeFallbackSkipReasons[name] ? `대화 예비 모델은 그대로 둠(${nativeFallbackSkipReasons[name]})` : ''
+      nativeFallbackSkipReasons[name] ? `대화 예비 모델은 그대로 둠(${nativeFallbackSkipReasons[name]})` : '',
+      ...AUXILIARY_TASKS.map(task => auxiliary[task.id].skipReasons[name] ? `${task.label} 예비 모델은 그대로 둠(${auxiliary[task.id].skipReasons[name]})` : '')
     ].filter(Boolean)
     return `${name}: ${parts.length ? `${parts.join(', ')} 저장` : '저장하는 값 없음'}${kept.length ? ` · ${kept.join(' · ')}` : ''}`
   }
@@ -3405,6 +3757,8 @@ function RouterPage({ ctx: pluginContext }) {
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
     setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
     setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
+    setAuxiliaryDrafts(copyAuxiliaryDrafts(row))
+    setAuxiliaryBaselines(copyAuxiliaryDrafts(row))
     // A hand-picked list survives a source switch as picked, vanished names included; only the
     // pending copy intent ends here.
     setModelTargets(current => nativeTargetsManualRef.current ? uniqueProfileNames(current || []) : [name])
@@ -3474,10 +3828,26 @@ function RouterPage({ ctx: pluginContext }) {
     ...current,
     timeouts: { ...current.timeouts, [key]: value }
   }))
-  const changeSlotFollow = (slot, follow) => updateDraft(current => current.slots?.[slot]
-    ? { ...current, slots: { ...current.slots, [slot]: slotFollowDeclaration(current.slots[slot], follow, current.models) } } : current)
+  // Only the offered bases can be picked; the earlier 'delegation' basis is shown, never chosen here.
+  const changeSlotFollow = (slot, follow) => {
+    if (!SLOT_FOLLOW_OPTIONS.some(option => option.value === follow)) return
+    updateDraft(current => current.slots?.[slot]
+      ? { ...current, slots: { ...current.slots, [slot]: slotFollowDeclaration(current.slots[slot], follow, current.models) } } : current)
+  }
+  // Back to the declaration stored when the profile was loaded (the way back to an earlier basis).
+  const revertSlotFollow = slot => {
+    const stored = profileBaselines?.[selectedProfile]?.slots?.[slot]
+    if (!stored) return
+    updateDraft(current => current.slots?.[slot] ? { ...current, slots: { ...current.slots, [slot]: deepClone(stored) } } : current)
+  }
   const updateSlotRoute = (slot, field, value) => updateDraft(current => current.slots?.[slot]?.follow === 'custom'
     ? { ...current, slots: { ...current.slots, [slot]: { follow: 'custom', custom: { ...(current.slots[slot].custom || {}), [field]: value } } } } : current)
+
+  const updateAuxiliaryDraft = (task, updater) => {
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || !editFromThisRender()) return
+    invalidatePlanForEdit()
+    setAuxiliaryDrafts(current => ({ ...current, [task]: current[task] ? updater(current[task]) : current[task] }))
+  }
 
   const updateFallbackDraft = (scope, updater) => {
     if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || !editFromThisRender()) return
@@ -3514,6 +3884,9 @@ function RouterPage({ ctx: pluginContext }) {
     fallbackTargets: { native: [...nativeFallbackWriteTargets] },
     fallbackTargetEdits: { native: nativeFallbackWriteNeeded },
     nativeFallbackTargetError,
+    // Each auxiliary task's spare models: { targets, value } while written, otherwise null.
+    auxiliaryWrite: deepClone(auxiliaryWrite),
+    auxiliaryFallbackTargetError,
     profiles: deepClone(profiles),
     // Frozen at load (never re-read after a write): what each store body expects to overwrite.
     pageExpectations: deepClone(expectationBaselines || {}),
@@ -3777,20 +4150,26 @@ function RouterPage({ ctx: pluginContext }) {
       setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || refreshPendingRef.current || !profileBaselines) return
     const slotsNeeded = routingCopyPending
     const storeNeeded = modelWriteNeeded || slotsNeeded
-    const fallbackNeeded = nativeFallbackWriteNeeded
+    // Conversation and auxiliary spare models share the narrow '/fallback-preview' step; a chain-only
+    // edit sends that step alone (no store plan, no routing pass).
+    const fallbackNeeded = nativeFallbackWriteNeeded || auxiliaryWriteNeeded
     const storeScope = modelWriteNeeded && slotsNeeded ? null : slotsNeeded ? 'routing' : 'models'
     if (!sectionWriteNeeded || sectionSaveError) return
     // Checked again now, against the newest status: this callback may come from an earlier render.
     if (storeNeeded && driftNow('store')) return
-    if (fallbackNeeded && driftNow('fallback')) return
-    if ((fallbackNeeded || nativeFallbackDraftChanged) && !fallbackSourceEditableNow()) return
+    if (nativeFallbackWriteNeeded && driftNow('fallback')) return
+    if (auxiliaryWriteNeeded && driftNow('auxiliary', AUXILIARY_TASKS.filter(task => auxiliary[task.id].writeNeeded).map(task => task.id))) return
+    if ((nativeFallbackWriteNeeded || nativeFallbackDraftChanged) && !fallbackSourceEditableNow()) return
+    if (AUXILIARY_TASKS.some(task => (auxiliary[task.id].writeNeeded || auxiliary[task.id].changed) && !auxiliarySourceEditableNow(task.id))) return
     const base = captureSaveSnapshot()
     const nativeSnapshot = freezeDeep({ ...base, nativePart: 'native',
       nativeDraft: nativeDelegationDraft ? deepClone(nativeDelegationDraft) : null,
       nativeTargets: [...nativeWriteTargets], nativeBaselines: deepClone(nativeDelegationBaselines),
       nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
     const storeSnapshot = base
-    const fallbackSnapshot = freezeDeep({ ...base, fallbackWrite: { targets: [...nativeFallbackWriteTargets], value: fallbackValueForScope('native', nativeFallbackDraft) } })
+    const fallbackSnapshot = freezeDeep({ ...base,
+      fallbackWrite: nativeFallbackWriteNeeded ? { targets: [...nativeFallbackWriteTargets], value: fallbackValueForScope('native', nativeFallbackDraft) } : null,
+      auxiliaryWrite: auxiliaryWriteNeeded ? deepClone(auxiliaryWrite) : null })
     const storeStep = { operation: '/preview', label: '모델 변경', prepare: revision => buildModelSectionPreviewBody(storeSnapshot, storeScope, revision) }
     // The service checks the spare models against each target's stored main model. When the models
     // step changes that model for a spare-model target, the check is valid only after that step.
@@ -3798,8 +4177,18 @@ function RouterPage({ ctx: pluginContext }) {
       const row = base.profiles.find(item => item.name === name)
       return routeIdentity(base.draft.models?.main) !== routeIdentity(row?.models?.main) || routeIdentity(base.draft.models?.main) !== routeIdentity(row?.actual_models?.main)
     })()
-    const fallbackStep = { operation: '/fallback-preview', label: '대화 예비 모델 변경',
-      prevalidate: !(storeNeeded && fallbackSnapshot.fallbackWrite.targets.some(mainChangedFor)),
+    // An auxiliary task's spare models are checked against that task's own model (which follows the
+    // main model while its provider is 'auto'), so a change of either defers the check the same way.
+    const roleChangedFor = (name, role) => base.modelTargets.includes(name) && (() => {
+      const row = base.profiles.find(item => item.name === name)
+      return routeIdentity(base.draft.models?.[role]) !== routeIdentity(row?.models?.[role]) || routeIdentity(base.draft.models?.[role]) !== routeIdentity(row?.actual_models?.[role])
+    })()
+    const auxiliaryTargetsChanging = AUXILIARY_TASKS.some(task => (fallbackSnapshot.auxiliaryWrite?.[task.id]?.targets || [])
+      .some(name => mainChangedFor(name) || roleChangedFor(name, task.id)))
+    const spareParts = [nativeFallbackWriteNeeded ? '대화' : null, ...AUXILIARY_TASKS.map(task => auxiliary[task.id].writeNeeded ? task.label : null)].filter(Boolean)
+    const fallbackStep = { operation: '/fallback-preview',
+      label: spareParts.length === 1 && nativeFallbackWriteNeeded ? '대화 예비 모델 변경' : `예비 모델 변경(${spareParts.join('·')})`,
+      prevalidate: !(storeNeeded && ((fallbackSnapshot.fallbackWrite?.targets || []).some(mainChangedFor) || auxiliaryTargetsChanging)),
       prepare: revision => buildModelSectionFallbackBody(fallbackSnapshot, revision) }
     const steps = [...(storeNeeded ? [storeStep] : []), ...(fallbackNeeded ? [fallbackStep] : [])]
     if (!nativeWriteNeeded) {
@@ -3871,8 +4260,9 @@ function RouterPage({ ctx: pluginContext }) {
 
   const saveAll = () => {
     if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || liveDrift.length || pageVanished.length || driftNow('all') || !currentRow || !draft || !statusQuery.data || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
-    // The whole-page save carries the conversation spare models too: same dispatch-time source check.
+    // The whole-page save carries the conversation and auxiliary spare models too: same dispatch-time source checks.
     if ((nativeFallbackWriteNeeded || nativeFallbackDraftChanged) && !fallbackSourceEditableNow()) return
+    if (AUXILIARY_TASKS.some(task => (auxiliary[task.id].writeNeeded || auxiliary[task.id].changed) && !auxiliarySourceEditableNow(task.id))) return
     const snapshot = captureSaveSnapshot()
     return runSave({
       operation: '/preview', snapshot,
@@ -3899,7 +4289,8 @@ function RouterPage({ ctx: pluginContext }) {
             baselinesByProfile: snapshot.timeoutBaselinesByProfile,
             currentByProfile: snapshot.currentTimeoutsByProfile,
             copyIntent: snapshot.timeoutTargetEdited
-          }
+          },
+          snapshot.auxiliaryWrite
         )
         const routingUpdates = (combined.body.fallback_updates || [])
           .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
@@ -3912,7 +4303,7 @@ function RouterPage({ ctx: pluginContext }) {
           routing_targets: combined.body.routing_targets
         }, routingUpdates)
         return { body: combined.body, errors: [...new Set([...combined.errors, ...projectedErrors, ...(snapshot.routingTargetError ? [snapshot.routingTargetError] : []), ...(snapshot.noTargetError ? [snapshot.noTargetError] : []),
-          ...(snapshot.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : [])])] }
+          ...(snapshot.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : []), ...(snapshot.auxiliaryFallbackTargetError ? [snapshot.auxiliaryFallbackTargetError] : [])])] }
       }
     })
   }
@@ -3990,6 +4381,8 @@ function RouterPage({ ctx: pluginContext }) {
       const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
       setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
       setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
+      setAuxiliaryDrafts(copyAuxiliaryDrafts(row))
+      setAuxiliaryBaselines(copyAuxiliaryDrafts(row))
     } else {
       setSelectedProfile(null)
       setDraft(null)
@@ -3999,6 +4392,8 @@ function RouterPage({ ctx: pluginContext }) {
       setRoutingTargetEdited(false)
       setFallbackDrafts({ native: null, routing: null, delegation: null })
       setFallbackBaselines({ native: null, routing: null, delegation: null })
+      setAuxiliaryDrafts({ compression: null, title: null })
+      setAuxiliaryBaselines({ compression: null, title: null })
     }
     needsReloadRef.current = false
     needsReloadRef.scopeKey = null
@@ -4024,7 +4419,7 @@ function RouterPage({ ctx: pluginContext }) {
   const modelPresetCards = draft ? jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.7rem' },
     children: [
-      jsx('p', { style: styles.hint, children: '추천 구성을 고르면 아래 네 가지 모델 입력값만 바뀝니다. 저장을 눌러야 적용되며, 예비 모델이나 시간 제한은 바꾸지 않습니다.' }),
+      jsx('p', { style: styles.hint, children: '추천 구성을 고르면 아래 기본 대화·대화 압축·제목 생성 모델만 바뀝니다. 저장을 눌러야 적용되며, 예비 모델이나 시간 제한은 바꾸지 않습니다.' }),
       jsx('div', {
         style: styles.presetGrid,
         children: MODEL_PRESETS.map(preset => jsxs('button', {
@@ -4035,77 +4430,105 @@ function RouterPage({ ctx: pluginContext }) {
           onClick: () => applyPreset(preset.id),
           style: currentPreset === preset.id ? { ...styles.presetCard, ...styles.presetSelected } : styles.presetCard,
           children: [
-            jsxs('div', { style: styles.statusLine, children: [jsx('strong', { children: preset.name }), jsx(Badge, { variant: currentPreset === preset.id ? 'muted' : 'muted', children: currentPreset === preset.id ? '현재 일치' : '초안에 채우기' })] }),
+            jsxs('div', { style: styles.statusLine, children: [jsx('strong', { children: preset.name }), jsx(Badge, { variant: 'muted', children: currentPreset === preset.id ? '현재 일치' : '초안에 채우기' })] }),
             jsx('span', { style: styles.hint, children: preset.description }),
-            jsx('div', { style: styles.presetRoleList, children: ROLES.map(role => {
+            jsx('div', { style: styles.presetRoleList, children: CONVERSATION_ROLES.map(role => {
               const route = preset.models[role.id]
               return jsx('span', { style: styles.presetRole, children: `${role.label}: ${route.provider}/${route.model} · ${route.reasoning}` }, role.id)
             }) })
           ]
         }, preset.id))
       }),
-      jsx('p', { role: 'status', 'aria-live': 'polite', style: styles.hint, children: currentPreset === 'custom' ? '현재 모델 역할은 사용자 지정 조합입니다.' : `현재 네 역할이 ${MODEL_PRESETS.find(item => item.id === currentPreset)?.name} 프리셋과 일치합니다.` })
+      jsx('p', { role: 'status', 'aria-live': 'polite', style: styles.hint, children: currentPreset === 'custom' ? '현재 모델은 사용자 지정 조합입니다.' : `현재 세 모델이 ${MODEL_PRESETS.find(item => item.id === currentPreset)?.name} 프리셋과 일치합니다.` })
     ]
   }) : null
 
-  // The conversation spare models (native fallback_providers), directly under the main conversation
-  // model and in the task slots' pattern. They are saved by the model section's save, to its targets.
-  const nativeFallbackStatus = currentRow?.fallbacks?.native
-  const nativeFallbackLocked = disabled || !nativeFallbackEditable
-  const nativeChainText = chain => Array.isArray(chain) && chain.length
+  const chainText = chain => Array.isArray(chain) && chain.length
     ? chain.map(item => `${item?.provider || '—'}/${item?.model || '—'}`).join(' → ')
     : '없음'
+  const costNote = id => jsx('p', { id, role: 'note', style: styles.hint, children: '예비 모델로 이어가면 제공자의 요금제에 따라 사용량이나 비용이 늘 수 있습니다.' })
+  const chainIds = prefix => ({ root: `${prefix}-fallback`, mode: `${prefix}-fallback-mode`, add: `${prefix}-chain-add`,
+    picker: index => `${prefix}-chain-${index}-picker`, provider: index => `${prefix}-chain-${index}-provider`, model: index => `${prefix}-chain-${index}-model`,
+    up: index => `${prefix}-chain-${index}-up`, down: index => `${prefix}-chain-${index}-down`, remove: index => `${prefix}-chain-${index}-remove` })
+
+  // The conversation spare models (native fallback_providers), in the main conversation card. They are
+  // saved by the model section's save, to its targets.
+  const nativeFallbackStatus = currentRow?.fallbacks?.native
+  const nativeFallbackLocked = disabled || !nativeFallbackEditable
   const nativeFallbackSameAsMain = Boolean(nativeFallbackDraft?.enabled && draft?.models?.main &&
     nativeFallbackDraft.chain.some(item => foldedRouteIdentity(item) && foldedRouteIdentity(item) === foldedRouteIdentity(draft.models.main)))
   const nativeFallbackInlineError = nativeFallbackDraft ? nativeFallbackError || (nativeFallbackSameAsMain ? '대화 모델과 같은 모델은 예비 모델로 둘 수 없습니다.' : '') : ''
-  const moveNativeChain = (index, delta) => updateFallbackDraft('native', current => ({ ...current, chain: moveChainEntry(current.chain, index, delta) }))
-  const conversationFallback = jsxs('div', { id: 'conversation-fallback', style: { borderTop: '1px solid var(--ui-stroke-tertiary)', paddingTop: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.65rem', minWidth: 0 }, children: [
-    nativeFallbackDraft ? jsx(ChoiceField, { id: 'native-fallback-mode', label: '이 모델을 쓸 수 없을 때', value: nativeFallbackDraft.enabled ? 'custom' : 'off', disabled: nativeFallbackLocked,
-      options: [{ value: 'off', label: '다른 모델로 전환하지 않음' }, { value: 'custom', label: '예비 모델로 이어가기' }],
-      onChange: mode => updateFallbackDraft('native', current => nativeFallbackModeDraft(current, mode)) }) : null,
-    ...(nativeFallbackDraft?.enabled ? nativeFallbackDraft.chain.map((entry, index) => jsxs('div', { style: { ...styles.modelRoute, alignItems: 'stretch' }, children: [
-      jsx(ModelRouteField, {
-        ids: { picker: `native-chain-${index}-picker`, provider: `native-chain-${index}-provider`, model: `native-chain-${index}-model` },
-        labels: { picker: `예비 ${index + 1} 모델`, provider: `예비 ${index + 1} 제공자`, model: `예비 ${index + 1} 모델 ID` },
-        route: entry, disabled: nativeFallbackLocked, catalog: modelCatalog,
-        onChange: (field, value) => updateFallbackDraft('native', current => ({ ...current, chain: current.chain.map((item, at) => at === index ? { ...item, [field]: value } : item) })) }),
-      jsxs('div', { style: { ...styles.actions, alignSelf: 'flex-start' }, children: [
-        jsx(Button, { id: `native-chain-${index}-up`, size: 'sm', variant: 'secondary', disabled: nativeFallbackLocked || index === 0, onClick: () => moveNativeChain(index, -1), children: '위로' }),
-        jsx(Button, { id: `native-chain-${index}-down`, size: 'sm', variant: 'secondary', disabled: nativeFallbackLocked || index === nativeFallbackDraft.chain.length - 1, onClick: () => moveNativeChain(index, 1), children: '아래로' }),
-        jsx(Button, { id: `native-chain-${index}-remove`, size: 'sm', variant: 'secondary', disabled: nativeFallbackLocked, onClick: () => updateFallbackDraft('native', current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })), children: '이 예비 모델 삭제' })
+  const conversationFallback = jsx(SpareChainEditor, {
+    ids: { ...chainIds('native'), root: 'conversation-fallback', mode: 'native-fallback-mode' },
+    mode: nativeFallbackDraft ? (nativeFallbackDraft.enabled ? 'custom' : 'off') : null,
+    chain: nativeFallbackDraft?.chain || [], disabled: nativeFallbackLocked, catalog: modelCatalog,
+    onMode: mode => updateFallbackDraft('native', current => nativeFallbackModeDraft(current, mode)),
+    onEntry: (index, field, value) => updateFallbackDraft('native', current => ({ ...current, chain: current.chain.map((item, at) => at === index ? { ...item, [field]: value } : item) })),
+    onMove: (index, delta) => updateFallbackDraft('native', current => ({ ...current, chain: moveChainEntry(current.chain, index, delta) })),
+    onRemove: index => updateFallbackDraft('native', current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })),
+    onAdd: () => updateFallbackDraft('native', current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })),
+    notes: [
+      nativeFallbackDraft && !nativeFallbackDraft.enabled && nativeFallbackDraft.chain.length ? jsx('p', { id: 'native-fallback-kept', style: styles.hint, children: `꺼 두어도 예비 모델 목록(${chainText(nativeFallbackDraft.chain)})은 지우지 않고 보관합니다.` }) : null,
+      nativeFallbackInlineError ? jsx('p', { id: 'native-fallback-error', role: 'alert', style: styles.warning, children: nativeFallbackInlineError }) : null,
+      !fallbackSupported ? jsx('p', { id: 'native-fallback-unsupported', role: 'note', style: styles.warning, children: '이 연결에서는 대화 예비 모델을 안전하게 바꿀 수 있는지 확인되지 않아 읽기 전용으로 둡니다. 플러그인을 업데이트한 뒤 상태를 새로고침하세요.' }) : null,
+      fallbackSupported && !nativeFallbackDraft ? jsx('p', { id: 'native-fallback-unavailable', role: 'note', style: styles.warning, children: '이 프로필의 대화 예비 모델 설정을 확인할 수 없어 표시하지 않습니다. 기존 값은 그대로 둡니다.' }) : null,
+      fallbackSupported && nativeFallbackDraft && nativeFallbackStatus?.editable !== true ? jsx('p', { id: 'native-fallback-readonly', role: 'note', style: styles.warning, children: '별도의 고급 옵션이나 관리자 고정 설정이 있어 이 화면에서는 바꿀 수 없습니다(읽기 전용). 기존 설정은 그대로 둡니다.' }) : null,
+      nativeFallbackEditable && nativeFallbackStatus?.managed !== true ? jsx('p', { id: 'native-fallback-managed', role: 'note', style: styles.hint, children: '지금 예비 모델은 다른 설정에서 관리됩니다. 여기서 바꿔 저장하면 이 플러그인이 관리하는 설정으로 바뀝니다.' }) : null,
+      nativeFallbackStatus?.drift ? jsx('p', { id: 'native-fallback-drift', role: 'status', style: styles.warning, children: `저장된 예비 모델과 실제로 쓰는 예비 모델이 다릅니다. 실제로 쓰는 목록: ${chainText(nativeFallbackStatus.actual_chain)}` }) : null,
+      Array.isArray(nativeFallbackStatus?.warnings) && nativeFallbackStatus.warnings.length ? jsx('div', { id: 'native-fallback-warnings', role: 'note', style: styles.warning, children: nativeFallbackStatus.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: readableValue(warning) }, index)) }) : null,
+      nativeFallbackDraft?.enabled ? costNote('native-fallback-cost-note') : null
+    ] })
+
+  // The compression and title-generation spare models (Hermes' auxiliary.{task}.fallback_chain), in
+  // their own cards with the same editor. Hermes has no off switch for them: off is saved as an empty
+  // list over a stored one, and rows switched off are kept only in this draft.
+  const auxiliaryEditor = task => {
+    const item = auxiliary[task.id]
+    const state = auxiliaryState?.[task.id]
+    const taskDraft = item.draft
+    const locked = disabled || !item.editable
+    // As the save compares it: the drafted models when the loaded profile is a model target of this save.
+    const primary = draft ? auxiliaryPrimaryRoute(currentRow, task.id, auxiliaryModelProjection) : null
+    const sameAsPrimary = Boolean(taskDraft?.enabled && primary && taskDraft.chain.some(entry => foldedRouteIdentity(entry) && foldedRouteIdentity(entry) === foldedRouteIdentity(primary)))
+    const inlineError = taskDraft ? item.draftError || (sameAsPrimary ? `${task.label} 모델과 같은 모델은 예비 모델로 둘 수 없습니다.` : '') : ''
+    const keptRows = Boolean(taskDraft && !taskDraft.enabled && taskDraft.chain.some(entry => String(entry?.provider || '').trim() || String(entry?.model || '').trim()))
+    return jsx(SpareChainEditor, {
+      ids: chainIds(`aux-${task.id}`),
+      mode: taskDraft ? (taskDraft.enabled ? 'custom' : 'off') : null,
+      chain: taskDraft?.chain || [], disabled: locked, catalog: modelCatalog,
+      onMode: mode => updateAuxiliaryDraft(task.id, current => nativeFallbackModeDraft(current, mode)),
+      onEntry: (index, field, value) => updateAuxiliaryDraft(task.id, current => ({ ...current, chain: current.chain.map((entry, at) => at === index ? { ...entry, [field]: value } : entry) })),
+      onMove: (index, delta) => updateAuxiliaryDraft(task.id, current => ({ ...current, chain: moveChainEntry(current.chain, index, delta) })),
+      onRemove: index => updateAuxiliaryDraft(task.id, current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })),
+      onAdd: () => updateAuxiliaryDraft(task.id, current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })),
+      notes: [
+        keptRows ? jsx('p', { id: `aux-${task.id}-fallback-kept`, style: styles.hint, children: state?.chain?.length
+          ? `끈 채로 저장하면 이 목록(${chainText(taskDraft.chain)})은 지워집니다. 저장하기 전에는 다시 켜서 되살릴 수 있습니다.`
+          : `꺼 두면 이 목록(${chainText(taskDraft.chain)})은 저장하지 않습니다. 다시 켜면 되살릴 수 있습니다.` }) : null,
+        inlineError ? jsx('p', { id: `aux-${task.id}-fallback-error`, role: 'alert', style: styles.warning, children: inlineError }) : null,
+        !state ? jsx('p', { id: `aux-${task.id}-fallback-unsupported`, role: 'note', style: styles.warning, children: '이 연결에서는 이 예비 모델을 확인할 수 없어 바꿀 수 없습니다. 플러그인을 업데이트한 뒤 상태를 새로고침하세요.' }) : null,
+        state && state.editable !== true ? jsx('p', { id: `aux-${task.id}-fallback-readonly`, role: 'note', style: styles.warning, children: auxiliaryReadOnlyReason(state) }) : null,
+        state?.drift ? jsx('p', { id: `aux-${task.id}-fallback-drift`, role: 'status', style: styles.warning, children: `저장된 예비 모델과 실제로 쓰는 예비 모델이 다릅니다. 실제로 쓰는 목록: ${chainText(state.actual_chain)}` }) : null,
+        taskDraft?.enabled ? jsx('p', { id: `aux-${task.id}-fallback-provider-note`, role: 'note', style: styles.hint, children: `제공자 전체가 막히면(예: 구독 한도) 같은 제공자의 예비 모델은 건너뜁니다. 대비하려면 다른 제공자의 모델을 하나 넣으세요. 모두 안 되면 기본 대화 모델을 시도할 수 있습니다.${task.id === 'compression' ? ' 맥락 창이 너무 작은 모델도 건너뜁니다.' : ''}` }) : null,
+        taskDraft?.enabled ? costNote(`aux-${task.id}-fallback-cost-note`) : null
       ] })
-    ] }, `native-chain-${index}`)) : []),
-    nativeFallbackDraft?.enabled ? jsx(Button, { id: 'native-chain-add', size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: nativeFallbackLocked || nativeFallbackDraft.chain.length >= 5,
-      onClick: () => updateFallbackDraft('native', current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })), children: '예비 모델 추가' }) : null,
-    nativeFallbackDraft && !nativeFallbackDraft.enabled && nativeFallbackDraft.chain.length ? jsx('p', { id: 'native-fallback-kept', style: styles.hint, children: `꺼 두어도 예비 모델 목록(${nativeChainText(nativeFallbackDraft.chain)})은 지우지 않고 보관합니다.` }) : null,
-    nativeFallbackInlineError ? jsx('p', { id: 'native-fallback-error', role: 'alert', style: styles.warning, children: nativeFallbackInlineError }) : null,
-    !fallbackSupported ? jsx('p', { id: 'native-fallback-unsupported', role: 'note', style: styles.warning, children: '이 연결에서는 대화 예비 모델을 안전하게 바꿀 수 있는지 확인되지 않아 읽기 전용으로 둡니다. 플러그인을 업데이트한 뒤 상태를 새로고침하세요.' }) : null,
-    fallbackSupported && !nativeFallbackDraft ? jsx('p', { id: 'native-fallback-unavailable', role: 'note', style: styles.warning, children: '이 프로필의 대화 예비 모델 설정을 확인할 수 없어 표시하지 않습니다. 기존 값은 그대로 둡니다.' }) : null,
-    fallbackSupported && nativeFallbackDraft && nativeFallbackStatus?.editable !== true ? jsx('p', { id: 'native-fallback-readonly', role: 'note', style: styles.warning, children: '별도의 고급 옵션이나 관리자 고정 설정이 있어 이 화면에서는 바꿀 수 없습니다(읽기 전용). 기존 설정은 그대로 둡니다.' }) : null,
-    nativeFallbackEditable && nativeFallbackStatus?.managed !== true ? jsx('p', { id: 'native-fallback-managed', role: 'note', style: styles.hint, children: '지금 예비 모델은 다른 설정에서 관리됩니다. 여기서 바꿔 저장하면 이 플러그인이 관리하는 설정으로 바뀝니다.' }) : null,
-    nativeFallbackStatus?.drift ? jsx('p', { id: 'native-fallback-drift', role: 'status', style: styles.warning, children: `저장된 예비 모델과 실제로 쓰는 예비 모델이 다릅니다. 실제로 쓰는 목록: ${nativeChainText(nativeFallbackStatus.actual_chain)}` }) : null,
-    Array.isArray(nativeFallbackStatus?.warnings) && nativeFallbackStatus.warnings.length ? jsx('div', { id: 'native-fallback-warnings', role: 'note', style: styles.warning, children: nativeFallbackStatus.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: readableValue(warning) }, index)) }) : null,
-    nativeFallbackDraft?.enabled ? jsx('p', { id: 'native-fallback-cost-note', role: 'note', style: styles.hint, children: '예비 모델로 이어가면 제공자의 요금제에 따라 사용량이나 비용이 늘 수 있습니다.' }) : null
-  ] })
+  }
+
+  const conversationCard = role => jsx(ModelCard, { id: `model-card-${role.id}`, title: role.label, description: role.description,
+    model: [
+      jsx(RoleRouteFields, { prefix: `model-${role.id}`, route: draft.models?.[role.id], disabled, catalog: modelCatalog, onChange: (field, value) => updateRole(role.id, field, value) }),
+      jsx('p', { style: styles.actual, children: `실제 설정: ${readableValue(currentRow?.actual_models?.[role.id])}` })
+    ],
+    spare: role.id === 'main' ? conversationFallback : auxiliaryEditor(AUXILIARY_TASKS.find(task => task.id === role.id)) }, role.id)
 
   const modelFields = draft ? jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' },
     children: [
       modelPresetCards,
-      modelCatalog && nativeModelMenu() ? jsx('p', { id: 'model-catalog-note', role: 'note', style: styles.hint, children: `각 역할의 모델을 누르면 불러온 프로필(${selectedProfile})에 연결된 서비스의 모델 목록에서 검색해 고를 수 있습니다. 다른 프로필에도 함께 저장한다면 그 프로필에 같은 서비스가 연결되어 있는지 확인하세요.` }) : null,
+      modelCatalog && nativeModelMenu() ? jsx('p', { id: 'model-catalog-note', role: 'note', style: styles.hint, children: `각 모델을 누르면 불러온 프로필(${selectedProfile})에 연결된 서비스의 모델 목록에서 검색해 고를 수 있습니다. 다른 프로필에도 함께 저장한다면 그 프로필에 같은 서비스가 연결되어 있는지 확인하세요.` }) : null,
       jsx('p', { id: 'fast-inheritance-note', role: 'note', style: styles.hint, children: '메인 세션에서 선택한 Fast 모드는 작업 슬롯으로 맡기는 새 작업이 시작할 때 상속합니다. 지원하지 않는 모델·제공자에는 Fast 옵션을 보내지 않으며, auto/cold의 남은 시간을 연장하지 않습니다. Fast 요청에는 API 추가 요금이나 Codex 크레딧 사용 증가가 있을 수 있습니다. 요청한 모드와 제공자가 실제 처리한 등급은 다를 수 있으며, 업데이트된 실행 기능은 새 세션에서 확인하세요.' }),
-      jsx('div', {
-        style: styles.roleGrid,
-        children: ROLES.map(role => jsxs('article', {
-          style: styles.roleCard,
-          children: [
-            jsxs('div', { children: [jsx('h3', { style: styles.roleTitle, children: role.label }), jsx('p', { style: { ...styles.hint, marginTop: '0.25rem' }, children: role.description })] }),
-            jsx(RoleRouteFields, { prefix: `model-${role.id}`, route: draft.models?.[role.id], disabled, catalog: modelCatalog, onChange: (field, value) => updateRole(role.id, field, value) }),
-            jsx('p', { style: styles.actual, children: `실제 설정: ${readableValue(currentRow?.actual_models?.[role.id])}` }),
-            role.id === 'main' ? conversationFallback : null
-          ]
-        }, role.id))
-      })
+      jsx('h3', { style: styles.groupTitle, children: '대화' }),
+      jsx('div', { id: 'conversation-model-cards', style: styles.roleGrid, children: CONVERSATION_ROLES.map(conversationCard) })
     ]
   }) : jsx('p', { role: 'alert', style: styles.warning, children: '선택한 프로필의 모델 또는 라우팅 정보가 없습니다. 프로필을 다시 불러와 상태를 확인하세요.' })
 
@@ -4114,7 +4537,7 @@ function RouterPage({ ctx: pluginContext }) {
     id: 'model-section-targets', style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '적용 대상' }),
-      jsx('p', { style: styles.hint, children: '위에서 정한 대화 모델과 그 예비 모델, 맡기는 방식, 작업 슬롯의 모델과 예비 모델을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 값을 고치거나 대상을 직접 고른 뒤 저장하면 선택한 프로필에 같은 설정을 복사합니다.' }),
+      jsx('p', { style: styles.hint, children: '위 카드의 모델과 예비 모델, 맡기는 방식을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 값을 고치거나 대상을 직접 고른 뒤 저장하면 선택한 프로필에 같은 설정을 복사합니다.' }),
       jsxs('div', { style: styles.selectionToolbar, children: [
         jsxs('div', { style: styles.statusLine, children: [jsx(Badge, { variant: allTargetsSelected && profileNames.length > 1 ? 'warn' : 'muted', children: targetSummary }), jsx('span', { style: styles.hint, children: `${selectedTargets.length}개 선택` })] }),
         jsxs('div', { style: styles.actions, children: [
@@ -4126,8 +4549,10 @@ function RouterPage({ ctx: pluginContext }) {
       allTargetsSelected && profileNames.length > 1 ? jsx('p', { role: 'note', style: styles.warning, children: `모든 ${profileNames.length}개 프로필이 적용 대상입니다. 저장하면 확인 단계 없이 바로 적용됩니다.` }) : null,
       jsx('div', { style: { ...styles.profileList, alignItems: 'start' }, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${row.name}`, label: row.name,
         detail: selectedTargets.includes(row.name) ? [
+          slotSkippedTargets.includes(row.name) ? `작업 슬롯 모델은 적용하지 않습니다. ${slotSkipReasonFor(row.name)}.` : '',
           nativeSkippedTargets.includes(row.name) ? `맡기는 방식과 슬롯 예비 모델은 적용하지 않습니다. ${nativeTargetReasons[row.name]}` : '',
-          nativeFallbackSkippedTargets.includes(row.name) ? `대화 예비 모델은 적용하지 않습니다. ${nativeFallbackSkipReasons[row.name]}` : ''
+          nativeFallbackSkippedTargets.includes(row.name) ? `대화 예비 모델은 적용하지 않습니다. ${nativeFallbackSkipReasons[row.name]}` : '',
+          ...AUXILIARY_TASKS.map(task => auxiliary[task.id].skipReasons[row.name] ? `${task.label} 예비 모델은 적용하지 않습니다. ${auxiliary[task.id].skipReasons[row.name]}` : '')
         ].filter(Boolean).join(' ') || undefined : undefined,
         checked: selectedTargets.includes(row.name), disabled, onChange: checked => toggleModelTarget(row.name, checked) }) }, row.name))
         .concat(missingModelTargets.map(name => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${name}`, label: name,
@@ -4138,6 +4563,8 @@ function RouterPage({ ctx: pluginContext }) {
         jsx('p', { style: styles.hint, children: sectionSaveSummary }),
         nativeSkippedTargets.length ? jsx('p', { id: 'model-section-skipped', style: styles.hint, children: `맡기는 방식과 슬롯 예비 모델을 적용하지 않는 프로필: ${nativeSkippedTargets.join(', ')}. 이 프로필의 맡기는 방식과 슬롯 예비 모델은 그대로 둡니다.` }) : null,
         nativeFallbackSkippedTargets.length ? jsx('p', { id: 'model-section-fallback-skipped', style: styles.hint, children: `대화 예비 모델을 적용하지 않는 프로필: ${nativeFallbackSkippedTargets.join(', ')}. 이 프로필의 대화 예비 모델은 그대로 둡니다.` }) : null,
+        ...AUXILIARY_TASKS.map(task => auxiliary[task.id].skipped.length ? jsx('p', { id: `model-section-aux-${task.id}-skipped`, style: styles.hint, children: `${task.label} 예비 모델을 적용하지 않는 프로필: ${auxiliary[task.id].skipped.join(', ')}. 이 프로필의 ${task.label} 예비 모델은 그대로 둡니다.` }, task.id) : null),
+        slotSkippedTargets.length ? jsx('p', { id: 'model-section-slot-skipped', style: styles.hint, children: `작업 슬롯 모델을 적용하지 않는 프로필: ${slotSkippedTargets.join(', ')}. ${slotsCopyOk ? '그 프로필에' : '불러온 프로필에'} 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있습니다. 이 프로필의 슬롯 모델은 그대로 둡니다.` }) : null,
         sectionWriteNeeded ? jsx('ul', { id: 'model-section-target-writes', style: { ...styles.hint, margin: 0, paddingLeft: '1.1rem' },
           children: selectedTargets.map(name => jsx('li', { id: `model-section-write-${name}`, children: targetWriteLine(name) }, name)) }) : null
       ] }),
@@ -4286,7 +4713,7 @@ function RouterPage({ ctx: pluginContext }) {
         baselinesByProfile: timeoutBaselineMap,
         currentByProfile: currentTimeoutsFromProfiles(profiles),
         copyIntent: timeoutTargetEdited
-      })
+      }, auxiliaryWrite)
     : null
   const summaryRoutingUpdates = (localCombinedSummary?.body.fallback_updates || [])
     .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
@@ -4308,14 +4735,15 @@ function RouterPage({ ctx: pluginContext }) {
           ? '시간 제한의 입력값과 대상 프로필 상태를 다시 확인하세요.'
           : `전체 실행 시간 변경 없음 · 시간 제한 대상 ${selectedTimeoutTargets.length}개 선택 · 불러온 ${selectedProfile} 프로필 값 일반 ${draft?.timeouts?.delegate_total_minutes}분 / 짧은 작업 ${draft?.timeouts?.routed_light_total_minutes}분 / 긴 작업 ${draft?.timeouts?.routed_heavy_total_minutes}분`
   const scopeDraftErrors = [
-    [nativeFallbackDraftChanged, nativeFallbackError]
+    [nativeFallbackDraftChanged, nativeFallbackError],
+    ...AUXILIARY_TASKS.map(task => [auxiliary[task.id].changed, auxiliary[task.id].draftError ? `${task.label} 예비 모델: ${auxiliary[task.id].draftError}` : ''])
   ].filter(([changed, error]) => changed && error).map(([, error]) => error)
   const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors, ...(routingTargetError ? [routingTargetError] : []), ...(noTargetError ? [noTargetError] : []),
-    ...(nativeFallbackTargetError ? [nativeFallbackTargetError] : [])])]
+    ...(nativeFallbackTargetError ? [nativeFallbackTargetError] : []), ...(auxiliaryFallbackTargetError ? [auxiliaryFallbackTargetError] : [])])]
   // The whole-page save writes the model targets (models, slot models and conversation spare models)
   // and the time-limit targets; a vanished ticked name in any list it would write blocks it by name.
   const pageVanished = [...new Set([
-    ...((modelWriteNeeded || routingCopyPending || nativeFallbackWriteRequested) ? missingModelTargets : []),
+    ...((modelWriteNeeded || routingCopyPending || nativeFallbackWriteRequested || AUXILIARY_TASKS.some(task => auxiliary[task.id].requested)) ? missingModelTargets : []),
     ...(timeoutWriteRequested ? missingTimeoutTargets : [])])]
   const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled && !timeoutRevisionChanged && !liveDrift.length && !pageVanished.length)
 
@@ -4328,11 +4756,11 @@ function RouterPage({ ctx: pluginContext }) {
       jsx(ProfilePreparationCard, { pluginContext, data: statusQuery.data, scopeKey, settingsBusy: applyPending || setupPending || statusQuery.isFetching, begin: beginProfilePreparation, finish: finishProfilePreparation, onPrepared: profilePreparationChanged }),
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
       profiles.length ? section('불러올 프로필', '아래에 불러올 설정을 고릅니다. 실제로 바꿀 프로필은 각 카드의 적용 대상에서 따로 선택하세요.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `지금 사용 중인 프로필: ${activeProfile || '확인 중'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
-      profiles.length ? section('모델', '대화에 쓸 모델과 그 예비 모델, 나눠 맡기는 작업에 쓸 모델을 한곳에서 정합니다. 모두 맨 아래 적용 대상에서 고른 프로필에 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' }, children: [
-        jsxs('div', { id: 'conversation-models', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [jsx('h3', { style: styles.roleTitle, children: '대화 모델' }), modelFields] }),
+      profiles.length ? section('모델', '대화와 작업에 쓸 모델, 그 모델을 쓸 수 없을 때의 예비 모델을 카드마다 정합니다. 모두 맨 아래 적용 대상에서 고른 프로필에 한 번에 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' }, children: [
+        jsx('div', { id: 'conversation-models', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: modelFields }),
         jsx(NativeDelegationCard, { dto: currentRow?.native_delegation, draft: nativeDelegationDraft, catalog: modelCatalog,
           targets: nativeWriteTargets, disabled: disabled || !nativeStorageAvailable,
-          slots: { support: slotInfo, draft: draft?.slots || null, models: draft?.models || null, disabled, onFollow: changeSlotFollow, onRoute: updateSlotRoute,
+          slots: { support: slotInfo, draft: draft?.slots || null, models: draft?.models || null, frozen: frozenProfile?.slots || null, disabled, onFollow: changeSlotFollow, onRoute: updateSlotRoute, onRevertFollow: revertSlotFollow,
             firstSave: profiles.every(row => !(row.slots?.stored || []).length && row.native_delegation?.policy_schema !== 2 && row.native_delegation?.auto_policy_schema !== 2) },
           onChange: updateNativeDelegationDraft }),
         reenableGroup,
@@ -4353,13 +4781,16 @@ function RouterPage({ ctx: pluginContext }) {
         ] }) : null
       ] }) : null,
       needsReload || nativeFence ? jsx('div', { style: styles.actions, children: jsx(Button, { size: 'sm', variant: 'secondary', disabled: statusQuery.isFetching || nativeFence?.state === 'pending', onClick: () => void reloadStatus(), children: statusQuery.isFetching ? '상태 확인 중…' : '실제 상태 확인 후 편집 재개' }) }) : null,
-      profiles.length && !needsReload ? section('기본 모델·시간·기타 설정 함께 저장', '위에서 편집한 대화 모델과 그 예비 모델, 작업 슬롯 모델, 시간 제한을 한 번에 저장합니다. 모델과 대화 예비 모델은 ‘모델’ 섹션의 적용 대상을, 시간 제한은 시간 제한 적용 대상을 따릅니다. 맡기는 방식, 슬롯별 예비 모델, 작업 분담 다시 켜기, 전문 프로필 위임은 여기 포함되지 않으며 각 섹션의 버튼으로 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
+      profiles.length && !needsReload ? section('기본 모델·시간·기타 설정 함께 저장', '위에서 편집한 대화·대화 압축·제목 생성 모델과 그 예비 모델, 작업 슬롯 모델, 시간 제한을 한 번에 저장합니다. 모델과 예비 모델은 ‘모델’ 섹션의 적용 대상을, 시간 제한은 시간 제한 적용 대상을 따릅니다. 맡기는 방식, 슬롯별 예비 모델, 작업 분담 다시 켜기, 전문 프로필 위임은 여기 포함되지 않으며 각 섹션의 버튼으로 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
         jsx('div', { id: 'draft-reference-summary', role: 'note', style: styles.section, children: [
           jsx('strong', { children: '현재 초안 요약 · 참고 정보' }),
           jsx('p', { style: styles.hint, children: `대화 모델 적용 ${modelWriteTargets.length}개 (${modelWriteTargets.join(', ') || '바뀐 내용 없음 · 기존 설정 유지'}) · 작업 슬롯 모델 적용 ${routingWriteTargets.length}개 (${routingWriteTargets.join(', ') || '기존 설정 유지'})` }),
           jsx('p', { style: styles.hint, children: nativeFallbackWriteNeeded
             ? `대화 예비 모델 적용 ${nativeFallbackWriteTargets.length}개 (${nativeFallbackWriteTargets.join(', ')})${nativeFallbackSkippedTargets.length ? ` · 적용하지 않는 프로필: ${nativeFallbackSkippedTargets.join(', ')}` : ''}`
             : '대화 예비 모델 바뀐 내용 없음 · 기존 설정 유지' }),
+          jsx('p', { id: 'draft-reference-aux', style: styles.hint, children: AUXILIARY_TASKS.map(task => auxiliary[task.id].writeNeeded
+            ? `${task.label} 예비 모델 적용 ${auxiliary[task.id].targets.length}개 (${auxiliary[task.id].targets.join(', ')})${auxiliary[task.id].skipped.length ? ` · 적용하지 않는 프로필: ${auxiliary[task.id].skipped.join(', ')}` : ''}`
+            : `${task.label} 예비 모델 바뀐 내용 없음`).join(' · ') }),
           jsx('p', { style: styles.hint, children: timeoutSummary }),
           jsx('p', { style: styles.hint, children: '저장 전 변경 내용을 요약한 참고 정보입니다. 실제 반영 결과는 저장 후 상태를 다시 불러와 확인하세요.' }),
           summaryValidationErrors.length ? jsxs('div', { role: 'alert', style: styles.warning, children: [jsx('strong', { children: '확인할 항목' }), jsx('ul', { children: summaryValidationErrors.map((error, index) => jsx('li', { children: error }, index)) })] }) : jsx('p', { role: 'status', style: styles.hint, children: '입력한 내용을 확인했습니다. 저장할 때 최신 설정과 다시 비교합니다.' })
@@ -5539,7 +5970,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.12.1',
+  version: '0.13.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

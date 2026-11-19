@@ -21,9 +21,10 @@ const routing = {
 const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use']
 const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex'].includes(id) ? 'heavy' : 'light']))
 const offSlots = () => Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }]))
-// A never-saved slot is shown as what its tier resolves through: Heavy is custom here, Light follows delegation.
+// Heavy slots are custom here and Light slots follow the main model. A slot still following the
+// delegation model (an earlier setting) has its own fixture, legacySlotFixture, below.
 const declarations = () => Object.fromEntries(slotIds.map(id => [id, slotTiers[id] === 'heavy'
-  ? { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') } : { follow: 'delegation', custom: null }]))
+  ? { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') } : { follow: 'main', custom: null }]))
 const fixture = () => ({ revision: 7, current_profile: 'claire', recent_apply: null,
   readiness_context: { schema: 1, base_identity: 'd'.repeat(64), source_profile: 'claire', release: null },
   slot_capabilities: { schema: 1, slots: slotIds, tiers: slotTiers, purposes: {}, follows: ['main', 'delegation', 'custom'], blocking_profiles: [] },
@@ -291,10 +292,10 @@ test('preset click fills exact BAT models in draft only and does not alter custo
   assert.deepEqual(payload.routing_profiles, ['claire'])
   assert.deepEqual(payload.model_targets, ['claire'])
   assert.deepEqual(payload.routing_targets, [])
-  assert.equal(payload.models.delegation.reasoning, 'max')
+  assert.equal(Object.hasOwn(payload.models, 'delegation'), false, 'the page never sends the delegation model')
   assert.equal(payload.models.compression.reasoning, 'medium')
   h.click('preset-openai')
-  for (const [role, fields] of Object.entries(models)) for (const [field, value] of Object.entries(fields))
+  for (const [role, fields] of Object.entries(models)) if (role !== 'delegation') for (const [field, value] of Object.entries(fields))
     assert.equal(field === 'reasoning' ? h.selectValue(`model-${role}-reasoning`) : h.byId(`model-${role}-${field}`).props.value, value)
   assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
 })
@@ -639,15 +640,15 @@ test('each slot shows its own editable model next to its spare switching, follow
   h.select('native-delegation-backend', 'model-router')
   assert.equal(h.selectValue('slot-design-follow'), 'custom')
   assert.equal(h.byId('slot-design-model').props.value, 'independent-heavy')
-  assert.equal(h.selectValue('slot-code-complex-follow'), 'delegation')
-  assert.equal(text(h.byId('slot-code-complex-resolved')), models.delegation.model)
+  assert.equal(h.selectValue('slot-code-complex-follow'), 'main')
+  assert.equal(text(h.byId('slot-code-complex-resolved')), models.main.model)
   for (const id of slotIds) assert.equal(h.selectValue(`slot-${id}-fallback-mode`), 'off')
   const copy = text(h.byId('native-delegation-settings'))
   assert.match(copy, /다른 모델로 전환하지 않음/)
   assert.match(copy, /간단한 작업은 메인 모델이 직접 처리/)
   assert.doesNotMatch(copy, /Heavy|Light|delegate_task|purpose|백엔드|도구 재구성|revision|CAS|SOUL|자식 대화/)
-  h.input('model-delegation-model', 'unsaved-delegation-model')
-  assert.equal(text(h.byId('slot-code-complex-resolved')), 'unsaved-delegation-model')
+  h.input('model-main-model', 'unsaved-main-model')
+  assert.equal(text(h.byId('slot-code-complex-resolved')), 'unsaved-main-model')
   assert.deepEqual(h.calls, [])
 })
 
@@ -1104,17 +1105,18 @@ const slotFixture = () => {
 
 test('slot basis switching edits the draft only: custom is pre-filled from the followed model and cleared when leaving', () => {
   const h = harness({ data: slotFixture() })
-  assert.equal(h.selectValue('slot-code-complex-follow'), 'delegation')
+  assert.equal(h.selectValue('slot-code-complex-follow'), 'main')
   h.select('slot-code-complex-follow', 'custom')
-  assert.equal(h.byId('slot-code-complex-model').props.value, models.delegation.model)
-  assert.equal(h.byId('slot-code-complex-provider').props.value, models.delegation.provider)
-  assert.equal(h.selectValue('slot-code-complex-reasoning'), models.delegation.reasoning)
+  assert.equal(h.byId('slot-code-complex-model').props.value, models.main.model)
+  assert.equal(h.byId('slot-code-complex-provider').props.value, models.main.provider)
+  assert.equal(h.selectValue('slot-code-complex-reasoning'), models.main.reasoning)
   h.input('slot-code-complex-model', 'strong-coder')
   h.select('slot-code-complex-follow', 'main')
   assert.throws(() => h.byId('slot-code-complex-model'))
   assert.equal(text(h.byId('slot-code-complex-resolved')), models.main.model)
   h.select('slot-code-complex-follow', 'custom')
   assert.equal(h.byId('slot-code-complex-model').props.value, models.main.model, 'a discarded custom route is not resurrected')
+  assert.equal(h.byId('slot-code-complex-model').props.value === 'strong-coder', false)
   assert.deepEqual(h.calls, [])
 })
 
@@ -1128,7 +1130,7 @@ test('a slot-only change is one routing-scoped store save carrying all six slots
   const body = h.calls[0].body
   assert.equal(body.save_scope, 'routing')
   assert.deepEqual(Object.keys(body.routing.slots), slotIds)
-  assert.deepEqual(body.routing.slots['computer-use'], { follow: 'custom', custom: route('screen-service', 'screen-model', models.delegation.reasoning) })
+  assert.deepEqual(body.routing.slots['computer-use'], { follow: 'custom', custom: route('screen-service', 'screen-model', models.main.reasoning) })
   assert.deepEqual(body.routing.slots.design, declarations().design)
   assert.deepEqual(body.routing.heavy, routing.heavy); assert.deepEqual(body.routing.light, routing.light)
   assert.deepEqual(body.routing_targets, ['claire'])
@@ -1263,7 +1265,7 @@ test('with a method change the model section saves the method, then the models, 
 
 test('a spare-model step that fails after the models applied is reported exactly: saved, not saved, never retried', async () => {
   const h = harness({ data: withSpares(nativeBatchFixture()) })
-  h.input('model-delegation-model', 'edited-delegation')
+  h.input('model-compression-model', 'edited-compression')
   h.select('native-fallback-mode', 'custom')
   h.input('native-chain-0-provider', 'spare-service'); h.input('native-chain-0-model', 'spare-model')
   let spares = 0
@@ -1278,7 +1280,7 @@ test('a spare-model step that fails after the models applied is reported exactly
   assert.match(outcome, /‘모델 변경’: 저장했습니다\. ‘대화 예비 모델 변경’: 다른 곳에서 바뀌어 저장하지 않았습니다\. claire 프로필의 대화 예비 모델 값이 이 화면을 연 뒤 바뀌었습니다\./)
   assert.doesNotMatch(outcome, /아무것도 저장하지 않았습니다/, 'the models step was saved')
   assert.doesNotMatch(outcome, /은\(는\)/)
-  assert.equal(h.byId('model-delegation-model').props.disabled, true, 'locked until the real state is reloaded')
+  assert.equal(h.byId('model-compression-model').props.disabled, true, 'locked until the real state is reloaded')
   const before = h.calls.length
   h.byId('model-section-save').props.onClick?.(); await h.flush()
   assert.equal(h.calls.length, before)
@@ -1974,7 +1976,7 @@ test('a value changed elsewhere at the same revision is a conflict, never an edi
   assert.equal(h.byId('global-save').props.disabled, true)
   assert.deepEqual(h.calls, [], 'the old model is never sent back')
   // With a real edit the conflict blocks the model save by name, too.
-  h.input('model-delegation-model', 'my-edit')
+  h.input('model-compression-model', 'my-edit')
   assert.equal(h.byId('model-section-save').props.disabled, true)
   assert.match(text(h.byId('model-section-targets')), /대화·작업 모델 값이 바뀌었습니다/)
   assert.equal(h.byId('global-save').props.disabled, true)
@@ -2033,7 +2035,7 @@ test('every store body carries the values frozen at load; the service refusal be
   const data = nativeBatchFixture()
   const h = harness({ data })
   const frozenMain = structuredClone(data.profiles.find(row => row.name === 'other').actual_models)
-  h.input('model-delegation-model', 'my-delegation-edit'); h.click('model-target-all')
+  h.input('model-compression-model', 'my-compression-edit'); h.click('model-target-all')
   // `other` changed its own config after the page loaded; the page only checks the loaded profile.
   const refreshed = structuredClone(h.data())
   refreshed.profiles.find(row => row.name === 'other').actual_models.main.model = 'changed-elsewhere'
@@ -2052,12 +2054,12 @@ test('every store body carries the values frozen at load; the service refusal be
   assert.match(text(h.byId('live-drift-alert')), /other 프로필의 실제 모델 설정\(대화 모델\)/)
 })
 
-test('a loaded profile whose actual model changed elsewhere blocks a delegation-model edit early', () => {
+test('a loaded profile whose actual model changed elsewhere blocks a model edit early', () => {
   const h = harness({ data: nativeBatchFixture() })
   const refreshed = structuredClone(h.data())
   refreshed.profiles.find(row => row.name === 'claire').actual_models.main.model = 'changed-elsewhere'
   h.setData(refreshed); h.render()
-  h.input('model-delegation-model', 'my-delegation-edit')
+  h.input('model-compression-model', 'my-compression-edit')
   assert.equal(h.byId('model-section-save').props.disabled, true)
   assert.equal(h.byId('global-save').props.disabled, true)
   assert.match(text(h.byId('live-drift-alert')), /claire 프로필의 대화·작업 모델/)
@@ -2068,7 +2070,7 @@ test('the follow-up store write of a combined save carries the frozen expectatio
   const frozen = structuredClone(data.profiles.find(row => row.name === 'claire').actual_models)
   const h = harness({ data })
   h.select('native-delegation-backend', 'model-router')
-  h.input('model-delegation-model', 'my-delegation-edit')
+  h.input('model-compression-model', 'my-compression-edit')
   // The fresh status read before the first write reports a new main model for claire.
   h.setStatusResponder(() => { const fresh = structuredClone(h.data()); fresh.profiles.find(row => row.name === 'claire').actual_models.main.model = 'changed-elsewhere'; return fresh })
   let previews = 0
@@ -2260,3 +2262,418 @@ for (const [canonical, skill] of [[true, true], [true, false], [false, true], [f
     assert.equal(store.routing_profiles.includes('other'), canonical, 'membership stays as stored')
   })
 }
+
+// ---- v0.13.0: one card layout, compression/title spare models, no delegation-model editing ----
+const auxState = (key, overrides = {}) => ({ schema: 1, key, editable: true, present: false, chain: [], actual_chain: [], drift: false, managed_overlay: false, env_masked: false,
+  // The task's own model as the service resolves it (a pinned route in these fixtures).
+  primary: key.includes('compression') ? { provider: models.compression.provider, model: models.compression.model } : { provider: models.title.provider, model: models.title.model },
+  warnings: [], ...overrides })
+const withAux = (data, edit = () => {}) => {
+  for (const row of data.profiles) {
+    row.auxiliary_fallbacks = { compression: auxState('auxiliary.compression.fallback_chain'), title: auxState('auxiliary.title_generation.fallback_chain') }
+    edit(row)
+  }
+  return data
+}
+const cardIds = node => [...walk(node)].filter(item => item.props?.['data-model-card']).map(item => item.props.id)
+const cardParts = card => (Array.isArray(card.props.children) ? card.props.children : [card.props.children])
+  .filter(child => child?.props?.['data-card-part']).map(child => child.props['data-card-part'])
+const optionsOf = (h, id) => [...walk([...walk(h.render())].find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === id)))]
+  .filter(node => node.type === 'SelectItem').map(node => [node.props.value, text(node), Boolean(node.props.disabled)])
+const ids = h => [...walk(h.render())].map(node => node.props?.id).filter(Boolean)
+const FLASH = { provider: 'deepseek', model: 'deepseek-flash' }
+const MIMO = { provider: 'xiaomi', model: 'mimo-v2.6-pro' }
+
+test('the model section is one card grid: 대화 cards, then 작업을 맡기는 방식 and the six slot cards, each with the same parts', () => {
+  const h = harness({ data: withAux(withSpares(slotFixture())) })
+  const tree = h.render()
+  assert.deepEqual(cardIds(h.byId('conversation-model-cards')), ['model-card-main', 'model-card-compression', 'model-card-title'])
+  assert.deepEqual(cardIds(h.byId('task-slot-cards')), slotIds.map(id => `slot-${id}`))
+  const cards = [...walk(tree)].filter(node => node.props?.['data-model-card'])
+  assert.equal(cards.length, 9)
+  for (const card of cards) {
+    assert.equal(card.type, 'article')
+    assert.deepEqual(cardParts(card), ['header', 'model', 'notes', 'spare'], card.props.id)
+    assert.match(text(card), /이 모델을 쓸 수 없을 때/, `${card.props.id} has the spare-model editor`)
+    assert.deepEqual(card.props.style, cards[0].props.style, 'every card uses the same card style')
+  }
+  // The same responsive grid for both groups: two columns when wide, one when narrow.
+  const grid = h.byId('conversation-model-cards').props.style
+  assert.deepEqual(h.byId('task-slot-cards').props.style, grid)
+  assert.match(grid.gridTemplateColumns, /repeat\(auto-fit, minmax\(min\(100%, 24rem\), 1fr\)\)/)
+  const headings = [...walk(tree)].filter(node => node.type === 'h3').map(text)
+  assert.ok(headings.indexOf('대화') >= 0 && headings.indexOf('대화') < headings.indexOf('작업 슬롯'))
+  const order = ids(h)
+  const at = id => { const index = order.indexOf(id); assert.ok(index >= 0, id); return index }
+  assert.ok(at('model-card-title') < at('native-delegation-backend'))
+  assert.ok(at('native-delegation-backend') < at('task-slot-cards'))
+  assert.ok(at('task-slot-cards') < at('model-section-targets') && at('model-section-targets') < at('model-section-save'))
+  assert.equal(order.filter(id => id === 'model-section-save').length, 1, 'one save for the whole section')
+})
+
+test('the 작업 위임 card is gone and slots offer only the main model or a custom one', () => {
+  const h = harness({ data: withAux(withSpares(slotFixture())) })
+  assert.equal(ids(h).some(id => id.startsWith('model-delegation') || id === 'model-card-delegation'), false)
+  assert.deepEqual([...walk(h.byId('conversation-model-cards'))].filter(node => node.type === 'h4').map(text), ['기본 대화', '대화 압축', '제목 생성'])
+  for (const slot of slotIds) {
+    assert.deepEqual(optionsOf(h, `slot-${slot}-follow`).map(([value]) => value), ['main', 'custom'], slot)
+  }
+  assert.deepEqual(optionsOf(h, 'slot-code-simple-follow').map(([, label]) => label), ['기본 대화 모델과 같게', '직접 지정'])
+})
+
+test('the page never sends the delegation model: model-section save and whole-page save keep each target own value', async () => {
+  const h = harness({ data: withAux(withSpares(slotFixture())) })
+  h.input('model-main-model', 'new-main'); h.click('model-target-all')
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const stores = h.calls.filter(call => call.operation === 'preview').map(call => call.body)
+  assert.ok(stores.length)
+  for (const store of stores) assert.equal(Object.hasOwn(store.models, 'delegation'), false)
+  assert.equal(JSON.stringify(h.calls).includes('delegation.model'), false)
+  const g = harness({ data: withAux(withSpares(slotFixture())) })
+  g.input('model-title-model', 'new-title')
+  g.click('global-save'); await g.flush()
+  const body = g.calls.find(call => call.operation === 'preview').body
+  assert.deepEqual(Object.keys(body.models).sort(), ['compression', 'main', 'title'])
+  assert.equal(body.models.title.model, 'new-title')
+})
+
+const legacySlotFixture = () => withAux(withSpares(slotFixture()), row => {
+  row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }
+  row.slots.stored = ['code-simple']
+  row.routing.slots = { 'code-simple': { follow: 'delegation', custom: null } }
+})
+
+test('a slot stored as following the delegation model is shown as it is, read-only, and never picked again by the page', () => {
+  const h = harness({ data: legacySlotFixture() })
+  assert.equal(h.selectValue('slot-code-simple-follow'), 'delegation')
+  const [legacy, ...rest] = optionsOf(h, 'slot-code-simple-follow')
+  assert.deepEqual([legacy[0], legacy[2]], ['delegation', true])
+  assert.match(legacy[1], /^작업 위임 모델\(gpt-6-luna-900k\)과 같게 · 이전 설정$/)
+  assert.deepEqual(rest.map(([value, , disabled]) => [value, disabled]), [['main', false], ['custom', false]])
+  assert.equal(text(h.byId('slot-code-simple-resolved')), models.delegation.model, 'it keeps resolving to the stored delegation model')
+  assert.match(text(h.byId('slot-code-simple-legacy-note')), /다른 프로필에는 복사하지 않습니다/)
+  h.select('slot-code-simple-follow', 'delegation')
+  assert.equal(h.byId('model-section-save').props.disabled, true, 'nothing changed')
+  // An explicit pick moves away from it; the stored value can be brought back.
+  h.select('slot-code-simple-follow', 'main')
+  assert.equal(h.selectValue('slot-code-simple-follow'), 'main')
+  assert.deepEqual(optionsOf(h, 'slot-code-simple-follow').map(([value]) => value), ['main', 'custom'])
+  h.select('slot-code-simple-follow', 'delegation')
+  assert.equal(h.selectValue('slot-code-simple-follow'), 'main', 'the earlier basis is not a choice any more')
+  h.click('slot-code-simple-follow-revert')
+  assert.equal(h.selectValue('slot-code-simple-follow'), 'delegation')
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+})
+
+test('slot models with a slot still following the delegation model go to the loaded profile only; other targets are named as kept', async () => {
+  const h = harness({ data: legacySlotFixture() })
+  h.select('slot-computer-use-follow', 'custom')
+  h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
+  h.click('model-target-all')
+  assert.match(text(h.byId('model-section-slot-skipped')), /작업 슬롯 모델을 적용하지 않는 프로필: default, other/)
+  assert.match(text(h.byId('model-section-write-other')), /작업 슬롯 모델은 그대로 둠\(이전 설정 ‘작업 위임 모델과 같게’/)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const store = h.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body
+  assert.deepEqual(store.routing_targets, ['claire'], 'never copied to another profile as delegation')
+  assert.deepEqual(store.routing.slots['code-simple'], { follow: 'delegation', custom: null }, 'kept as stored, never switched')
+  assert.equal(store.routing.slots['computer-use'].custom.model, 'screen-model')
+  // Once the operator picks a basis for it, the slot models copy to the chosen targets again
+  // (here the other profiles have no such slot of their own).
+  const g = harness({ data: withAux(withSpares(slotFixture()), row => {
+    if (row.name === 'claire') { row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }; row.slots.stored = ['code-simple'] }
+  }) })
+  g.select('slot-code-simple-follow', 'main')
+  g.click('model-target-all')
+  assert.throws(() => g.byId('model-section-slot-skipped'))
+  g.setResponder(spareReply)
+  g.click('model-section-save'); await g.flush()
+  const copied = g.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body
+  assert.deepEqual(copied.routing_targets, ['default', 'claire', 'other'])
+  assert.deepEqual(copied.routing.slots['code-simple'], { follow: 'main', custom: null })
+})
+
+test('compression spare models: rows are edited and reordered, and a chain-only save sends only the narrow step', async () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture())) })
+  assert.equal(h.selectValue('aux-compression-fallback-mode'), 'off')
+  assert.deepEqual(optionsOf(h, 'aux-compression-fallback-mode').map(([value, label]) => [value, label]),
+    [['off', '다른 모델로 전환하지 않음'], ['custom', '예비 모델로 이어가기']])
+  h.select('aux-compression-fallback-mode', 'custom')
+  h.input('aux-compression-chain-0-provider', FLASH.provider); h.input('aux-compression-chain-0-model', FLASH.model)
+  h.click('aux-compression-chain-add')
+  h.input('aux-compression-chain-1-provider', MIMO.provider); h.input('aux-compression-chain-1-model', MIMO.model)
+  assert.equal(h.byId('aux-compression-chain-0-up').props.disabled, true)
+  h.click('aux-compression-chain-1-up')
+  assert.equal(h.byId('aux-compression-chain-0-model').props.value, MIMO.model)
+  assert.equal(h.byId('aux-compression-chain-1-model').props.value, FLASH.model)
+  assert.match(text(h.byId('aux-compression-fallback-provider-note')), /다른 제공자의 모델/)
+  assert.match(text(h.byId('aux-compression-fallback-provider-note')), /맥락 창이 너무 작은 모델도 건너뜁니다/)
+  assert.match(text(h.byId('aux-compression-fallback-cost-note')), /비용이 늘 수 있습니다/)
+  assert.match(text(h.byId('model-section-summary')), /대화 압축 예비 모델: 2개 사용/)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  assert.deepEqual(h.calls.map(call => call.operation), ['fallback-preview', 'apply'], 'no store plan, no routing pass')
+  const body = h.calls[0].body
+  assert.deepEqual(body.updates, [{ profile: 'claire', auxiliary_fallback: { compression: [MIMO, FLASH] } }])
+  assert.deepEqual(body.confirmations, [{ profile: 'claire', scope: 'auxiliary', allow_additional_cost: true, allow_task_rerun: false }])
+  // Frozen for the task this body writes only.
+  assert.deepEqual(body.expected, [{ profile: 'claire', auxiliary_fallback: { compression: { chain: [], actual_chain: [] } } }])
+  // Every edit was submitted: the page reloads and unlocks by itself.
+  assert.equal(h.selectValue('aux-compression-fallback-mode'), 'off', 'reloaded from the (unchanged) status')
+  assert.doesNotMatch(text(h.render()), /자동으로 다시 불러오지 않았습니다/)
+})
+
+test('switching a stored title chain off saves an empty list; a chain switched on and back off saves nothing', async () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture()), row => {
+    if (row.name === 'claire') row.auxiliary_fallbacks.title = auxState('auxiliary.title_generation.fallback_chain', { present: true, chain: [FLASH], actual_chain: [FLASH] })
+  }) })
+  assert.equal(h.selectValue('aux-title-fallback-mode'), 'custom')
+  assert.equal(h.byId('aux-title-chain-0-model').props.value, FLASH.model)
+  h.select('aux-title-fallback-mode', 'off')
+  assert.match(text(h.byId('aux-title-fallback-kept')), /끈 채로 저장하면 이 목록\(deepseek\/deepseek-flash\)은 지워집니다/)
+  assert.match(text(h.byId('model-section-summary')), /제목 생성 예비 모델: 사용 안 함/)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'fallback-preview').body
+  assert.deepEqual(body.updates, [{ profile: 'claire', auxiliary_fallback: { title: [] } }])
+  assert.deepEqual(body.confirmations, [], 'turning spares off adds no cost')
+  const g = harness({ data: withAux(withSpares(nativeBatchFixture())) })
+  g.select('aux-compression-fallback-mode', 'custom')
+  g.select('aux-compression-fallback-mode', 'off')
+  assert.equal(g.byId('model-section-save').props.disabled, true, 'an absent chain stays absent')
+})
+
+test('a compression spare equal to the task own model is refused before any request', () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture())) })
+  h.select('aux-compression-fallback-mode', 'custom')
+  h.input('aux-compression-chain-0-provider', 'OpenAI-Codex'); h.input('aux-compression-chain-0-model', 'GPT-6-LUNA-900K')
+  assert.match(text(h.byId('aux-compression-fallback-error')), /대화 압축 모델과 같은 모델/)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  h.input('aux-compression-chain-0-model', 'gpt-6-luna-900k:other')
+  assert.throws(() => h.byId('aux-compression-fallback-error'))
+  assert.deepEqual(h.calls, [])
+})
+
+test('the page refuses up front every auxiliary spare-model token the service refuses', () => {
+  const cases = JSON.parse(readFileSync(new URL('./fixtures/fallback_token_cases.json', import.meta.url), 'utf8'))
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture())) })
+  h.select('aux-title-fallback-mode', 'custom')
+  for (const [provider, ok] of cases.providers) {
+    h.input('aux-title-chain-0-provider', provider); h.input('aux-title-chain-0-model', 'valid-model')
+    assert.equal(Boolean([...walk(h.render())].find(node => node.props?.id === 'aux-title-fallback-error')), !ok, `provider ${JSON.stringify(provider)}`)
+  }
+  for (const [model, ok] of cases.models) {
+    h.input('aux-title-chain-0-provider', 'deepseek'); h.input('aux-title-chain-0-model', model)
+    assert.equal(Boolean([...walk(h.render())].find(node => node.props?.id === 'aux-title-fallback-error')), !ok, `model ${JSON.stringify(model)}`)
+  }
+})
+
+test('a hand-picked target list copies an auxiliary chain to the targets that can take it and names the others', async () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture()), row => {
+    if (row.name === 'other') row.auxiliary_fallbacks.title = auxState('auxiliary.title_generation.fallback_chain', { editable: false, warnings: ['auxiliary_fallback_managed_overlay'] })
+  }) })
+  h.select('aux-title-fallback-mode', 'custom')
+  h.input('aux-title-chain-0-provider', FLASH.provider); h.input('aux-title-chain-0-model', FLASH.model)
+  h.click('model-target-all')
+  assert.match(text(h.byId('model-section-aux-title-skipped')), /제목 생성 예비 모델을 적용하지 않는 프로필: other/)
+  assert.match(text(h.byId('model-section-write-other')), /제목 생성 예비 모델은 그대로 둠\(이 프로필의 제목 생성 예비 모델은 읽기 전용입니다\.\)/)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'fallback-preview').body
+  // (The conversation spare models are copied by the same list, in their own field.)
+  assert.deepEqual(body.updates.filter(update => update.auxiliary_fallback).map(update => [update.profile, update.auxiliary_fallback]),
+    [['default', { title: [FLASH] }], ['claire', { title: [FLASH] }]])
+  assert.equal(Object.hasOwn(body.updates.find(update => update.profile === 'other'), 'auxiliary_fallback'), false)
+  assert.deepEqual(body.expected.filter(item => item.auxiliary_fallback).map(item => item.profile).sort(), ['claire', 'default'])
+})
+
+test('a title chain changed elsewhere blocks only the save that would write it', () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture())) })
+  h.select('aux-title-fallback-mode', 'custom')
+  h.input('aux-title-chain-0-provider', FLASH.provider); h.input('aux-title-chain-0-model', FLASH.model)
+  const refreshed = structuredClone(h.data())
+  refreshed.profiles.find(row => row.name === 'claire').auxiliary_fallbacks.title.chain = [MIMO]
+  h.setData(refreshed); h.render()
+  assert.match(text(h.byId('live-drift-alert')), /claire 프로필의 제목 생성 예비 모델/)
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  const before = h.calls.length
+  h.byId('model-section-save').props.onClick?.()
+  assert.equal(h.calls.length, before)
+})
+
+test('the whole-page save carries the auxiliary chains with the models in one plan', async () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture())) })
+  h.input('model-main-model', 'whole-page-main')
+  h.select('aux-title-fallback-mode', 'custom')
+  h.input('aux-title-chain-0-provider', FLASH.provider); h.input('aux-title-chain-0-model', FLASH.model)
+  h.click('global-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'preview').body
+  assert.equal(Object.hasOwn(body.models, 'delegation'), false)
+  assert.deepEqual(body.fallback_updates, [{ profile: 'claire', auxiliary_fallback: { title: [FLASH] } }])
+  assert.deepEqual(body.fallback_confirmations, [{ profile: 'claire', scope: 'auxiliary', allow_additional_cost: true, allow_task_rerun: false }])
+  assert.ok(body.expected.find(item => item.profile === 'claire').auxiliary_fallback)
+})
+
+test('a backend without auxiliary status shows no editor for those spare models and sends nothing for them', async () => {
+  const h = harness({ data: withSpares(nativeBatchFixture()) })
+  assert.throws(() => h.byId('aux-compression-fallback-mode'))
+  assert.match(text(h.byId('aux-compression-fallback-unsupported')), /플러그인을 업데이트한 뒤/)
+  h.input('model-main-model', 'older-backend-main')
+  h.click('model-section-save'); await h.flush()
+  assert.equal(JSON.stringify(h.calls).includes('auxiliary_fallback'), false)
+})
+
+// ---- v0.13.0 review fixes ----
+test('a copy never overwrites another profile own slot that still follows the delegation model', async () => {
+  const data = withAux(withSpares(slotFixture()), row => {
+    if (row.name === 'other') { row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }; row.slots.stored = ['code-simple'] }
+  })
+  const h = harness({ data })
+  h.select('slot-computer-use-follow', 'custom')
+  h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
+  h.click('model-target-all')
+  assert.match(text(h.byId('model-section-slot-skipped')), /작업 슬롯 모델을 적용하지 않는 프로필: other\. 그 프로필에 이전 설정/)
+  assert.match(text(h.byId('model-section-write-other')), /작업 슬롯 모델은 그대로 둠\(이 프로필에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않음\)/)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const store = h.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body
+  assert.deepEqual(store.routing_targets, ['default', 'claire'], 'other keeps its slot map')
+  assert.ok(store.model_targets.includes('other'), 'and still gets the rest')
+})
+
+test('the whole-page save never turns an on draft without rows into an off write', async () => {
+  const data = withAux(withSpares(nativeBatchFixture()), row => {
+    if (row.name === 'claire') row.auxiliary_fallbacks.title = auxState('auxiliary.title_generation.fallback_chain', { present: true, chain: [FLASH], actual_chain: [FLASH] })
+  })
+  const h = harness({ data })
+  h.click('aux-title-chain-0-remove')
+  assert.equal(h.selectValue('aux-title-fallback-mode'), 'custom', 'still 예비 모델로 이어가기')
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  h.click('global-save'); await h.flush()
+  assert.equal(JSON.stringify(h.calls).includes('auxiliary_fallback'), false, 'nothing clears the stored chain')
+  assert.equal(h.calls.some(call => call.operation === 'apply'), false)
+  // Only an explicit off clears it.
+  h.select('aux-title-fallback-mode', 'off')
+  h.click('global-save'); await h.flush()
+  const body = h.calls.filter(call => call.operation === 'preview').at(-1).body
+  assert.deepEqual(body.fallback_updates, [{ profile: 'claire', auxiliary_fallback: { title: [] } }])
+})
+
+test('a sibling task changed elsewhere never blocks the save of the other task', async () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture())) })
+  h.select('aux-title-fallback-mode', 'custom')
+  h.input('aux-title-chain-0-provider', FLASH.provider); h.input('aux-title-chain-0-model', FLASH.model)
+  const refreshed = structuredClone(h.data())
+  refreshed.profiles.find(row => row.name === 'claire').auxiliary_fallbacks.compression.chain = [MIMO]
+  h.setData(refreshed); h.render()
+  assert.equal(h.byId('model-section-save').props.disabled, false)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'fallback-preview').body
+  assert.deepEqual(body.updates, [{ profile: 'claire', auxiliary_fallback: { title: [FLASH] } }])
+  assert.deepEqual(body.expected, [{ profile: 'claire', auxiliary_fallback: { title: { chain: [], actual_chain: [] } } }])
+})
+
+test('the task primary follows Hermes: page and service share one fixture', () => {
+  const cases = JSON.parse(readFileSync(new URL('./fixtures/auxiliary_primary_cases.json', import.meta.url), 'utf8')).cases
+  const api = new Function(`${source.slice(source.indexOf('// The route an auxiliary task runs on'), source.indexOf('// Why a target cannot take one task'))}\nreturn { resolveAuxiliaryRoute }`.replace(/^export\s+/gm, ''))()
+  for (const item of cases) assert.deepEqual(api.resolveAuxiliaryRoute({ provider: item.provider, model: item.model }, item.main), item.primary, JSON.stringify(item))
+})
+
+test('a spare equal to an unknown primary is not refused; one equal to a known primary is', () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture()), row => { row.auxiliary_fallbacks.title.primary = null }) })
+  h.select('aux-title-fallback-mode', 'custom')
+  h.input('aux-title-chain-0-provider', models.title.provider); h.input('aux-title-chain-0-model', models.title.model)
+  assert.throws(() => h.byId('aux-title-fallback-error'), 'provider without a known model: not refused')
+  assert.equal(h.byId('model-section-save').props.disabled, false)
+})
+
+test('a read-only chain with env values or provider-only entries says so and shows no value', () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture()), row => {
+    row.auxiliary_fallbacks.compression = auxState('auxiliary.compression.fallback_chain', { editable: false, present: true, env_masked: true,
+      chain: [{ provider: '[env]', model: '[env]' }], actual_chain: [{ provider: '[env]', model: '[env]' }], warnings: ['auxiliary_fallback_env_expression'] })
+    row.auxiliary_fallbacks.title = auxState('auxiliary.title_generation.fallback_chain', { editable: false, present: true,
+      chain: [{ provider: 'deepseek', model: '' }], actual_chain: [{ provider: 'deepseek', model: '' }], warnings: ['auxiliary_fallback_provider_only'] })
+  }) })
+  assert.match(text(h.byId('aux-compression-fallback-readonly')), /환경 변수를 쓰는 예비 모델이 있어 값은 표시하지 않습니다/)
+  assert.match(text(h.byId('aux-title-fallback-readonly')), /그대로 나타낼 수 없는 형식/)
+  assert.equal(h.selectValue('aux-title-fallback-mode'), 'custom', 'an existing chain is never shown as off')
+  assert.equal(h.byId('aux-title-chain-0-provider').props.value, 'deepseek')
+  assert.equal(h.byId('aux-title-chain-0-model').props.value, '', 'no model is invented')
+  assert.equal(h.byId('aux-title-chain-0-provider').props.disabled, true)
+})
+
+test('slot models copy to fresh profiles; only a stored legacy slot of a receiving profile is protected', async () => {
+  // Fresh receivers: nothing stored, their Light slots only shown through the tier default link.
+  const data = withAux(withSpares(slotFixture()), row => {
+    if (row.name !== 'claire') {
+      row.slots.stored = []
+      for (const id of slotIds) if (slotTiers[id] === 'light') row.slots.declarations[id] = { follow: 'delegation', custom: null }
+    }
+  })
+  const h = harness({ data })
+  h.select('slot-computer-use-follow', 'custom')
+  h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
+  h.click('model-target-all')
+  assert.throws(() => h.byId('model-section-slot-skipped'), 'no fresh profile is named as having an earlier setting')
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const store = h.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body
+  assert.deepEqual(store.routing_targets, ['default', 'claire', 'other'])
+  // The same receiver with that slot explicitly stored is still skipped.
+  const stored = structuredClone(data)
+  stored.profiles.find(row => row.name === 'other').slots.stored = ['code-simple']
+  const g = harness({ data: stored })
+  g.select('slot-computer-use-follow', 'custom')
+  g.input('slot-computer-use-provider', 'screen-service'); g.input('slot-computer-use-model', 'screen-model')
+  g.click('model-target-all')
+  assert.match(text(g.byId('model-section-slot-skipped')), /적용하지 않는 프로필: other\./)
+  g.setResponder(spareReply)
+  g.click('model-section-save'); await g.flush()
+  assert.deepEqual(g.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body.routing_targets, ['default', 'claire'])
+})
+
+test('copy intent to targets that all keep their stored legacy slot saves the rest and names them', async () => {
+  const data = withAux(withSpares(slotFixture()), row => {
+    if (row.name === 'other') { row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }; row.slots.stored = ['code-simple'] }
+  })
+  const h = harness({ data })
+  h.click('model-target-none'); h.check('model-target-other', true)
+  h.input('model-main-model', 'copied-main')
+  assert.equal(h.byId('model-section-save').props.disabled, false, 'copy intent alone does not block')
+  assert.match(text(h.byId('model-section-write-other')), /작업 슬롯 모델은 그대로 둠\(이 프로필에 이전 설정/)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const stores = h.calls.filter(call => call.operation === 'preview').map(call => call.body)
+  assert.ok(stores.length)
+  for (const store of stores) assert.deepEqual(store.routing_targets || [], [], 'no slot models are sent')
+  assert.ok(stores.some(store => store.model_targets.includes('other')))
+  // An actual slot edit with no target able to take it is blocked with the receiving-side reason.
+  const g = harness({ data })
+  g.click('model-target-none'); g.check('model-target-other', true)
+  g.select('slot-computer-use-follow', 'custom')
+  g.input('slot-computer-use-provider', 'screen-service'); g.input('slot-computer-use-model', 'screen-model')
+  assert.equal(g.byId('model-section-save').props.disabled, true)
+  const reason = text(g.byId('model-section-targets'))
+  assert.match(reason, /선택한 프로필\(other\)에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않습니다/)
+  assert.doesNotMatch(reason, /그 슬롯의 모델 기준/)
+})
+
+test('each task card names its own read-only cause; a sibling env chain does not lock the other card', () => {
+  const h = harness({ data: withAux(withSpares(nativeBatchFixture()), row => {
+    row.auxiliary_fallbacks.compression = auxState('auxiliary.compression.fallback_chain', { editable: false, present: true, env_masked: true,
+      chain: [{ provider: '[env]', model: '[env]' }], actual_chain: [{ provider: '[env]', model: '[env]' }], warnings: ['auxiliary_fallback_env_expression'] })
+  }) })
+  assert.match(text(h.byId('aux-compression-fallback-readonly')), /환경 변수/)
+  assert.throws(() => h.byId('aux-title-fallback-readonly'))
+  h.select('aux-title-fallback-mode', 'custom')
+  assert.equal(h.selectValue('aux-title-fallback-mode'), 'custom')
+  const g = harness({ data: withAux(withSpares(nativeBatchFixture()), row => {
+    row.auxiliary_fallbacks.title = auxState('auxiliary.title_generation.fallback_chain', { editable: false, managed_overlay: true, warnings: ['auxiliary_fallback_managed_overlay'] })
+    row.auxiliary_fallbacks.compression = auxState('auxiliary.compression.fallback_chain', { editable: false, present: true,
+      chain: [FLASH], actual_chain: [FLASH], warnings: ['auxiliary_fallback_advanced_entry'] })
+  }) })
+  assert.match(text(g.byId('aux-title-fallback-readonly')), /^관리자 고정 설정이 있어/)
+  assert.match(text(g.byId('aux-compression-fallback-readonly')), /base_url 같은 고급 항목/)
+})

@@ -71,6 +71,111 @@ STALE_KEYS = {
     "delegation": ("delegation.base_url", "delegation.api_mode"),
 }
 DELEGATION_FALLBACK_KEY = "delegation.fallback_providers"
+# Hermes' own per-task spare models for two auxiliary tasks (auxiliary.<task>.fallback_chain). The
+# plugin writes only provider/model entries here, straight into the profile's config: nothing is kept
+# in the plugin store, so the store schema (read by every installed package) is unchanged.
+AUXILIARY_FALLBACK_KEYS = {
+    "compression": "auxiliary.compression.fallback_chain",
+    "title": "auxiliary.title_generation.fallback_chain",
+}
+AUXILIARY_FALLBACK_MAX = 5
+
+
+def _submitted_models(value: Any) -> tuple[dict[str, dict[str, str]], bool]:
+    """A request's `models`: all four roles (older clients), or every role except `delegation`.
+
+    Without `delegation` each model target keeps its own delegation settings: the page no longer edits
+    delegation.model/provider/reasoning and never writes them. Returns (models, delegation_kept).
+    """
+    if isinstance(value, dict) and set(value) == set(MODEL_ROLES) - {"delegation"}:
+        return {role: _route(value[role]) for role in MODEL_ROLES if role != "delegation"}, True
+    return _models(value), False
+
+
+AUXILIARY_ENV_MASK = "[env]"
+
+
+def _auxiliary_task_primary(provider: Any, model: Any, main: dict[str, Any] | None) -> dict[str, str] | None:
+    """The route an auxiliary task runs on, as Hermes resolves auxiliary.<task> (agent/auxiliary_client.py
+    _resolve_task_provider_model), or None when it cannot be established here.
+
+    `model: auto` (any case) is unset, like an empty model. No provider (or `auto`) and no model runs
+    on the main model. A concrete provider with a model runs on exactly that. A concrete provider
+    without a model uses that provider's catalog default, and `auto` with a model goes through
+    Hermes' auto-detection: neither is known here, so the spare-equals-primary check is skipped for
+    them (Hermes tolerates such a spare: one on the failed backend is skipped). Shared with the page
+    through tests/fixtures/auxiliary_primary_cases.json.
+    """
+    provider = provider.strip() if isinstance(provider, str) else ""
+    model = model.strip() if isinstance(model, str) else ""
+    if model.casefold() == "auto":
+        model = ""
+    if not provider or provider.casefold() == "auto":
+        if model:
+            return None
+        main_provider = main.get("provider") if isinstance(main, dict) else None
+        main_model = main.get("model") if isinstance(main, dict) else None
+        if not isinstance(main_provider, str) or not main_provider or not isinstance(main_model, str) or not main_model:
+            return None
+        return {"provider": main_provider, "model": main_model}
+    return {"provider": provider, "model": model} if model else None
+
+
+def _validate_auxiliary_chain(value: Any) -> list[dict[str, str]]:
+    """One auxiliary.<task>.fallback_chain as the page may write it: provider/model pairs only."""
+    if not isinstance(value, list) or len(value) > AUXILIARY_FALLBACK_MAX:
+        raise ValueError("auxiliary fallback chain must contain at most five entries")
+    parsed: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"provider", "model"}:
+            raise ValueError("auxiliary fallback entries must contain provider and model only")
+        provider = _validate_token(item["provider"], field="auxiliary fallback provider", pattern=PROVIDER_RE)
+        model = _validate_token(item["model"], field="auxiliary fallback model", pattern=MODEL_RE)
+        identity = (provider.casefold(), model.casefold())
+        if identity in seen:
+            raise ValueError("auxiliary fallback chain entries must be distinct")
+        seen.add(identity)
+        parsed.append({"provider": provider, "model": model})
+    return parsed
+
+
+def _auxiliary_pairs(value: Any) -> tuple[list[dict[str, str]], list[str]]:
+    """The provider/model pairs of one stored or effective chain, and why it is not editable here."""
+    if value is None or value == []:
+        return [], []
+    if not isinstance(value, list):
+        return [], ["auxiliary_fallback_malformed"]
+    chain: list[dict[str, str]] = []
+    warnings: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            warnings.append("auxiliary_fallback_malformed")
+            continue
+        if set(item) - {"provider", "model"}:
+            # base_url/api_key and other knobs: kept as stored, never rewritten from this page.
+            warnings.append("auxiliary_fallback_advanced_entry")
+        try:
+            provider = _validate_token(item.get("provider"), field="auxiliary fallback provider", pattern=PROVIDER_RE)
+        except ValueError:
+            warnings.append("auxiliary_fallback_malformed")
+            continue
+        raw_model = item.get("model")
+        if raw_model is None or (isinstance(raw_model, str) and raw_model.strip().casefold() in {"", "auto"}):
+            # Hermes runs a provider-only entry on that provider's default model: the entry is real,
+            # but this editor cannot show its model. Shown with the provider only, read-only.
+            warnings.append("auxiliary_fallback_provider_only")
+            chain.append({"provider": provider, "model": ""})
+            continue
+        try:
+            model = _validate_token(raw_model, field="auxiliary fallback model", pattern=MODEL_RE)
+        except ValueError:
+            warnings.append("auxiliary_fallback_malformed")
+            continue
+        chain.append({"provider": provider, "model": model})
+    if len(value) > AUXILIARY_FALLBACK_MAX:
+        warnings.append("auxiliary_fallback_chain_too_long")
+    return chain, list(dict.fromkeys(warnings))
 
 
 class ServiceError(RuntimeError):
@@ -737,6 +842,17 @@ class Service:
                 return {}
             raise ServiceError(f"profile {profile} has invalid model settings") from exc
 
+    def _kept_role_route(self, profile: str, role: str, main: dict[str, str]) -> dict[str, str]:
+        """One non-main role of `profile` as _actual_models resolves it over the given main route,
+        from the profile's own config keys (nothing is written)."""
+        provider, model, effort = (self._read_key(profile, key) for key in MODEL_KEYS[role])
+        provider = provider if isinstance(provider, str) else ""
+        model = model if isinstance(model, str) else ""
+        effort = effort if isinstance(effort, str) else ""
+        if not provider or provider == "auto":
+            provider = main["provider"]
+        return _route({"provider": provider, "model": model or main["model"], "reasoning": effort or main["reasoning"] or "medium"})
+
     def _default_routing(self, enabled: bool = False, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
         fallback = fallback or {"enabled": False, "heavy": None, "light": None}
         return {
@@ -1054,6 +1170,117 @@ class Service:
             "delegation": delegation,
         }
 
+    def _read_auxiliary_snapshot(self, profile: str, keys: tuple[str, ...] | list[str] | None = None) -> effective_config.NativeFallbackSnapshot:
+        """The auxiliary fallback_chain keys of one profile (both by default; a plan reads only the
+        keys it writes, so a sibling task changed elsewhere never refuses it), effective value and
+        managed provenance."""
+        selected = tuple(keys) if keys else tuple(AUXILIARY_FALLBACK_KEYS.values())
+        return effective_config.read_key_scoped(self._profile_home(profile), selected)
+
+    def _auxiliary_cas_holds(self, profile: str, expected: Any, attribute: str, only_key: str | None = None) -> bool:
+        """Whether a plan's recorded auxiliary digests (`cas_digest` or `provenance_digest`) still hold.
+
+        Current plans record one digest per written key, each from that key's own snapshot, so a
+        sibling task never takes part. A plan from before (one string) is checked over both keys.
+        Raises the snapshot errors; callers turn them into a RevisionConflict.
+        """
+        if isinstance(expected, dict):
+            items = [(key, digest) for key, digest in expected.items() if only_key is None or key == only_key]
+            return all(getattr(self._read_auxiliary_snapshot(profile, (key,)), attribute) == digest for key, digest in items)
+        return getattr(self._read_auxiliary_snapshot(profile), attribute) == expected
+
+    def _auxiliary_status(
+        self, profile: str, snapshots: dict[str, effective_config.NativeFallbackSnapshot] | None = None,
+        tasks: tuple[str, ...] | list[str] | None = None,
+    ) -> dict[str, Any]:
+        """The compression and title-generation spare models of one profile.
+
+        `chain` is what the profile's own config stores (absent and `[]` both read as no chain),
+        `actual_chain` what Hermes resolves. A key covered by a managed (administrator) overlay, an
+        env expression, an entry with more than provider/model (for example base_url/api_key) or any
+        unverifiable read is read-only here. Built-in tasks cannot be re-registered by a plugin, so
+        no plugin `inherit_from` applies to these two blocks.
+        """
+        result: dict[str, Any] = {}
+        for task, key in AUXILIARY_FALLBACK_KEYS.items():
+            if tasks is not None and task not in tasks:
+                continue
+            # Each task from a snapshot of its own key only: a sibling's env expression, malformed
+            # value or overlay never makes this task read-only.
+            snapshot = (snapshots or {}).get(task)
+            if snapshot is None:
+                try:
+                    snapshot = self._read_auxiliary_snapshot(profile, (key,))
+                except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged, OSError, ValueError):
+                    snapshot = None
+            if snapshot is None:
+                result[task] = {"schema": 1, "key": key, "editable": False, "present": False, "chain": [], "actual_chain": [],
+                                "drift": False, "managed_overlay": False, "warnings": ["auxiliary_fallback_unavailable"]}
+                continue
+            warnings = [warning.replace("scoped_fallback_", "auxiliary_fallback_").replace("scoped_", "auxiliary_fallback_")
+                        for warning in snapshot.warnings]
+            managed_overlay = any(effective_config._managed_applies(managed, key) for managed in snapshot.managed_keys)
+            if managed_overlay:
+                warnings.append("auxiliary_fallback_managed_overlay")
+            raw_value = snapshot.raw(key)
+            effective_value = snapshot.effective(key) if snapshot.effective_available else None
+            env_masked = effective_config._contains_env_ref(raw_value) or effective_config._contains_env_ref(effective_value)
+            if env_masked:
+                # An env expression: the expanded value may be a credential or endpoint, so neither the
+                # stored nor the resolved provider/model is ever returned, only one placeholder per entry.
+                count = len(raw_value) if isinstance(raw_value, list) else 1
+                chain = [{"provider": AUXILIARY_ENV_MASK, "model": AUXILIARY_ENV_MASK} for _ in range(min(count, 16))]
+                actual_chain = copy.deepcopy(chain)
+                warnings.append("auxiliary_fallback_env_expression")
+                if not snapshot.effective_available:
+                    warnings.append("auxiliary_fallback_unavailable")
+            else:
+                chain, raw_warnings = _auxiliary_pairs(raw_value)
+                warnings.extend(raw_warnings)
+                if snapshot.effective_available:
+                    actual_chain, effective_warnings = _auxiliary_pairs(effective_value)
+                    warnings.extend(effective_warnings)
+                else:
+                    actual_chain = []
+                    warnings.append("auxiliary_fallback_unavailable")
+            warnings = list(dict.fromkeys(warnings))
+            result[task] = {
+                "schema": 1,
+                "key": key,
+                "editable": not warnings,
+                "present": snapshot.raw_present(key),
+                "chain": chain,
+                "actual_chain": actual_chain,
+                # The chain Hermes uses differs from the one the profile stores (an overlay, or a
+                # value this page cannot read as provider/model pairs).
+                "drift": bool(snapshot.effective_available and not env_masked and actual_chain != chain),
+                "managed_overlay": managed_overlay,
+                "env_masked": env_masked,
+                # The task's own model as Hermes resolves it (None: not known here; then a spare equal
+                # to it is not refused).
+                "primary": self._auxiliary_primary(profile, task),
+                "warnings": warnings,
+            }
+        return result
+
+    def _auxiliary_primary_inputs(self, task: str) -> tuple[str, ...]:
+        """The config keys the task's primary route is resolved from (bound into a plan's CAS)."""
+        return (*MODEL_KEYS[task][:2], *MODEL_KEYS["main"][:2])
+
+    def _auxiliary_primary(self, profile: str, task: str, base_plan: dict | None = None) -> dict[str, str] | None:
+        """The route the task runs on for this profile once the plan applies (see
+        _auxiliary_task_primary): the approved models of a model target of the same plan, otherwise
+        the profile's own auxiliary.<task> and model keys. None when not known here."""
+        if base_plan is not None and profile in (base_plan.get("model_targets") or []):
+            approved = (base_plan.get("approved_models") or {}).get(profile)
+            if approved and task in approved and "main" in approved:
+                return _auxiliary_task_primary(approved[task].get("provider"), approved[task].get("model"), approved["main"])
+        try:
+            task_provider, task_model, main_provider, main_model = (self._read_key(profile, key) for key in self._auxiliary_primary_inputs(task))
+        except (ServiceError, OSError, ValueError):
+            return None
+        return _auxiliary_task_primary(task_provider, task_model, {"provider": main_provider, "model": main_model})
+
     def _read_disabled(self, profile: str) -> list[str]:
         value = self._read_key(profile, "skills.disabled")
         if isinstance(value, list) and all(isinstance(item, str) for item in value):
@@ -1281,6 +1508,7 @@ class Service:
             "actual_models": actual,
             "drift": drift,
             "fallbacks": self._fallback_dto(name, view_entry),
+            "auxiliary_fallbacks": self._auxiliary_status(name),
             "readiness": installation.profile_readiness(self, name, stored),
             "native_delegation": native_service.status(self, name),
             "role_intro": self._role_intro(name),
@@ -1471,7 +1699,7 @@ class Service:
     # current value and refuse the whole save, writing nothing, on any difference. The error carries a
     # stable code the page maps to its "changed elsewhere, reload" state. Clients that send no
     # `expected` keep the previous behaviour (revision, preview snapshots and apply CAS only).
-    PAGE_EXPECTATION_FIELDS = ("models", "actual_models", "routing", "native_fallback")
+    PAGE_EXPECTATION_FIELDS = ("models", "actual_models", "routing", "native_fallback", "auxiliary_fallback")
 
     @staticmethod
     def _valid_page_expectation(field: str, value: Any) -> bool:
@@ -1506,6 +1734,11 @@ class Service:
         if field == "native_fallback":
             return (type(value) is dict and set(value) == {"enabled", "chain", "actual_chain"} and
                     (value["enabled"] is None or type(value["enabled"]) is bool) and chain(value["chain"]) and chain(value["actual_chain"]))
+        if field == "auxiliary_fallback":
+            # Every task the request writes (older pages send both); compared per task.
+            return (type(value) is dict and bool(value) and set(value) <= set(AUXILIARY_FALLBACK_KEYS) and
+                    all(type(item) is dict and set(item) == {"chain", "actual_chain"} and chain(item["chain"]) and chain(item["actual_chain"])
+                        for item in value.values()))
         return False
 
     def _parse_page_expectations(self, raw: Any, discovered: list[str]) -> list[dict[str, Any]]:
@@ -1553,6 +1786,9 @@ class Service:
                 skill_enabled = None
             return {"enabled": bool(routing.get("enabled")), "heavy": routing.get("heavy"),
                     "light": routing.get("light"), "slots": routing.get("slots"), "skill_enabled": skill_enabled}
+        if field == "auxiliary_fallback":
+            auxiliary = self._auxiliary_status(profile)
+            return {task: {"chain": item["chain"], "actual_chain": item["actual_chain"]} for task, item in auxiliary.items()}
         view = entry if entry is not None else {"native_fallback": None, "fallback_consent": {}}
         native = self._native_status(profile, view)
         return {"enabled": native["enabled"], "chain": native["chain"], "actual_chain": native["actual_chain"]}
@@ -1564,7 +1800,10 @@ class Service:
         by_profile = {item["profile"]: item for item in items}
         for profile, fields in sorted((required or {}).items()):
             for field in sorted(fields):
-                if field not in by_profile.get(profile, {}):
+                # "auxiliary_fallback.<task>": that task of the field (the tasks a request writes).
+                base, _, part = field.partition(".")
+                held = by_profile.get(profile, {})
+                if base not in held or (part and not (isinstance(held[base], dict) and part in held[base])):
                     raise ValueError(f"expected must cover {field} of {profile}")
         for item in items:
             profile = item["profile"]
@@ -1572,6 +1811,10 @@ class Service:
                 if field not in item:
                     continue
                 current = json.loads(json.dumps(self._page_expectation_current(profile, field, entries)))
+                if field == "auxiliary_fallback" and isinstance(current, dict):
+                    # Only the tasks the page froze (the ones it writes): a sibling task changed
+                    # elsewhere never blocks this save.
+                    current = {task: current.get(task) for task in item[field]}
                 if current == item[field]:
                     continue
                 detail = field
@@ -1579,7 +1822,7 @@ class Service:
                     order = {role: index for index, role in enumerate(MODEL_ROLES)}
                     differing = sorted((key for key in set(current) | set(item[field]) if current.get(key) != item[field].get(key)),
                                        key=lambda key: (order.get(key, len(order)), key))
-                    if differing and field in {"models", "actual_models"}:
+                    if differing and field in {"models", "actual_models", "auxiliary_fallback"}:
                         detail = f"{field}.{differing[0]}"
                 raise _external_change(profile, detail)
 
@@ -1642,7 +1885,8 @@ class Service:
             raise ValueError("model targets are outside the selected save scope")
         if scope in {"models", "timeouts"} and "routing_targets" in body and routing_targets:
             raise ValueError("routing targets are outside the selected save scope")
-        submitted_models = _models(body["models"]) if scope in {None, "models"} else None
+        # A page that no longer edits the delegation role leaves it out: each target keeps its own.
+        submitted_models, delegation_kept = _submitted_models(body["models"]) if scope in {None, "models"} else (None, False)
         # The retired routed-job fallback is written only by fallback_preview. A client may omit
         # routing.fallback; the stored value is then kept as it is. One that sends it must send the
         # stored value unchanged (older pages), in every save scope.
@@ -1713,16 +1957,34 @@ class Service:
         writes: list[dict[str, Any]] = []
 
         routing_validation_names: set[str] = set()
+        # What each model target must resolve to after apply (readback), when it differs from the
+        # models recorded in the store: an omitted delegation role keeps its canonical store value.
+        readback_models: dict[str, dict[str, Any]] = {}
         if submitted_models is not None:
             for name in targets:
                 entry = after[name]
                 desired = submitted_models
-                if entry["models"] != desired:
-                    changes.append({"profile": name, "field": "settings.models", "before": entry["models"], "after": desired})
+                store_models = desired
+                if delegation_kept:
+                    # The target's own delegation settings, resolved the way _actual_models will read
+                    # them once the new main model is written: the readback value only. No delegation
+                    # key is written; the per-key config CAS below (all model keys) refuses the apply
+                    # if they change.
+                    desired = {role: submitted_models[role] if role != "delegation" else self._kept_role_route(name, role, submitted_models["main"])
+                               for role in MODEL_ROLES}
+                    # The store keeps its own canonical delegation route exactly (legacy Light and
+                    # slot routing read it); only a profile without a stored entry gets the resolved one.
+                    stored_delegation = (entries.get(name) or {}).get("models", {}).get("delegation")
+                    store_models = {**desired, "delegation": copy.deepcopy(stored_delegation)} if stored_delegation is not None else desired
+                    readback_models[name] = copy.deepcopy(desired)
+                if entry["models"] != store_models:
+                    changes.append({"profile": name, "field": "settings.models", "before": entry["models"], "after": store_models})
                 actual = self._actual_models(name)
                 profile_values = self._profile_digest_keys(name, desired, False)
                 snapshots[name] = profile_values
                 for role in MODEL_ROLES:
+                    if delegation_kept and role == "delegation":
+                        continue
                     if actual[role] != desired[role] or (role != "main" and actual["main"] != desired["main"]):
                         changes.append({"profile": name, "field": f"models.{role}", "before": actual[role], "after": desired[role]})
                         role_writes = []
@@ -1739,7 +2001,7 @@ class Service:
                                     writes.append({"profile": name, "key": key, "before": comparable, "after": ""})
                                     changes.append({"profile": name, "field": key, "before": "[configured]", "after": ""})
                         writes.extend(role_writes)
-                entry["models"] = desired
+                entry["models"] = store_models
         selected_set = set(selected)
         routing_target_set = set(routing_targets)
         for name in all_names if scope in {None, "routing"} else []:
@@ -1754,9 +2016,15 @@ class Service:
                 new_routing["heavy"] = copy.deepcopy(submitted_routing["heavy"])
                 new_routing["light"] = copy.deepcopy(submitted_routing["light"])
                 if slots_submitted:
+                    # A copy to another profile keeps that profile's stored slots that follow the
+                    # delegation model (an earlier setting the page no longer offers) exactly.
+                    kept_legacy = {} if name == profile else {
+                        slot: copy.deepcopy(declaration) for slot, declaration in (entry["routing"].get("slots") or {}).items()
+                        if isinstance(declaration, dict) and declaration.get("follow") == "delegation"}
                     new_routing.pop("slots", None)
-                    if submitted_routing.get("slots"):
-                        new_routing["slots"] = copy.deepcopy(submitted_routing["slots"])
+                    merged = {**copy.deepcopy(submitted_routing.get("slots") or {}), **kept_legacy}
+                    if merged:
+                        new_routing["slots"] = merged
                 new_routing["enabled"] = new_enabled
                 if entry["routing"] != new_routing:
                     changes.append({"profile": name, "field": "routing", "before": entry["routing"], "after": new_routing})
@@ -1807,7 +2075,7 @@ class Service:
                 self._check_changed_routing_fallbacks(entries, after)
         # The models every explicit model target must resolve to after apply, recorded before an
         # unchanged target's projected entry is dropped below (a NOOP target has no entry to read).
-        approved_models = {name: copy.deepcopy(after[name]["models"]) for name in (targets if submitted_models is not None else []) if name in after}
+        approved_models = {name: copy.deepcopy(readback_models.get(name, after[name]["models"])) for name in (targets if submitted_models is not None else []) if name in after}
         if scope in {None, "routing"}:
             # A profile without a stored entry gets one only if this plan changes it: an entry that
             # was merely projected for the membership loop is dropped, so absent stays absent and its
@@ -1823,8 +2091,11 @@ class Service:
                 if change["field"] in {"routing", "routing.enabled", "skills.disabled"}:
                     needed.setdefault(change["profile"], set()).add("routing")
             for update in fallback_updates:
-                if isinstance(update, dict) and "native_fallback" in update and isinstance(update.get("profile"), str):
-                    needed.setdefault(update["profile"], set()).add("native_fallback")
+                if isinstance(update, dict) and isinstance(update.get("profile"), str):
+                    if "native_fallback" in update:
+                        needed.setdefault(update["profile"], set()).add("native_fallback")
+                    if isinstance(update.get("auxiliary_fallback"), dict):
+                        needed.setdefault(update["profile"], set()).update(f"auxiliary_fallback.{task}" for task in update["auxiliary_fallback"])
             self._check_page_expectations(page_expected, entries, needed)
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
@@ -1872,6 +2143,67 @@ class Service:
             _atomic_write(plans_dir / (plan_id + ".json"), _json_bytes(plan))
         return {"plan_id": plan_id, "changes": json.loads(json.dumps(changes)), "warnings": [], "expires_at": expires_at}
 
+    def _plan_auxiliary_fallback(
+        self, profile: str, chains: dict[str, list[dict[str, str]]], confirmation: dict[str, bool] | None,
+        base_plan: dict | None, snapshots: dict, writes: list, changes: list,
+        expected: dict, cas: dict, provenance: dict, scope_keys: dict,
+    ) -> None:
+        """Plan the config-only write of `auxiliary.<task>.fallback_chain` for one profile.
+
+        Only the tasks in `chains` are touched. A key is written only when the requested chain differs
+        from the stored one; turning the chain off writes `[]` over a stored chain and leaves an
+        absent (or null) key absent. Every key is compare-and-set at apply (raw digest per key, the
+        effective snapshot, its managed provenance) and read back through Hermes' effective config.
+        """
+        # One read per written key: the snapshot editability is judged from is the plan's baseline.
+        task_snapshots: dict[str, effective_config.NativeFallbackSnapshot] = {}
+        for task in chains:
+            try:
+                task_snapshots[task] = self._read_auxiliary_snapshot(profile, (AUXILIARY_FALLBACK_KEYS[task],))
+            except effective_config.EffectiveConfigChanged as exc:
+                raise RevisionConflict("auxiliary fallback config changed during preview") from exc
+            except effective_config.EffectiveConfigUnavailable as exc:
+                raise ValueError("auxiliary fallback is read-only because effective config cannot be verified") from exc
+        status = self._auxiliary_status(profile, task_snapshots, tuple(chains))
+        adds_spares = False
+        for task, desired in chains.items():
+            key = AUXILIARY_FALLBACK_KEYS[task]
+            current = status[task]
+            if not current["editable"]:
+                raise ValueError(f"auxiliary {task} fallback is read-only for this profile")
+            primary = self._auxiliary_primary(profile, task, base_plan)
+            if primary is not None:
+                identity = (primary["provider"].casefold(), primary["model"].casefold())
+                if any((item["provider"].casefold(), item["model"].casefold()) == identity for item in desired):
+                    raise ValueError(f"auxiliary {task} fallback must differ from the task's primary model")
+            raw = task_snapshots[task].raw(key)
+            values = snapshots.setdefault(profile, {})
+            values[key] = {"sha256": _digest(raw)}
+            # The primary route was checked from these keys: a change before apply refuses the apply
+            # (a model target of the same plan is checked against its approved models instead).
+            if not (base_plan is not None and profile in (base_plan.get("model_targets") or [])):
+                for input_key in self._auxiliary_primary_inputs(task):
+                    values.setdefault(input_key, self._read_key(profile, input_key))
+            expected.setdefault(profile, {})[task] = copy.deepcopy(desired)
+            if desired == [] and raw in (None, []):
+                continue  # already off; an absent key stays absent
+            if raw == desired:
+                continue
+            if desired:
+                adds_spares = True
+            writes.append({"profile": profile, "key": key, "before": {"sha256": _digest(raw)}, "after": copy.deepcopy(desired)})
+            changes.append({"profile": profile, "field": key, "before": current["chain"], "after": copy.deepcopy(desired)})
+        # Nothing is stored for a later save to compare against, so every write that sets spare models
+        # carries the page's explicit cost confirmation (the save click), as the conversation spares do.
+        if adds_spares and confirmation is None:
+            raise ValueError("auxiliary fallback requires explicit additional-cost confirmation")
+        # The compare-and-set covers only the keys of the tasks this update writes, one digest per
+        # key from the very snapshot its editability was judged from.
+        scoped_keys = [AUXILIARY_FALLBACK_KEYS[task] for task in AUXILIARY_FALLBACK_KEYS if task in chains]
+        cas[profile] = {AUXILIARY_FALLBACK_KEYS[task]: task_snapshots[task].cas_digest for task in chains}
+        provenance[profile] = {AUXILIARY_FALLBACK_KEYS[task]: task_snapshots[task].provenance_digest for task in chains}
+        scope_keys[profile] = scoped_keys
+
     def fallback_preview(self, body: dict) -> dict[str, Any]:
         """Prepare a fallback-only update through the same combined-plan builder."""
         return self._prepare_fallback_preview(body)
@@ -1899,9 +2231,9 @@ class Service:
         parsed_updates: list[tuple[str, dict[str, Any]]] = []
         seen_profiles: set[str] = set()
         for update in updates:
-            if not isinstance(update, dict) or not set(update) <= {"profile", "native_fallback", "routing_fallback", "delegation_fallback"} or "profile" not in update:
+            if not isinstance(update, dict) or not set(update) <= {"profile", "native_fallback", "routing_fallback", "delegation_fallback", "auxiliary_fallback"} or "profile" not in update:
                 raise ValueError("each update must contain profile and known fallback scopes")
-            if not (set(update) & {"native_fallback", "routing_fallback", "delegation_fallback"}):
+            if not (set(update) & {"native_fallback", "routing_fallback", "delegation_fallback", "auxiliary_fallback"}):
                 raise ValueError("each update must change at least one fallback scope")
             profile = self._require_profile(update["profile"], discovered)
             if profile in seen_profiles:
@@ -1927,6 +2259,13 @@ class Service:
                 scopes["delegation"] = self._validate_delegation_fallback(update["delegation_fallback"])
                 if scopes["delegation"] is None:
                     raise ValueError("delegation_fallback must define mode and chain")
+            if "auxiliary_fallback" in update:
+                # {task: chain} for the tasks this update writes; a task left out is not touched.
+                # `[]` turns the task's spare models off.
+                raw = update["auxiliary_fallback"]
+                if not isinstance(raw, dict) or not raw or set(raw) - set(AUXILIARY_FALLBACK_KEYS):
+                    raise ValueError("auxiliary_fallback must map compression and/or title to a chain")
+                scopes["auxiliary"] = {task: _validate_auxiliary_chain(raw[task]) for task in AUXILIARY_FALLBACK_KEYS if task in raw}
             parsed_updates.append((profile, scopes))
 
         confirmation_map: dict[tuple[str, str], dict[str, bool]] = {}
@@ -1935,8 +2274,8 @@ class Service:
                 raise ValueError("each confirmation must define profile, scope, cost, and rerun flags")
             profile = self._require_profile(item["profile"], discovered)
             scope = item["scope"]
-            if scope not in {"native", "routing", "delegation"}:
-                raise ValueError("confirmation scope must be native, routing, or delegation")
+            if scope not in {"native", "routing", "delegation", "auxiliary"}:
+                raise ValueError("confirmation scope must be native, routing, delegation, or auxiliary")
             pair = (profile, scope)
             if pair in confirmation_map:
                 raise ValueError("confirmations must not contain duplicate profile scopes")
@@ -1970,8 +2309,10 @@ class Service:
         page_expected = self._parse_page_expectations(body["expected"], discovered) if base_plan is None and "expected" in body else None
         if page_expected is not None:
             self._check_page_expectations(page_expected, entries, {
-                update["profile"]: {"native_fallback"} for update in updates
-                if isinstance(update, dict) and "native_fallback" in update and isinstance(update.get("profile"), str)})
+                update["profile"]: ({"native_fallback"} if "native_fallback" in update else set()) |
+                                   {f"auxiliary_fallback.{task}" for task in (update.get("auxiliary_fallback") or {})}
+                for update in updates
+                if isinstance(update, dict) and set(update) & {"native_fallback", "auxiliary_fallback"} and isinstance(update.get("profile"), str)})
         all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
         # Only the profiles this plan changes get an entry. Projecting every discovered profile
         # would publish a new canonical entry (pinning its current models) for untargeted profiles.
@@ -2002,9 +2343,21 @@ class Service:
                 and isinstance(item.get("provider"), str) and isinstance(item.get("model"), str)
             ]
 
+        auxiliary_expected: dict[str, dict[str, list[dict[str, str]]]] = {}
+        auxiliary_snapshots: dict[str, str] = {}
+        auxiliary_provenance: dict[str, str] = {}
+        auxiliary_snapshot_keys: dict[str, list[str]] = {}
         for profile, scopes in parsed_updates:
+            if "auxiliary" in scopes:
+                # Config only: the auxiliary chains never create or change a store entry.
+                self._plan_auxiliary_fallback(profile, scopes["auxiliary"], confirmation_map.get((profile, "auxiliary")), base_plan,
+                                              snapshots, writes, changes, auxiliary_expected, auxiliary_snapshots, auxiliary_provenance,
+                                              auxiliary_snapshot_keys)
+            store_scopes = {scope: desired for scope, desired in scopes.items() if scope != "auxiliary"}
+            if not store_scopes:
+                continue
             entry = after.setdefault(profile, self._fresh_profile_entry(profile, entries))
-            for scope, desired in scopes.items():
+            for scope, desired in store_scopes.items():
                 consent_key = scope
                 old_consent = entry["fallback_consent"][consent_key]
                 confirmation = confirmation_map.get((profile, scope))
@@ -2169,6 +2522,10 @@ class Service:
             "delegation_expected": delegation_expected,
             "delegation_snapshots": delegation_snapshots,
             "delegation_provenance": delegation_provenance,
+            "auxiliary_expected": auxiliary_expected,
+            "auxiliary_snapshots": auxiliary_snapshots,
+            "auxiliary_provenance": auxiliary_provenance,
+            "auxiliary_snapshot_keys": auxiliary_snapshot_keys,
             "state_changed": state_changed,
             "expires_epoch": expires_epoch,
             "timeout_writes": copy.deepcopy(base_plan.get("timeout_writes", [])) if base_plan else [],
@@ -2191,6 +2548,13 @@ class Service:
                 raise RevisionConflict("delegation config changed during preview") from exc
             if current_snapshot.cas_digest != expected_snapshot:
                 raise RevisionConflict("delegation config changed during preview")
+        for profile, expected_snapshot in auxiliary_snapshots.items():
+            try:
+                holds = self._auxiliary_cas_holds(profile, expected_snapshot, "cas_digest")
+            except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                raise RevisionConflict("auxiliary fallback config changed during preview") from exc
+            if not holds:
+                raise RevisionConflict("auxiliary fallback config changed during preview")
         for item in plan["timeout_writes"]:
             self._check_timeout_write(item)
         plan["store_digest"] = store_digest
@@ -2283,6 +2647,13 @@ class Service:
                     raise RevisionConflict("delegation config changed since preview") from exc
                 if current_snapshot.cas_digest != expected_snapshot:
                     raise RevisionConflict("delegation config changed since preview")
+            for profile, expected_snapshot in plan.get("auxiliary_snapshots", {}).items():
+                try:
+                    holds = self._auxiliary_cas_holds(profile, expected_snapshot, "cas_digest")
+                except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                    raise RevisionConflict("auxiliary fallback config changed since preview") from exc
+                if not holds:
+                    raise RevisionConflict("auxiliary fallback config changed since preview")
 
             if not plan["changes"]:
                 for item in plan.get("timeout_writes", []):
@@ -2341,6 +2712,13 @@ class Service:
                         current_snapshot = self._read_delegation_snapshot(profile)
                         if current_snapshot.provenance_digest != plan["delegation_provenance"][profile]:
                             raise RevisionConflict("delegation managed provenance changed during apply")
+                    if key in AUXILIARY_FALLBACK_KEYS.values() and profile in plan.get("auxiliary_provenance", {}):
+                        try:
+                            holds = self._auxiliary_cas_holds(profile, plan["auxiliary_provenance"][profile], "provenance_digest", key)
+                        except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                            raise RevisionConflict("auxiliary managed provenance changed during apply") from exc
+                        if not holds:
+                            raise RevisionConflict("auxiliary managed provenance changed during apply")
                     if not self._actual_key_matches(profile, key, before):
                         raise RevisionConflict("profile config changed during apply")
                     self._write_key(profile, key, after)
@@ -2382,6 +2760,12 @@ class Service:
                     _mode, _chain, warnings = self._delegation_actual(current_snapshot)
                     if warnings or current_snapshot.effective(DELEGATION_FALLBACK_KEY) != expected_value:
                         raise RevisionConflict("effective delegation fallback differs from approved selection")
+                for profile, tasks in plan.get("auxiliary_expected", {}).items():
+                    # Read back the written keys only: a sibling task changed meanwhile is not this save's.
+                    current = self._auxiliary_status(profile, tasks=tuple(tasks))
+                    for task, expected_chain in tasks.items():
+                        if current[task]["warnings"] or current[task]["actual_chain"] != expected_chain or current[task]["chain"] != expected_chain:
+                            raise RevisionConflict("effective auxiliary fallback chain differs from approved selection")
 
             except Exception:
                 receipt = {"status": "partial", "plan_id": plan_id, "revision": new_revision, "applied": applied,

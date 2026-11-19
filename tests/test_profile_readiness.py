@@ -105,6 +105,13 @@ def _service(tmp_path, monkeypatch, *, selections=None, skills=None, installed=(
     monkeypatch.setattr(service, "_fallback_dto", lambda *_args: {
         "native": {}, "routing": {}, "delegation": {},
     })
+
+    # The compression/title spare-model read (its own key-scoped snapshot, never the plugin-selection
+    # keys) is out of scope here: reported as unavailable, like the other spare models above.
+    def no_auxiliary(_profile, _keys=None):
+        raise effective_config.EffectiveConfigUnavailable("not part of the readiness tests")
+
+    monkeypatch.setattr(service, "_read_auxiliary_snapshot", no_auxiliary)
     if store is not None:
         monkeypatch.setattr(service, "_load_store", lambda: store)
 

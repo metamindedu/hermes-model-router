@@ -34,6 +34,11 @@ def mapping(row):
     native = (row.get("fallbacks") or {}).get("native")
     if native:
         out["native_fallback"] = {"enabled": native.get("enabled"), "chain": native.get("chain", []), "actual_chain": native.get("actual_chain", [])}
+    # The compression and title-generation spare models (auxiliaryExpectation in the page).
+    auxiliary = row.get("auxiliary_fallbacks")
+    if auxiliary:
+        out["auxiliary_fallback"] = {task: {"chain": copy.deepcopy(item["chain"]), "actual_chain": copy.deepcopy(item["actual_chain"])}
+                                     for task, item in auxiliary.items()}
     return out
 
 
@@ -186,7 +191,13 @@ def test_the_page_mapping_matches_the_generated_fixture():
     # Generated from desktop/plugin.js pageExpectation() by tests/test_native_contract_desktop.mjs.
     assert FIXTURE["generated_by"] == "tests/test_native_contract_desktop.mjs"
     assert mapping(FIXTURE["row"]) == FIXTURE["expectation"]
-    assert FIXTURE["preview_expected"] == [{"profile": "p1", **{key: FIXTURE["expectation"][key] for key in ("actual_models", "models", "native_fallback", "routing")}}]
+    assert FIXTURE["preview_expected"] == [{"profile": "p1", **{key: FIXTURE["expectation"][key]
+                                                                for key in ("actual_models", "models", "native_fallback", "routing")},
+                                            # only the task the body writes (title)
+                                            "auxiliary_fallback": {"title": FIXTURE["expectation"]["auxiliary_fallback"]["title"]}}]
+    # The compression and title-generation spare models are frozen per task, in the service's shape.
+    assert set(FIXTURE["expectation"]["auxiliary_fallback"]) == {"compression", "title"}
+    assert Service._valid_page_expectation("auxiliary_fallback", FIXTURE["expectation"]["auxiliary_fallback"]) is True
 
 
 def test_the_mapped_status_rows_are_exactly_what_the_service_compares(tmp_path, monkeypatch):

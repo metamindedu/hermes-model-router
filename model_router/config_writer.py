@@ -19,6 +19,7 @@ ALLOWED_KEYS = frozenset({
     "delegation.backend", "delegation.backends.model-router", "delegation.backends.model-router-profiles", "delegation.backends.model-router-auto",
     "auxiliary.compression.provider", "auxiliary.compression.model", "auxiliary.compression.reasoning_effort",
     "auxiliary.title_generation.provider", "auxiliary.title_generation.model", "auxiliary.title_generation.reasoning_effort",
+    "auxiliary.compression.fallback_chain", "auxiliary.title_generation.fallback_chain",
     "fallback_providers", "fallback_model", "skills.disabled", "skills.external_dirs",
 })
 

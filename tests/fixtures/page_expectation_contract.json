@@ -95,6 +95,40 @@
         "consent": null
       }
     },
+    "auxiliary_fallbacks": {
+      "compression": {
+        "schema": 1,
+        "key": "auxiliary.compression.fallback_chain",
+        "editable": true,
+        "present": true,
+        "chain": [
+          {
+            "provider": "deepseek",
+            "model": "flash"
+          }
+        ],
+        "actual_chain": [
+          {
+            "provider": "deepseek",
+            "model": "flash"
+          }
+        ],
+        "drift": false,
+        "managed_overlay": false,
+        "warnings": []
+      },
+      "title": {
+        "schema": 1,
+        "key": "auxiliary.title_generation.fallback_chain",
+        "editable": true,
+        "present": false,
+        "chain": [],
+        "actual_chain": [],
+        "drift": false,
+        "managed_overlay": false,
+        "warnings": []
+      }
+    },
     "drift": [
       "skills.disabled"
     ]
@@ -180,6 +214,26 @@
           "model": "spare"
         }
       ]
+    },
+    "auxiliary_fallback": {
+      "compression": {
+        "chain": [
+          {
+            "provider": "deepseek",
+            "model": "flash"
+          }
+        ],
+        "actual_chain": [
+          {
+            "provider": "deepseek",
+            "model": "flash"
+          }
+        ]
+      },
+      "title": {
+        "chain": [],
+        "actual_chain": []
+      }
     }
   },
   "preview_expected": [
@@ -205,6 +259,12 @@
           "provider": "openai-codex",
           "model": "actual-main",
           "reasoning": "high"
+        }
+      },
+      "auxiliary_fallback": {
+        "title": {
+          "chain": [],
+          "actual_chain": []
         }
       },
       "models": {

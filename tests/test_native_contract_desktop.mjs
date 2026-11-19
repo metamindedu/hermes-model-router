@@ -121,13 +121,18 @@ const sampleRow = () => ({
     fallback: { enabled: false, heavy: null, light: null }, slots: { design: { follow: 'main', custom: null } } },
   fallbacks: { native: { managed: true, editable: true, enabled: true, chain: [{ provider: 'xiaomi', model: 'spare' }],
     actual_chain: [{ provider: 'xiaomi', model: 'spare' }], drift: false, warnings: [], consent: null } },
+  // The compression and title-generation spare models (auxiliary.<task>.fallback_chain), since v0.13.0.
+  auxiliary_fallbacks: {
+    compression: { schema: 1, key: 'auxiliary.compression.fallback_chain', editable: true, present: true, chain: [{ provider: 'deepseek', model: 'flash' }],
+      actual_chain: [{ provider: 'deepseek', model: 'flash' }], drift: false, managed_overlay: false, warnings: [] },
+    title: { schema: 1, key: 'auxiliary.title_generation.fallback_chain', editable: true, present: false, chain: [], actual_chain: [], drift: false, managed_overlay: false, warnings: [] } },
   // The routing skill is switched off in the profile's own config while the canonical flag is on.
   drift: ['skills.disabled']
 })
 const renderExpectations = () => {
   const row = sampleRow()
   const frozen = { p1: a.pageExpectation(row) }
-  const body = { save_scope: null, model_targets: ['p1'], fallback_updates: [{ profile: 'p1', native_fallback: { enabled: false, chain: [] } }] }
+  const body = { save_scope: null, model_targets: ['p1'], fallback_updates: [{ profile: 'p1', native_fallback: { enabled: false, chain: [] }, auxiliary_fallback: { title: [] } }] }
   return `${JSON.stringify({ schema: 1, generated_by: 'tests/test_native_contract_desktop.mjs', row, expectation: frozen.p1,
     preview_expected: a.pageExpectationsFor('/preview', body, frozen, ['p1']) }, null, 2)}\n`
 }

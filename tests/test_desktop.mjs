@@ -9,7 +9,7 @@ const helperStart = source.indexOf('// Pure helpers are kept separate')
 const helperEnd = source.indexOf('\nfunction Field(', helperStart)
 assert.ok(helperStart >= 0 && helperEnd > helperStart, 'pure helper block should remain identifiable')
 const helperSource = source.slice(helperStart, helperEnd).replace(/^export\s+/gm, '')
-const helpers = new Function(`${helperSource}\nreturn { MODEL_PRESETS, deepClone, selectedModelPreset, applyModelPresetDraft, selectAllModelTargets, selectNoModelTargets, reconcileModelTargets, allModelTargetsSelected, invalidatePlanState, scopeFingerprint, copyProfileDraft, toggleName, buildPreviewBody, previewMatchesScope, isPartialReceipt, readableValue }`)()
+const helpers = new Function(`${helperSource}\nreturn { MODEL_PRESETS, deepClone, pageModels, selectedModelPreset, applyModelPresetDraft, selectAllModelTargets, selectNoModelTargets, reconcileModelTargets, allModelTargetsSelected, invalidatePlanState, scopeFingerprint, copyProfileDraft, toggleName, buildPreviewBody, previewMatchesScope, isPartialReceipt, readableValue }`)()
 
 const sampleProfile = {
   name: 'claire',
@@ -68,7 +68,8 @@ test('applying a preset replaces only cloned model roles and never mutates share
   const originalModels = helpers.deepClone(draft.models)
   const originalRouting = helpers.deepClone(draft.routing)
   const next = helpers.applyModelPresetDraft(draft, 'non-openai')
-  assert.deepEqual(next.models, expectedPresetModels['non-openai'])
+  // The preset fills the three roles the page edits; the delegation role keeps the loaded value.
+  assert.deepEqual(next.models, { ...expectedPresetModels['non-openai'], delegation: originalModels.delegation })
   assert.deepEqual(next.routing, originalRouting)
   assert.notStrictEqual(next.models, draft.models)
   assert.notStrictEqual(next.routing, draft.routing)
@@ -142,7 +143,8 @@ test('preview payload carries full draft and keeps model targets separate from r
   assert.deepEqual(payload, {
     expected_revision: 17,
     profile: 'claire',
-    models: sampleProfile.models,
+    // The delegation role is never sent: each target keeps its own stored delegation model.
+    models: helpers.pageModels(sampleProfile.models),
     model_targets: ['claire', 'research'],
     routing: routingWithoutFallback,
     routing_profiles: ['default', 'claire']

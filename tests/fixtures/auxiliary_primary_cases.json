@@ -1,0 +1,14 @@
+{
+  "_comment": "The model an auxiliary task runs on, as Hermes resolves auxiliary.<task> (agent/auxiliary_client.py _resolve_task_provider_model). null: not known here, so a spare equal to it is not refused. Checked by tests/test_auxiliary_fallback.py (service._auxiliary_task_primary) and tests/test_desktop_interactions.mjs (resolveAuxiliaryRoute).",
+  "cases": [
+    {"provider": "auto", "model": "", "main": {"provider": "openai-codex", "model": "heavy"}, "primary": {"provider": "openai-codex", "model": "heavy"}},
+    {"provider": "", "model": "", "main": {"provider": "openai-codex", "model": "heavy"}, "primary": {"provider": "openai-codex", "model": "heavy"}},
+    {"provider": "auto", "model": "auto", "main": {"provider": "openai-codex", "model": "heavy"}, "primary": {"provider": "openai-codex", "model": "heavy"}},
+    {"provider": "AUTO", "model": "Auto", "main": {"provider": "openai-codex", "model": "heavy"}, "primary": {"provider": "openai-codex", "model": "heavy"}},
+    {"provider": "auto", "model": "flash", "main": {"provider": "openai-codex", "model": "heavy"}, "primary": null},
+    {"provider": "deepseek", "model": "flash", "main": {"provider": "openai-codex", "model": "heavy"}, "primary": {"provider": "deepseek", "model": "flash"}},
+    {"provider": "deepseek", "model": "", "main": {"provider": "openai-codex", "model": "heavy"}, "primary": null},
+    {"provider": "deepseek", "model": "auto", "main": {"provider": "openai-codex", "model": "heavy"}, "primary": null},
+    {"provider": "auto", "model": "", "main": {"provider": "", "model": ""}, "primary": null}
+  ]
+}

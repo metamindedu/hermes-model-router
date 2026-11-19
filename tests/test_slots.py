@@ -461,3 +461,26 @@ def test_slot_policy_needs_a_slot_capable_package(fixture, monkeypatch):
     with pytest.raises(ValueError, match='task slots are unsupported'):
         service.delegation_preview(request)
     assert calls == []
+
+
+def test_a_copy_keeps_another_profile_stored_slot_that_follows_the_delegation_model(tmp_path, monkeypatch):
+    service, cli, body = setup(tmp_path, monkeypatch)
+    # p2 stores an earlier setting: its code-simple slot follows its own delegation model.
+    status = service.status()
+    own = find_profile(status, 'p2')
+    legacy = {'code-simple': {'follow': 'delegation', 'custom': None}, 'design': {'follow': 'main', 'custom': None}}
+    p2_body = {**copy.deepcopy(body), 'profile': 'p2', 'models': copy.deepcopy(own['models']),
+               'routing': {**copy.deepcopy(own['routing']), 'slots': copy.deepcopy(legacy)}, 'routing_targets': ['p2']}
+    assert service.apply(service.preview(p2_body)['plan_id'])['status'] == 'applied'
+    # p1 copies its slots (code-simple on the main model) to p1 and p2.
+    copied = {'code-simple': {'follow': 'main', 'custom': None},
+              'design': {'follow': 'custom', 'custom': route('operator', 'designer', 'high')}}
+    body['expected_revision'] = service.status()['revision']
+    body['routing']['slots'] = copy.deepcopy(copied)
+    body['routing_targets'] = ['p1', 'p2']
+    assert service.apply(service.preview(body)['plan_id'])['status'] == 'applied'
+    stored = json.loads(service.store_path.read_text())['profiles']
+    assert stored['p1']['routing']['slots'] == copied
+    # The legacy slot of the receiving profile is kept exactly; the rest is copied.
+    assert stored['p2']['routing']['slots'] == {'code-simple': legacy['code-simple'], 'design': copied['design']}
+    assert Service(service.root, writer=cli.writer).routing_config('p2')['slots']['code-simple'] == make_models('2')['delegation']

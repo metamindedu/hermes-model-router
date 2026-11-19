@@ -264,7 +264,8 @@ test('re-enable save changes activation membership only, with baseline models, r
   assert.deepEqual(body.model_targets, [])
   assert.deepEqual(body.routing_targets, [], 'nothing is copied to other profiles')
   assert.deepEqual(body.routing_profiles, ['claire', 'other'])
-  assert.deepEqual(body.models, sourceModels)
+  // Baseline models of the roles the page edits; the delegation role is never sent.
+  assert.deepEqual(body.models, (({ delegation: _kept, ...rest }) => rest)(sourceModels))
   assert.deepEqual(body.routing.heavy, profileRow(h, 'claire').routing.heavy)
   assert.deepEqual(body.routing.light, profileRow(h, 'claire').routing.light)
   assert.equal('slots' in body.routing, false)
@@ -306,7 +307,8 @@ test('timeout-only save copies unchanged values to a frozen manual subset and om
   assert.deepEqual(body.model_targets, [])
   assert.deepEqual(body.routing_targets, [])
   assert.deepEqual(body.routing_profiles, ['claire'])
-  assert.deepEqual(body.models, sourceModels)
+  // Baseline models of the roles the page edits; the delegation role is never sent.
+  assert.deepEqual(body.models, (({ delegation: _kept, ...rest }) => rest)(sourceModels))
   const { fallback: _retired, ...sourceRoutingWithoutFallback } = sourceRouting
   assert.deepEqual(body.routing, sourceRoutingWithoutFallback)
   assert.deepEqual(body.timeout_updates, [expectedTimeout('other', 11, 0, 3600)])

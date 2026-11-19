@@ -288,7 +288,7 @@ test('a changed connection or profile and an unusable scope refuse before any ca
 
 test('every model route shows the catalog picker with exact IDs kept under manual entry', () => {
   const h = harness()
-  assert.deepEqual(h.pickerIds().sort(), ['model-compression-picker', 'model-delegation-picker', 'model-main-picker', 'model-title-picker', 'slot-design-picker', 'slot-verify-complex-picker'])
+  assert.deepEqual(h.pickerIds().sort(), ['model-compression-picker', 'model-main-picker', 'model-title-picker', 'slot-design-picker', 'slot-verify-complex-picker'])
   assert.match(text(h.byId('model-catalog-note')), /불러온 프로필\(claire\)/)
   const main = h.picker('model-main-picker')
   assert.equal(main.trigger.props.disabled, false)
@@ -315,7 +315,8 @@ test('a catalog choice fills the draft only and is saved through the existing pr
   assert.equal(h.byId('model-main-model').props.value, 'deepseek-flash')
   assert.equal(h.selectValue('model-main-reasoning'), 'medium', 'the saved level survives a model change')
   assert.match(text(h.picker('model-main-picker').trigger), /deepseek-flash/)
-  assert.equal(h.byId('model-delegation-model').props.value, 'gpt-6-luna-900k', 'other roles are untouched')
+  assert.equal(h.byId('model-compression-model').props.value, models.compression.model, 'other roles are untouched')
+  assert.throws(() => h.byId('model-delegation-model'), 'the delegation model is not edited on this page')
   h.picker('slot-design-picker').menu.props.controller.setOptions({ effort: 'max' }, { isActive: true, provider: 'operator', model: 'independent-heavy' })
   h.render()
   assert.equal(h.selectValue('slot-design-reasoning'), 'max')
@@ -327,7 +328,7 @@ test('a catalog choice fills the draft only and is saved through the existing pr
   const payload = h.calls.find(call => call.operation === 'preview').body
   assert.deepEqual(payload.models.main, route('deepseek', 'deepseek-flash', 'medium'))
   assert.deepEqual(payload.models.title, route('openai-codex', 'gpt-6-luna', 'low'))
-  assert.deepEqual(payload.models.delegation, models.delegation)
+  assert.equal(Object.hasOwn(payload.models, 'delegation'), false, 'the delegation model is never sent')
   assert.deepEqual(payload.routing.slots.design.custom, route('operator', 'independent-heavy', 'max'), 'the slot level chosen in the menu is saved with it')
   assert.deepEqual(payload.routing.slots['verify-complex'], declarations()['verify-complex'])
   assert.deepEqual(payload.routing.heavy, routing.heavy, 'the tier pair is sent back as loaded')
@@ -378,9 +379,9 @@ test('a host without the catalog menu keeps the plain ID inputs and a level sele
 
 test('spare-model entries use the same picker without a reasoning level and keep stable row keys', () => {
   assert.doesNotMatch(source, /`\$\{entry\.provider\}:\$\{entry\.model\}:\$\{index\}`/, 'typing an ID must not remount its own row')
-  assert.ok(source.includes('picker: `native-chain-${index}-picker`'), 'native-chain picker missing')
+  assert.ok(source.includes('picker: index => `${prefix}-chain-${index}-picker`') && source.includes("chainIds('native')"), 'native-chain picker missing')
   assert.equal(source.includes('delegation-chain-'), false, 'the default-delegation spare list is gone')
-  assert.ok(source.includes('picker: `slot-${slot.id}-spare-picker-${index}`'))
+  assert.ok(source.includes('picker: index => `slot-${slot.id}-spare-picker-${index}`'))
   assert.match(source, /이 항목에는 추론 강도를 따로 저장하지 않습니다/)
 })
 
