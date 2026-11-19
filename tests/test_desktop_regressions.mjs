@@ -29,7 +29,7 @@ test('late reload after gateway switch does not replace draft or unlock state',a
 // The page transport plus the two pure helpers it relies on, evaluated outside the module.
 function nativeCallSource(){
  const cut=(from,to)=>{const at=source.indexOf(from);assert.ok(at>=0,from);return source.slice(at,source.indexOf(to,at))}
- return [cut('function sameValue(','\nexport function selectedModelPreset'),cut('export const STATUS_PAGE_LIMIT','\n// The backend refuses a request body'),
+ return [cut('function sameValue(','\n// The model roles this page edits'),cut('export const STATUS_PAGE_LIMIT','\n// The backend refuses a request body'),
   cut('export async function nativeBackendCall','\nfunction RouterPage')].join('\n').replaceAll('export ','')
 }
 

@@ -40,7 +40,7 @@ delegation.backends.model-router-profiles
 delegation.backends.model-router-auto
 ```
 
-Installation/registration/read/refresh/model presets/ordinary section saves never
+Installation/registration/read/refresh/ordinary section saves never
 write the selector. The dedicated settings card saves only its explicitly selected existing target profiles and does not join the other cards' combined save implicitly. Its original
 configuration digest is frozen with the draft; a later query cannot silently
 rebase it. UI mutation/save/preview/apply share the existing owner/connection,

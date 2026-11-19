@@ -649,3 +649,131 @@ def test_unattributable_pair_ends_with_an_unknown_outcome_not_running(env):
     r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=0)
     a, b = rows(r)
     assert (a['status'], b['status']) == ('ended', 'ended')
+
+
+# ---- plugin reload inside one gateway process (v0.13.1) ----
+
+def _reregister(monkeypatch, home):
+    """What a forced plugin reload does: evict the plugin modules, re-import, call register() again."""
+    import importlib
+    import sys
+    import model_router
+    monkeypatch.setattr(model_router, 'execution_roster', model_router.execution_roster)
+    monkeypatch.delitem(sys.modules, 'model_router.execution_roster')
+    fresh = importlib.import_module('model_router.execution_roster')
+    ctx = Context()
+    return fresh, ctx, fresh.register_execution_roster(ctx, home)
+
+
+def _review_child(r):
+    args = {'tasks': [{'goal': 'PRIVATE_GOAL', 'execution': 'model', 'purpose': 'independent-review'}]}
+    pre(r, args)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='sa-0')
+    post(r, {'status': 'dispatched', 'mode': 'background', 'count': 1, 'delegation_id': 'deleg-1',
+             'subagent_ids': ['sa-0']}, args)
+    r.api_pre(session_id='child', model='primary-model', provider='openai-codex')
+    r.api_post(session_id='child', usage={'input_tokens': 10, 'output_tokens': 2})
+    r.pre(tool_name='read_file', args={}, session_id='child', conversation_id='child', tool_call_id='t-1')
+
+
+def test_reload_keeps_an_in_flight_execution_and_old_hooks_never_double_count(env, monkeypatch):
+    r1, ctx1, home = env
+    _review_child(r1)
+    module, ctx2, r2 = _reregister(monkeypatch, home)
+    assert module.ExecutionRoster is not type(r1) and r2 is not r1
+    ctx1.events.clear()
+    # The host normally drops the old hooks; even if a stale one still fires, it must not count.
+    for r in (r1, r2):
+        r.api_pre(session_id='child', model='spare-model', provider='anthropic')
+        r.api_post(session_id='child', usage={'input_tokens': 5, 'output_tokens': 1, 'cache_read_tokens': 3})
+        r.pre(tool_name='terminal', args={}, session_id='child', conversation_id='child', tool_call_id='t-2')
+    (row,) = rows(r2)
+    assert row['requested']['kind'] == 'model' and row['requested']['role'] == 'heavy'
+    assert row['requested']['purpose'] == 'independent-review'
+    assert (row['subagent_id'], row['delegation_id']) == ('sa-0', 'deleg-1')
+    assert row['status'] == 'running' and row['api_call_count'] == 2 and row['tool_count'] == 2
+    assert row['last_tool'] == 'terminal'
+    assert (row['model'], row['provider']) == ('spare-model', 'anthropic')
+    assert row['models'] == [{'model': 'primary-model', 'provider': 'openai-codex'},
+                             {'model': 'spare-model', 'provider': 'anthropic'}]
+    assert row['tokens'] == {'input': 15, 'cache_read': 3, 'cache_write': 0, 'output': 3}
+    for r in (r1, r2):
+        r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=4200)
+    (row,) = rows(r2)
+    assert row['status'] == 'completed' and row['duration_seconds'] == 4.2
+    # Only the live instance serves the RPC and emits change events.
+    assert rows(r1) == [] and ctx1.events == [] and ctx2.events
+    assert 'PRIVATE_GOAL' not in json.dumps(rows(r2))
+
+
+def test_reload_keeps_compaction_and_continuation_lineage(env, monkeypatch):
+    r1, _, home = env
+    _review_child(r1)
+    _, _, r2 = _reregister(monkeypatch, home)
+    r2.compact(session_id='child-2', old_session_id='child')
+    r2.api_pre(session_id='child-2', model='spare-model', provider='anthropic')
+    r2.stop(parent_session_id='segment-1', child_session_id='child-2', child_status='completed')
+    (first,) = rows(r2)
+    assert first['status'] == 'completed' and first['api_call_count'] == 2 and first['model'] == 'spare-model'
+    _, _, r3 = _reregister(monkeypatch, home)
+    args = {'action': 'continue', 'subagent_id': 'sa-0', 'message': 'PRIVATE_FOLLOW_UP'}
+    r3.pre(tool_name='delegate_task', args=args, session_id='segment-1', conversation_id='root', tool_call_id='call-2')
+    _, _, r4 = _reregister(monkeypatch, home)  # a reload between the continue call and its start
+    r4.start(parent_session_id='segment-1', child_session_id='child-2', child_subagent_id='sa-0')
+    r4.post(tool_name='delegate_task', args=args, session_id='segment-1', conversation_id='root', tool_call_id='call-2',
+            result=json.dumps({'status': 'dispatched', 'mode': 'background', 'count': 1,
+                               'delegation_id': 'deleg-2', 'subagent_ids': ['sa-0']}))
+    r4.api_pre(session_id='child-2', model='spare-model', provider='anthropic')
+    r4.api_post(session_id='child-2', usage={'input_tokens': 7})
+    first, second = rows(r4)
+    assert second['requested'] == first['requested'] and second['continued_from'] == first['id']
+    assert second['status'] == 'running' and second['api_call_count'] == 1
+    assert second['tokens'] == {'input': 7, 'cache_read': 0, 'cache_write': 0, 'output': 0}
+    assert first['status'] == 'completed'
+    assert first['tokens'] == {'input': 10, 'cache_read': 0, 'cache_write': 0, 'output': 2}
+    for r in (r1, r2, r3):
+        assert rows(r) == []
+
+
+@pytest.mark.parametrize('corrupt', ['schema', 'row', 'child', 'tokens', 'state'])
+def test_reload_discards_incompatible_state_to_unknown(env, monkeypatch, corrupt):
+    import os
+    import sys
+    r1, _, home = env
+    _review_child(r1)
+    holder = sys.modules['hermes_model_router_runtime_state']
+    entry = holder.execution_roster[os.path.normcase(str(home.resolve()))]
+    if corrupt == 'schema':
+        entry['schema'] = 'execution-roster/0'
+    elif corrupt == 'row':
+        next(iter(entry['state']['rows'].values())).pop('requested')
+    elif corrupt == 'child':
+        entry['state']['children']['child']['status'] = 'mystery'
+    elif corrupt == 'tokens':
+        entry['state']['children']['child']['tokens'] = {'input': '10'}
+    else:
+        entry['state'] = []
+    _, _, r2 = _reregister(monkeypatch, home)
+    assert rows(r2) == [] and r2.children == {} and r2.rows == {}
+    # The dropped child is never re-attributed; its later activity is ignored, not guessed.
+    r2.api_pre(session_id='child', model='spare-model', provider='anthropic')
+    r2.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed')
+    assert rows(r2) == [] and r2.children == {}
+    # The previous instance is retired too, so it cannot keep writing into the dropped state.
+    r1.api_pre(session_id='child', model='other-model', provider='x')
+    assert rows(r1) == []
+
+
+def test_reload_state_is_per_home(tmp_path, monkeypatch):
+    homes = [tmp_path / 'profiles' / name for name in ('one', 'two')]
+    for home in homes:
+        home.mkdir(parents=True)
+    current = {'home': homes[0]}
+    monkeypatch.setattr(hermes_constants, 'get_hermes_home', lambda: current['home'])
+    first = register_execution_roster(Context(), homes[0])
+    _review_child(first)
+    current['home'] = homes[1]
+    other = register_execution_roster(Context(), homes[1])
+    assert rows(other) == [] and other.children == {}
+    current['home'] = homes[0]
+    assert len(rows(first)) == 1  # registering another profile does not retire this one

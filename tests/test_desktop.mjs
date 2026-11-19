@@ -9,7 +9,7 @@ const helperStart = source.indexOf('// Pure helpers are kept separate')
 const helperEnd = source.indexOf('\nfunction Field(', helperStart)
 assert.ok(helperStart >= 0 && helperEnd > helperStart, 'pure helper block should remain identifiable')
 const helperSource = source.slice(helperStart, helperEnd).replace(/^export\s+/gm, '')
-const helpers = new Function(`${helperSource}\nreturn { MODEL_PRESETS, deepClone, pageModels, selectedModelPreset, applyModelPresetDraft, selectAllModelTargets, selectNoModelTargets, reconcileModelTargets, allModelTargetsSelected, invalidatePlanState, scopeFingerprint, copyProfileDraft, toggleName, buildPreviewBody, previewMatchesScope, isPartialReceipt, readableValue }`)()
+const helpers = new Function(`${helperSource}\nreturn { deepClone, pageModels, selectAllModelTargets, selectNoModelTargets, reconcileModelTargets, allModelTargetsSelected, invalidatePlanState, scopeFingerprint, copyProfileDraft, toggleName, buildPreviewBody, previewMatchesScope, isPartialReceipt, readableValue }`)()
 
 const sampleProfile = {
   name: 'claire',
@@ -31,54 +31,15 @@ const sampleProfile = {
   }
 }
 
-const expectedPresetModels = {
-  openai: {
-    main: { provider: 'openai-codex', model: 'gpt-6-astra-900k', reasoning: 'medium' },
-    delegation: { provider: 'openai-codex', model: 'gpt-6-luna-900k', reasoning: 'max' },
-    compression: { provider: 'openai-codex', model: 'gpt-6-luna-900k', reasoning: 'medium' },
-    title: { provider: 'openai-codex', model: 'gpt-6-luna', reasoning: 'none' }
-  },
-  'non-openai': {
-    main: { provider: 'xiaomi', model: 'mimo-v2.6-pro', reasoning: 'max' },
-    delegation: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'max' },
-    compression: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'medium' },
-    title: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'none' }
+test('the retired recommended model presets leave no helper, constant, style or copy behind', () => {
+  for (const gone of ['MODEL_PRESETS', 'selectedModelPreset', 'applyModelPresetDraft', 'modelPresetCards', 'presetCard', 'presetGrid',
+    'preset-${', '추천 구성', '초안에 채우기', '사용자 지정 조합', '프리셋과 일치', 'Non-OpenAI']) {
+    assert.equal(source.includes(gone), false, gone)
   }
-}
-
-test('editable model presets exactly match the requested four model-role templates', () => {
-  assert.deepEqual(Object.fromEntries(helpers.MODEL_PRESETS.map(preset => [preset.id, preset.models])), expectedPresetModels)
-  assert.deepEqual(helpers.MODEL_PRESETS.map(preset => preset.id), ['openai', 'non-openai'])
-  assert.ok(Object.isFrozen(helpers.MODEL_PRESETS))
-  for (const preset of helpers.MODEL_PRESETS) {
-    assert.ok(Object.isFrozen(preset.models))
-    for (const role of ['main', 'delegation', 'compression', 'title']) assert.ok(Object.isFrozen(preset.models[role]))
-    assert.equal(helpers.selectedModelPreset(helpers.deepClone(preset.models)), preset.id)
-  }
-  const edited = helpers.deepClone(expectedPresetModels.openai)
-  edited.title.reasoning = 'low'
-  assert.equal(helpers.selectedModelPreset(edited), 'custom')
-  edited.title.reasoning = 'none'
-  edited.main.extra = true
-  assert.equal(helpers.selectedModelPreset(edited), 'custom')
-})
-
-test('applying a preset replaces only cloned model roles and never mutates shared templates', () => {
-  const draft = helpers.copyProfileDraft(sampleProfile)
-  const originalModels = helpers.deepClone(draft.models)
-  const originalRouting = helpers.deepClone(draft.routing)
-  const next = helpers.applyModelPresetDraft(draft, 'non-openai')
-  // The preset fills the three roles the page edits; the delegation role keeps the loaded value.
-  assert.deepEqual(next.models, { ...expectedPresetModels['non-openai'], delegation: originalModels.delegation })
-  assert.deepEqual(next.routing, originalRouting)
-  assert.notStrictEqual(next.models, draft.models)
-  assert.notStrictEqual(next.routing, draft.routing)
-  assert.deepEqual(draft.models, originalModels)
-  next.models.main.model = 'edited-after-apply'
-  next.routing.fallback.heavy.model = 'edited-route'
-  assert.deepEqual(helpers.MODEL_PRESETS[1].models, expectedPresetModels['non-openai'])
-  assert.equal(draft.routing.fallback.heavy.model, 'claude-opus')
-  assert.equal(helpers.applyModelPresetDraft(draft, 'unknown'), null)
+  // The page still sends only the three roles it edits; the delegation role keeps its stored value.
+  assert.deepEqual(helpers.pageModels(sampleProfile.models), {
+    main: sampleProfile.models.main, compression: sampleProfile.models.compression, title: sampleProfile.models.title
+  })
 })
 
 test('model targets default to all only when uninitialized and preserve intentional empty selection', () => {

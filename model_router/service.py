@@ -1177,17 +1177,50 @@ class Service:
         selected = tuple(keys) if keys else tuple(AUXILIARY_FALLBACK_KEYS.values())
         return effective_config.read_key_scoped(self._profile_home(profile), selected)
 
-    def _auxiliary_cas_holds(self, profile: str, expected: Any, attribute: str, only_key: str | None = None) -> bool:
+    def _auxiliary_cas_holds(self, profile: str, expected: Any, attribute: str, only_key: str | None = None,
+                             required: tuple[str, ...] | list[str] = ()) -> bool:
         """Whether a plan's recorded auxiliary digests (`cas_digest` or `provenance_digest`) still hold.
 
         Current plans record one digest per written key, each from that key's own snapshot, so a
         sibling task never takes part. A plan from before (one string) is checked over both keys.
+        Fails closed: a key that is checked (`only_key`) or written (`required`) without its own
+        recorded digest, an empty map or a digest of the wrong type never holds.
         Raises the snapshot errors; callers turn them into a RevisionConflict.
         """
         if isinstance(expected, dict):
-            items = [(key, digest) for key, digest in expected.items() if only_key is None or key == only_key]
-            return all(getattr(self._read_auxiliary_snapshot(profile, (key,)), attribute) == digest for key, digest in items)
+            keys = [only_key] if only_key is not None else list(expected)
+            keys += [key for key in required if key not in keys]
+            if not keys or any(not isinstance(expected.get(key), str) for key in keys):
+                return False
+            return all(getattr(self._read_auxiliary_snapshot(profile, (key,)), attribute) == expected[key] for key in keys)
+        if not isinstance(expected, str):
+            return False
         return getattr(self._read_auxiliary_snapshot(profile), attribute) == expected
+
+    @staticmethod
+    def _auxiliary_written_keys(plan: dict, profile: str) -> list[str]:
+        """The auxiliary fallback keys a plan writes for one profile."""
+        keys = set(AUXILIARY_FALLBACK_KEYS.values())
+        return [item["key"] for item in plan.get("writes", []) if item.get("profile") == profile and item.get("key") in keys]
+
+    def _check_auxiliary_plan_digests(self, plan: dict, message: str) -> None:
+        """Every auxiliary key a plan writes still matches its recorded per-key CAS digest.
+
+        A written key whose profile has no recorded CAS or provenance digest refuses the plan."""
+        snapshots = plan.get("auxiliary_snapshots") or {}
+        provenance = plan.get("auxiliary_provenance") or {}
+        written = {item["profile"] for item in plan.get("writes", [])
+                   if item.get("key") in AUXILIARY_FALLBACK_KEYS.values()}
+        if any(profile not in snapshots or profile not in provenance for profile in written):
+            raise RevisionConflict(message)
+        for profile, expected_snapshot in snapshots.items():
+            try:
+                holds = self._auxiliary_cas_holds(profile, expected_snapshot, "cas_digest",
+                                                  required=self._auxiliary_written_keys(plan, profile))
+            except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
+                raise RevisionConflict(message) from exc
+            if not holds:
+                raise RevisionConflict(message)
 
     def _auxiliary_status(
         self, profile: str, snapshots: dict[str, effective_config.NativeFallbackSnapshot] | None = None,
@@ -1214,8 +1247,12 @@ class Service:
                 except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged, OSError, ValueError):
                     snapshot = None
             if snapshot is None:
+                # The same shape as a readable task: read-only, no chain, and the task's own model
+                # (read from the model keys, not the unreadable chain; None when not known here).
                 result[task] = {"schema": 1, "key": key, "editable": False, "present": False, "chain": [], "actual_chain": [],
-                                "drift": False, "managed_overlay": False, "warnings": ["auxiliary_fallback_unavailable"]}
+                                "drift": False, "managed_overlay": False, "env_masked": False,
+                                "primary": self._auxiliary_primary(profile, task),
+                                "warnings": ["auxiliary_fallback_unavailable"]}
                 continue
             warnings = [warning.replace("scoped_fallback_", "auxiliary_fallback_").replace("scoped_", "auxiliary_fallback_")
                         for warning in snapshot.warnings]
@@ -2146,7 +2183,7 @@ class Service:
     def _plan_auxiliary_fallback(
         self, profile: str, chains: dict[str, list[dict[str, str]]], confirmation: dict[str, bool] | None,
         base_plan: dict | None, snapshots: dict, writes: list, changes: list,
-        expected: dict, cas: dict, provenance: dict, scope_keys: dict,
+        expected: dict, cas: dict, provenance: dict,
     ) -> None:
         """Plan the config-only write of `auxiliary.<task>.fallback_chain` for one profile.
 
@@ -2199,10 +2236,8 @@ class Service:
             raise ValueError("auxiliary fallback requires explicit additional-cost confirmation")
         # The compare-and-set covers only the keys of the tasks this update writes, one digest per
         # key from the very snapshot its editability was judged from.
-        scoped_keys = [AUXILIARY_FALLBACK_KEYS[task] for task in AUXILIARY_FALLBACK_KEYS if task in chains]
         cas[profile] = {AUXILIARY_FALLBACK_KEYS[task]: task_snapshots[task].cas_digest for task in chains}
         provenance[profile] = {AUXILIARY_FALLBACK_KEYS[task]: task_snapshots[task].provenance_digest for task in chains}
-        scope_keys[profile] = scoped_keys
 
     def fallback_preview(self, body: dict) -> dict[str, Any]:
         """Prepare a fallback-only update through the same combined-plan builder."""
@@ -2344,15 +2379,14 @@ class Service:
             ]
 
         auxiliary_expected: dict[str, dict[str, list[dict[str, str]]]] = {}
-        auxiliary_snapshots: dict[str, str] = {}
-        auxiliary_provenance: dict[str, str] = {}
-        auxiliary_snapshot_keys: dict[str, list[str]] = {}
+        # profile -> {written key: digest}; an older plan carried one string per profile.
+        auxiliary_snapshots: dict[str, dict[str, str]] = {}
+        auxiliary_provenance: dict[str, dict[str, str]] = {}
         for profile, scopes in parsed_updates:
             if "auxiliary" in scopes:
                 # Config only: the auxiliary chains never create or change a store entry.
                 self._plan_auxiliary_fallback(profile, scopes["auxiliary"], confirmation_map.get((profile, "auxiliary")), base_plan,
-                                              snapshots, writes, changes, auxiliary_expected, auxiliary_snapshots, auxiliary_provenance,
-                                              auxiliary_snapshot_keys)
+                                              snapshots, writes, changes, auxiliary_expected, auxiliary_snapshots, auxiliary_provenance)
             store_scopes = {scope: desired for scope, desired in scopes.items() if scope != "auxiliary"}
             if not store_scopes:
                 continue
@@ -2525,7 +2559,6 @@ class Service:
             "auxiliary_expected": auxiliary_expected,
             "auxiliary_snapshots": auxiliary_snapshots,
             "auxiliary_provenance": auxiliary_provenance,
-            "auxiliary_snapshot_keys": auxiliary_snapshot_keys,
             "state_changed": state_changed,
             "expires_epoch": expires_epoch,
             "timeout_writes": copy.deepcopy(base_plan.get("timeout_writes", [])) if base_plan else [],
@@ -2548,13 +2581,7 @@ class Service:
                 raise RevisionConflict("delegation config changed during preview") from exc
             if current_snapshot.cas_digest != expected_snapshot:
                 raise RevisionConflict("delegation config changed during preview")
-        for profile, expected_snapshot in auxiliary_snapshots.items():
-            try:
-                holds = self._auxiliary_cas_holds(profile, expected_snapshot, "cas_digest")
-            except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
-                raise RevisionConflict("auxiliary fallback config changed during preview") from exc
-            if not holds:
-                raise RevisionConflict("auxiliary fallback config changed during preview")
+        self._check_auxiliary_plan_digests(plan, "auxiliary fallback config changed during preview")
         for item in plan["timeout_writes"]:
             self._check_timeout_write(item)
         plan["store_digest"] = store_digest
@@ -2647,13 +2674,7 @@ class Service:
                     raise RevisionConflict("delegation config changed since preview") from exc
                 if current_snapshot.cas_digest != expected_snapshot:
                     raise RevisionConflict("delegation config changed since preview")
-            for profile, expected_snapshot in plan.get("auxiliary_snapshots", {}).items():
-                try:
-                    holds = self._auxiliary_cas_holds(profile, expected_snapshot, "cas_digest")
-                except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:
-                    raise RevisionConflict("auxiliary fallback config changed since preview") from exc
-                if not holds:
-                    raise RevisionConflict("auxiliary fallback config changed since preview")
+            self._check_auxiliary_plan_digests(plan, "auxiliary fallback config changed since preview")
 
             if not plan["changes"]:
                 for item in plan.get("timeout_writes", []):
@@ -2712,7 +2733,10 @@ class Service:
                         current_snapshot = self._read_delegation_snapshot(profile)
                         if current_snapshot.provenance_digest != plan["delegation_provenance"][profile]:
                             raise RevisionConflict("delegation managed provenance changed during apply")
-                    if key in AUXILIARY_FALLBACK_KEYS.values() and profile in plan.get("auxiliary_provenance", {}):
+                    if key in AUXILIARY_FALLBACK_KEYS.values():
+                        # Fails closed: an auxiliary write without its recorded provenance digest never applies.
+                        if profile not in plan.get("auxiliary_provenance", {}):
+                            raise RevisionConflict("auxiliary managed provenance changed during apply")
                         try:
                             holds = self._auxiliary_cas_holds(profile, plan["auxiliary_provenance"][profile], "provenance_digest", key)
                         except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged) as exc:

@@ -8,8 +8,8 @@ const helperEnd = source.indexOf('\nfunction Field(', helperStart)
 assert.ok(helperStart >= 0 && helperEnd > helperStart, 'pure helper block should remain identifiable')
 const helperSource = source.slice(helperStart, helperEnd).replace(/^export\s+/gm, '')
 const helpers = new Function(`${helperSource}\nreturn {
-  MODEL_PRESETS, ROUTING_FALLBACK_PRESETS, SUPPORTED_FALLBACK_CAPABILITIES,
-  deepClone, sameValue, applyModelPresetDraft, copyProfileDraft,
+  ROUTING_FALLBACK_PRESETS, SUPPORTED_FALLBACK_CAPABILITIES,
+  deepClone, sameValue, copyProfileDraft,
   fallbackCapabilitiesSupported, copyNativeFallbackDraft, copyRoutingFallbackDraft,
   applyRoutingFallbackPresetDraft, moveChainEntry, nativeFallbackModeDraft, nativeFallbackTargetReason,
   buildModelSectionFallbackBody, foldedRouteIdentity, FALLBACK_PROVIDER_RE, FALLBACK_MODEL_RE,
@@ -201,8 +201,8 @@ test('the Fast inheritance note stays readonly; the long spare-model status copy
   assert.equal(h.calls.length, 0)
 })
 
-test('model presets remain exact; the conversation spare-model presets are removed, routing presets only fill drafts', () => {
-  assert.deepEqual(helpers.MODEL_PRESETS.map(item => item.id), ['openai', 'non-openai'])
+test('the model and conversation spare-model presets are removed; routing presets only fill drafts', () => {
+  assert.doesNotMatch(source, /MODEL_PRESETS|applyModelPresetDraft|selectedModelPreset/)
   assert.doesNotMatch(source, /NATIVE_FALLBACK_PRESETS|applyNativeFallbackPresetDraft|native-fallback-preset-/)
   const routeOff = { enabled: false, heavy: null, light: null }
   const routeDraft = helpers.applyRoutingFallbackPresetDraft(routeOff, 'non-openai')

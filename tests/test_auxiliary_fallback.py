@@ -447,3 +447,108 @@ def test_editability_and_the_baseline_come_from_one_read(env):
     with pytest.raises(RevisionConflict):
         service.fallback_preview(request)
     assert fake.calls == []
+
+
+# ---- v0.13.1 hardening: per-key digests fail closed, old plans still apply/refuse, uniform status rows ----
+
+def _plan_file(service: Service, plan_id: str) -> Path:
+    return service.store_path.parent / "plans" / (plan_id + ".json")
+
+
+def _edit_plan(service: Service, plan_id: str, edit) -> None:
+    path = _plan_file(service, plan_id)
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    edit(plan)
+    path.write_text(json.dumps(plan), encoding="utf-8")
+
+
+def test_a_new_plan_records_one_digest_per_written_key_and_no_unused_key_list(env):
+    service, _fake, _state = env
+    plan = service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"compression": [spare("deepseek", "flash")]}}]))
+    stored = json.loads(_plan_file(service, plan["plan_id"]).read_text(encoding="utf-8"))
+    assert "auxiliary_snapshot_keys" not in stored
+    assert set(stored["auxiliary_snapshots"]["default"]) == {COMPRESSION}
+    assert set(stored["auxiliary_provenance"]["default"]) == {COMPRESSION}
+    assert all(isinstance(value, str) for value in stored["auxiliary_snapshots"]["default"].values())
+
+
+@pytest.mark.parametrize("field", ["auxiliary_snapshots", "auxiliary_provenance"])
+@pytest.mark.parametrize("damage", ["key", "profile", "empty", "type"])
+def test_a_plan_without_the_digest_of_a_written_key_never_writes(env, field, damage):
+    service, fake, _state = env
+    plan = service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"compression": [spare("deepseek", "flash")]}}]))
+
+    def edit(stored):
+        if damage == "key":
+            stored[field]["default"] = {TITLE: stored[field]["default"][COMPRESSION]}
+        elif damage == "profile":
+            stored[field].pop("default")
+        elif damage == "empty":
+            stored[field]["default"] = {}
+        else:
+            stored[field]["default"] = {COMPRESSION: None}
+
+    _edit_plan(service, plan["plan_id"], edit)
+    try:
+        receipt = service.apply(plan["plan_id"])
+    except RevisionConflict:
+        receipt = None
+    assert receipt is None or receipt["status"] != "applied"
+    assert fake.calls == [] and COMPRESSION not in fake.values["default"]
+
+
+def test_a_plan_from_0_13_0_with_its_unused_key_list_still_applies(env):
+    service, fake, _state = env
+    plan = service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"title": [spare("deepseek", "flash")]}}]))
+    _edit_plan(service, plan["plan_id"], lambda stored: stored.update(auxiliary_snapshot_keys={"default": [TITLE]}))
+    assert service.apply(plan["plan_id"])["status"] == "applied"
+    assert fake.calls == [("default", TITLE, [spare("deepseek", "flash")])]
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_an_older_one_string_plan_is_checked_over_both_keys(env, changed):
+    service, fake, state = env
+    plan = service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"title": [spare("deepseek", "flash")]}}], expected=False))
+    whole = service._read_auxiliary_snapshot("default")
+
+    def edit(stored):
+        stored["auxiliary_snapshots"]["default"] = whole.cas_digest
+        stored["auxiliary_provenance"]["default"] = whole.provenance_digest
+
+    _edit_plan(service, plan["plan_id"], edit)
+    if changed:
+        # A one-string digest covers both keys, so even the sibling refuses it (as before 0.13.1).
+        state["effective"]["default"] = {COMPRESSION: [spare("xiaomi", "elsewhere")]}
+        with pytest.raises(RevisionConflict):
+            service.apply(plan["plan_id"])
+        assert fake.calls == []
+    else:
+        assert service.apply(plan["plan_id"])["status"] == "applied"
+        assert fake.calls == [("default", TITLE, [spare("deepseek", "flash")])]
+
+
+def test_cas_holds_fails_closed_on_a_missing_or_malformed_digest(env):
+    service, _fake, _state = env
+    digest = service._read_auxiliary_snapshot("default", (COMPRESSION,)).cas_digest
+    assert service._auxiliary_cas_holds("default", {COMPRESSION: digest}, "cas_digest") is True
+    assert service._auxiliary_cas_holds("default", {COMPRESSION: digest}, "cas_digest", COMPRESSION) is True
+    assert service._auxiliary_cas_holds("default", {COMPRESSION: digest}, "cas_digest", TITLE) is False
+    assert service._auxiliary_cas_holds("default", {COMPRESSION: digest}, "cas_digest", required=[TITLE]) is False
+    assert service._auxiliary_cas_holds("default", {}, "cas_digest") is False
+    assert service._auxiliary_cas_holds("default", {COMPRESSION: 7}, "cas_digest") is False
+    assert service._auxiliary_cas_holds("default", None, "cas_digest") is False
+
+
+def test_an_unreadable_task_row_has_the_same_fields_as_a_readable_one(env, monkeypatch):
+    service, _fake, _state = env
+    readable = profile(service.status())["auxiliary_fallbacks"]["compression"]
+
+    def unavailable(_service, name, selected=None):
+        raise effective_config.EffectiveConfigUnavailable("not verifiable")
+
+    monkeypatch.setattr(Service, "_read_auxiliary_snapshot", unavailable)
+    row = profile(service.status())["auxiliary_fallbacks"]["compression"]
+    assert set(row) == set(readable)
+    assert row["editable"] is False and row["env_masked"] is False and row["chain"] == [] and row["actual_chain"] == []
+    assert row["primary"] == readable["primary"] == {"provider": "openai-codex", "model": "heavy0"}
+    assert row["warnings"] == ["auxiliary_fallback_unavailable"]

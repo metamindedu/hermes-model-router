@@ -53,7 +53,7 @@ The current package requires **Hermes >=0.23.1**. Three namespaced DelegationPro
 | `model-router-profiles` | allowlisted `profile` or configured default | Target profile identity and execution policy |
 | `model-router-auto` | required `execution`, then `purpose` OR explicit `profile` | Agent chooses a model route or a profile route per task |
 
-Select and explicitly save the backend in **Settings → Plugins → 모델 및 라우팅 → 모델 → 작업을 맡기는 방식** (since 0.12.0 the profile allow-list is saved separately in **전문 프로필 위임**). Registration, installation, refresh, presets and existing Heavy/Light saves do **not** select a backend or grant access to other profiles. This dedicated card has its own explicit save-target selection, initially the loaded profile only, and is not silently included in the other cards' combined save. Explicit subsets/empty selections survive source changes and refresh; new profiles are never automatically included. Each selected profile keeps its own frozen settings digest. Hidden per-target permission/fallback blocks are preserved rather than copied from the source. Existing sessions keep pinned tools until a supported rebuild boundary; compression may also rebuild them. The saved setting alone does not prove current-session activation. No forced reload or shared restart is performed.
+Select and explicitly save the backend in **Settings → Plugins → 모델 및 라우팅 → 모델 → 작업을 맡기는 방식** (since 0.12.0 the profile allow-list is saved separately in **전문 프로필 위임**). Registration, installation, refresh and existing Heavy/Light saves do **not** select a backend or grant access to other profiles. This dedicated card has its own explicit save-target selection, initially the loaded profile only, and is not silently included in the other cards' combined save. Explicit subsets/empty selections survive source changes and refresh; new profiles are never automatically included. Each selected profile keeps its own frozen settings digest. Hidden per-target permission/fallback blocks are preserved rather than copied from the source. Existing sessions keep pinned tools until a supported rebuild boundary; compression may also rebuild them. The saved setting alone does not prove current-session activation. No forced reload or shared restart is performed.
 
 For purpose routes:
 
@@ -113,6 +113,7 @@ For reproducibility, use a reviewed full commit SHA with `--ref <40-character-SH
 - Manage main, delegation, compression and title models across explicitly selected installed profiles.
 - Configure the conversation spare models under the main conversation model; they are saved by the model section's save to its targets (0.12.1; in 0.12.0 they had their own target list and save button).
 - Configure spare models for compression and title generation in their cards (Hermes' native `auxiliary.<task>.fallback_chain`, provider/model entries only, at most 5). Off writes no chain: an absent key stays absent, a stored chain becomes `[]` (0.13.0).
+- The recommended model presets (**추천 구성**: OpenAI / Non-OpenAI) are no longer on the page; edit each model in its card (0.13.1). A subagent that is already running keeps its execution kind and model tracking when the plugin is reinstalled or reloaded in the same gateway process (0.13.1, [docs/releases/v0.13.1.md](docs/releases/v0.13.1.md)).
 - The delegation model (`delegation.model`) is no longer edited on the page; change it in Hermes' settings. Stored values are never rewritten by a page save (0.13.0). Stored routed-job and default-delegation fallback values are preserved but no longer edited from the page (0.12.0).
 - Choose Heavy and Light routes independently of routing-enabled profile membership. Use Heavy for planning and independent semantic review; Light for bounded implementation and mechanical work.
 - Set independent native-child, Light and Heavy total-runtime budgets. The UI uses minutes; APIs and persistence use seconds. Native inactivity timeouts are a different policy.
@@ -124,7 +125,7 @@ For reproducibility, use a reviewed full commit SHA with `--ref <40-character-SH
 
 ![Actual Desktop Fast-inheritance notice, cropped to exclude profile names and conversations](docs/fast-inheritance.png)
 
-Enable the package's Desktop half and open **Settings → Plugins → 모델 및 라우팅** (Models and routing). Load a profile, review actual provider/model availability, select routing-enabled profiles and save only your intended scope. The model section has one target list (the loaded profile by default) for the conversation models, their spare models, the delegation method and the slot models; profile delegation and time limits have their own lists. An initially checked target list does not itself authorize writes. Start a new session for updated Python tools. Existing model presets are editable examples, not live availability recommendations.
+Enable the package's Desktop half and open **Settings → Plugins → 모델 및 라우팅** (Models and routing). Load a profile, review actual provider/model availability, select routing-enabled profiles and save only your intended scope. The model section has one target list (the loaded profile by default) for the conversation models, their spare models, the delegation method and the slot models; profile delegation and time limits have their own lists. An initially checked target list does not itself authorize writes. Start a new session for updated Python tools. The page has no recommended model presets (removed in 0.13.1); choose each model in its card.
 
 ## Historical process joins (read-only compatibility)
 
@@ -252,7 +253,7 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 ## 사용
 
 1. **설정 → 플러그인 → 모델 및 라우팅**을 엽니다. 메인 사이드바의 기존 항목은 제거되며, 명령 팔레트의 바로가기는 새 설정 경로를 엽니다.
-2. 기준 프로필의 설정을 불러오거나 **OpenAI / Non-OpenAI 프리셋**으로 네 모델 역할을 한 번에 채운 뒤, 필요하면 개별 값을 편집합니다. 프리셋 선택만으로 실제 설정은 바뀌지 않습니다.
+2. 기준 프로필의 설정을 불러온 뒤, 필요한 모델을 각 카드에서 편집합니다. v0.13.1부터 ‘추천 구성’(OpenAI / Non-OpenAI 프리셋)은 화면에 없습니다.
 3. ‘모델’ 섹션의 **적용 대상**은 처음에 불러온 프로필 하나만 선택됩니다. 대화 모델·대화 예비 모델·맡기는 방식·작업 슬롯 모델은 모두 이 목록을 따르며, 대화 예비 모델을 따로 고르는 목록은 없습니다. **모두 선택 / 모두 해제**로 일괄 조정할 수 있고, 직접 고른 목록은 기준 프로필 변경이나 상태 새로고침으로 다시 넓히지 않습니다. 저장할 내용에는 프로필마다 실제로 저장하는 항목과 그대로 두는 항목이 표시됩니다.
 4. **라우팅 세부 설정 → 고급: 라우팅 일시 중지 및 프로필 사용 여부**에서 필요할 때만 프로필별로 끕니다. **라우팅 활성 프로필**은 이 고급 설정 안의 목록입니다. **Heavy/Light 설정 적용 대상**은 편집한 경로를 복사할 프로필 목록이며, 처음에는 전체 선택됩니다. Heavy/Light 값을 수정하거나 대상 목록을 직접 선택한 뒤 저장하면 지정한 대상에만 경로를 적용합니다. 기존 값 그대로 여러 프로필에 복사하려면 **전체 선택**을 누르고 저장하세요. 단순히 활성 프로필만 바꾸거나 일반 모델만 저장하면 기존 경로는 보존됩니다.
 5. Heavy는 메인 모델, Light는 서브에이전트 모델을 따라가는 것이 기본이며 별도 지정도 가능합니다. Heavy/Light에 동일 모델을 사용해도 각 작업은 별도 컨텍스트로 실행합니다. 따라가기를 복사하면 각 대상 프로필의 모델을 사용합니다. 활성 상태·폴백·비용 허용은 Heavy/Light 복사 대상이 아닙니다. 수동 대상 선택은 불러온 프로필 변경·새로고침 후에도 유지하지만, 일회 복사 의도는 초기화됩니다.
@@ -290,19 +291,6 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 
 공통 정책 문구의 배포는 라우팅 사용 동의가 아닙니다. 실제 도구·모델·승인 설정과 라우팅 활성 여부는 프로필별 설정을 따르며, 이 문서만으로 프로필 멤버십이나 설정을 변경하지 않습니다.
 
-## 모델 프리셋
-
-기존 BAT 백업에 선언되어 있던 값을 그대로 옮긴 템플릿입니다. 최신 모델 자동 추천이 아니며, 선택 후 직접 수정할 수 있습니다. 값이 템플릿과 달라지면 사용자 지정으로 표시합니다.
-
-| 역할 | OpenAI (`openai-codex`) | Non-OpenAI |
-|---|---|---|
-| 기본 대화 | `gpt-6-astra-900k` · `medium` | `xiaomi` / `mimo-v2.6-pro` · `max` |
-| 작업 위임 | `gpt-6-luna-900k` · `max` | `deepseek` / `deepseek-flash` · `max` |
-| 대화 압축 | `gpt-6-luna-900k` · `medium` | `deepseek` / `deepseek-flash` · `medium` |
-| 제목 생성 | `gpt-6-luna` · `none` | `deepseek` / `deepseek-flash` · `none` |
-
-프리셋은 **네 모델 역할의 편집값만** 채웁니다. 모델 적용 대상, 라우팅 활성 목록, 별도로 지정한 Heavy/Light 경로와 대체 모델·비용 허용 설정은 바꾸지 않습니다. 따라서 별도 라우팅 모델을 지정해 둔 경우 고급 라우팅 설정도 확인하세요. 제공자 인증은 기존 Hermes 설정을 사용하며 프리셋에 자격 증명은 포함하지 않습니다.
-
 ## 세션 Fast 모드 상속
 
 메인 세션에서 선택한 Fast 모드는 **기본 `delegate_task` 자식과 Heavy/Light `coding_route` 자식**이 새 작업을 시작할 때 상속합니다. 프로필 기본값을 다시 읽어 부모의 세션 선택을 덮어쓰지 않으며, 설정 화면이나 설치만으로 Fast를 켜지 않습니다.
@@ -322,7 +310,7 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 
 > 아래 세 범위 설명과 카드 동작은 v0.11.x까지의 화면 기준입니다. v0.12.0 이후 화면에서 편집할 수 있는 것은 ‘일반 대화’(대화 예비 모델)뿐이며, 나머지 두 범위는 저장된 값이 그대로 유지되고 화면에서 바꾸거나 저장하지 않습니다.
 
-일반 모델 프리셋과 폴백 설정은 독립적입니다. 폴백은 주 모델을 사용할 수 없을 때 쓰는 예비 모델입니다. **메인 세션의 일반 대화**, **플러그인의 Heavy/Light 작업·검증 라우팅**, **Hermes 네이티브 서브 에이전트(`delegate_task`)**를 각각 나누어 설정합니다. 모델·세 폴백의 적용 대상은 화면을 처음 열 때 모든 프로필이 선택됩니다(폴백의 읽기 전용/지원되지 않는 프로필 제외). 사용자가 부분 선택하거나 전체 해제한 목록은 기준 프로필 변경이나 새로고침에서 확대하지 않습니다. 각 대상 목록은 서로 독립적입니다. 체크만으로 설정이 저장되거나 폴백이 복사되지는 않습니다. **불러온 프로필만**은 위에서 설정을 불러온 프로필 하나만 남기는 선택 단축 버튼이며, 저장·복원 버튼이 아닙니다. **라우팅 활성 프로필**은 적용 대상이 아니라 기능 사용 상태이므로 기존 활성화 설정을 그대로 표시합니다.
+일반 모델 설정과 폴백 설정은 독립적입니다. 폴백은 주 모델을 사용할 수 없을 때 쓰는 예비 모델입니다. **메인 세션의 일반 대화**, **플러그인의 Heavy/Light 작업·검증 라우팅**, **Hermes 네이티브 서브 에이전트(`delegate_task`)**를 각각 나누어 설정합니다. 모델·세 폴백의 적용 대상은 화면을 처음 열 때 모든 프로필이 선택됩니다(폴백의 읽기 전용/지원되지 않는 프로필 제외). 사용자가 부분 선택하거나 전체 해제한 목록은 기준 프로필 변경이나 새로고침에서 확대하지 않습니다. 각 대상 목록은 서로 독립적입니다. 체크만으로 설정이 저장되거나 폴백이 복사되지는 않습니다. **불러온 프로필만**은 위에서 설정을 불러온 프로필 하나만 남기는 선택 단축 버튼이며, 저장·복원 버튼이 아닙니다. **라우팅 활성 프로필**은 적용 대상이 아니라 기능 사용 상태이므로 기존 활성화 설정을 그대로 표시합니다.
 
 | 범위 | 동작 | 편집할 수 있는 항목 |
 |---|---|---|
@@ -333,7 +321,7 @@ hermes --profile default plugins install metamindedu/hermes-model-router
 - **일반 대화:** `fallback_providers`와 이전 `fallback_model`을 함께 읽습니다. 중지할 때는 두 키를 모두 비워 이전 설정이 몰래 살아남지 않도록 합니다. 전환 조건·재시도는 실제 Hermes 정책을 읽기 전용으로 설명하며, 지원되지 않는 사용량 초과 전용 모드나 전체 재시도 횟수 보장은 제공하지 않습니다. 추론 강도는 기존 Hermes의 모델별 override/프로필 설정을 따릅니다. 일부 상속형 하위 작업·자동 보조 호출에도 이 체인이 영향을 줄 수 있습니다.
 - **작업·검증 라우팅:** 자식 main-agent의 native fallback chain은 명시적으로 비워 일반 대화의 체인과 격리합니다. 구독 소진이라는 구조화된 오류 증거, 완전한 실행 관측·종료, 남은 시간, 해당 경로의 승인이 모두 있어야 대체 실행합니다. 도구 호출이나 부분 답변이 이미 관측됐거나 timeout/중단/증거 누락이 있으면 자동으로 처음부터 다시 실행하지 않습니다. stdout에 소진 문구가 등장한 것만으로 대체 모델을 호출하지 않습니다.
 - **위임 작업:** `delegation.fallback_providers`를 별도 관리합니다. **기본 규칙**(null/미설정)은 제공자·모델·endpoint를 고정하지 않은 자식만 부모 체인을 상속합니다. 고정된 자식도 전환하려면 **위임 전용 목록**을 명시하세요. **사용 안 함**은 `[]`입니다. 작업별 모델 지정에 따라 실제 상속 여부가 달라질 수 있으며, 이 기능은 플러그인 라우팅의 새 작업 재실행과 다릅니다.
-- **비용 고지:** 예비 모델은 제공자 요금제에 따라 추가 비용이 발생할 수 있습니다. 별도 동의 체크박스 대신 각 카드에서 안내합니다. 작업·검증 라우팅은 조건을 만족할 때 새 작업을 최대 한 번 시도한다는 점도 고지합니다. 사용자가 저장 버튼을 누른 정확한 대상·모델만 서버 검증 후 허용 정보와 함께 저장합니다. 설치·프리셋 선택·일반 모델만 저장하는 동작으로 폴백을 켜거나 새로운 허용 정보를 만들지 않습니다.
+- **비용 고지:** 예비 모델은 제공자 요금제에 따라 추가 비용이 발생할 수 있습니다. 별도 동의 체크박스 대신 각 카드에서 안내합니다. 작업·검증 라우팅은 조건을 만족할 때 새 작업을 최대 한 번 시도한다는 점도 고지합니다. 사용자가 저장 버튼을 누른 정확한 대상·모델만 서버 검증 후 허용 정보와 함께 저장합니다. 설치·일반 모델만 저장하는 동작으로 폴백을 켜거나 새로운 허용 정보를 만들지 않습니다.
 - **실시간 참고와 저장:** 변경 요약은 편집 중 화면에서 계산하는 참고사항이며, 편집만으로 서버 계획이나 쓰기를 실행하지 않습니다. **전체 설정 저장**은 모델·라우팅과 **수정한 폴백 및 명시적인 복사 대상**을 함께 저장합니다. 각 카드의 저장 버튼은 해당 폴백만 저장합니다. 내부 서버 검증은 유지하지만 별도 저장 전 절차로 노출하지 않습니다. 수정하지 않은 폴백은 보존하고, 수정한 폴백의 대상이 없으면 저장을 막습니다. 고급 옵션·관리자 고정 설정은 읽기 전용으로 보존합니다. 저장 응답이 끊겨 결과를 모르면 실패로 단정하거나 자동 재저장하지 않고 실제 상태 확인을 요구합니다.
 - **메인 복귀 의미:** 일반 대화는 다음 턴에 Hermes가 사용 제한·쿨다운을 확인하여 기본 모델 재시도를 결정합니다. 런타임 복원 알림은 요청 경로를 복원했다는 뜻이며 정상 응답을 확인했다는 뜻은 아닙니다. 설정 화면의 예비 경로 목록도 현재 대화의 실측 모델이 아닙니다. 플러그인은 native 복귀/backoff를 재구현하거나 복귀 버튼·상시 감시를 추가하지 않습니다. 라우팅은 폴백 시도 중 기본 경로로 전환하지 않으며 다음 새 작업은 기본 경로에서 시작합니다.
 - **반영 시점:** 일반 대화의 체인은 다음 턴에 다시 읽힐 수 있지만 진행 중 작업을 중단하거나 현재 모델을 즉시 원복하는 비상 정지 기능이 아닙니다. 플러그인 라우팅 작업은 시작 시 승인된 정책을 스냅샷으로 고정합니다.

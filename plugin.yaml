@@ -1,5 +1,5 @@
 name: model-router
-version: 0.13.0
+version: 0.13.1
 requires_hermes: ">=0.23.1"
 kind: standalone
 description: "Native delegation visibility, opt-in Gateway-owned profile jobs, operator-separated permissions, and profile model controls"

@@ -85,27 +85,145 @@ def _set_status(row, status):
         row['status'] = status
 
 
+# Plugin reload (``hermes plugins install --force``, ``reload-plugins``) unloads every hook, evicts the
+# ``hermes_plugins.<slug>.*`` modules and calls register() again inside the SAME gateway process while
+# native children keep running. The roster state therefore lives in a process-global holder under a
+# stable, plugin-owned module name that the loader never evicts, keyed by the profile home. The newest
+# registration owns it; an earlier instance becomes inert so a hook it still holds can never count
+# twice. Only plain ids/counters/model ids are kept (never task or result text) and nothing is
+# written to disk. A state of another schema, or one that fails validation, is discarded: rows then
+# read as unknown rather than being attributed to the wrong run.
+_HOLDER_MODULE = 'hermes_model_router_runtime_state'
+_STATE_SCHEMA = 'execution-roster/1'
+_HOLDER_LOCK = threading.Lock()
+_ROW_KEYS = frozenset({'id', 'execution_mode', 'requested', 'observed', 'conversation_id', 'parent_session_id',
+                       'tool_call_id', 'task_index', 'subagent_id', 'delegation_id', 'async_unit_id',
+                       'native_call_delegation_id', 'status', 'updated_at'})
+_CHILD_KEYS = frozenset({'parent', 'session', 'short', 'child_session_id', 'started_at', 'activity_at', 'status'})
+_PENDING_KEYS = frozenset({'sid', 'parent', 'original', 'child_session'})
+_STATUSES = frozenset({'requested', 'unknown', 'dispatched', 'queued', 'running'}) | _TERMINAL
+
+
+def _empty_state():
+    return {'rows': {}, 'children': {}, 'aliases': {}, 'continuing': {}}
+
+
+def _row_key(key):
+    return (isinstance(key, tuple) and len(key) == 4 and all(isinstance(k, str) for k in key[:3])
+            and type(key[3]) is int)
+
+
+def _valid_state(state):
+    try:
+        if not isinstance(state, dict) or set(state) != {'rows', 'children', 'aliases', 'continuing'}:
+            return False
+        rows, children, aliases, continuing = (state[k] for k in ('rows', 'children', 'aliases', 'continuing'))
+        if not all(isinstance(x, dict) for x in (rows, children, aliases, continuing)):
+            return False
+        if len(rows) > 512 or len(children) > 512 or len(aliases) > 512 or len(continuing) > 128:
+            return False
+        for key, row in rows.items():
+            if (not _row_key(key) or not isinstance(row, dict) or not _ROW_KEYS <= set(row)
+                    or row['status'] not in _STATUSES or not isinstance(row['requested'], dict)
+                    or row['requested'].get('kind') not in ('model', 'profile', 'unknown')
+                    or not isinstance(row['observed'], dict) or 'evidence' not in row['observed']):
+                return False
+        for key, child in children.items():
+            if (not isinstance(key, str) or not isinstance(child, dict) or not _CHILD_KEYS <= set(child)
+                    or child['status'] not in _STATUSES):
+                return False
+            for field in ('tool_count', 'api_call_count'):
+                if child.get(field) is not None and type(child[field]) is not int:
+                    return False
+            tokens = child.get('tokens')
+            if tokens is not None and (not isinstance(tokens, dict) or set(tokens) != set(_TOKEN_BUCKETS)
+                                       or any(type(v) is not int for v in tokens.values())):
+                return False
+            if not isinstance(child.get('models', []), list):
+                return False
+        if any(not isinstance(k, str) or not isinstance(v, str) for k, v in aliases.items()):
+            return False
+        return all(_row_key(k) and isinstance(p, dict) and set(p) == _PENDING_KEYS for k, p in continuing.items())
+    except Exception:
+        return False
+
+
+def _holder():
+    import sys
+    import types
+    with _HOLDER_LOCK:
+        # _HOLDER_LOCK is recreated by every reload, so first creation must itself be atomic:
+        # setdefault keeps whichever module/dict/lock a concurrent reload published first.
+        candidate = types.ModuleType(_HOLDER_MODULE, 'Hermes Model Router in-process state (survives plugin reload).')
+        module = sys.modules.setdefault(_HOLDER_MODULE, candidate)
+        if not isinstance(module, types.ModuleType):
+            sys.modules[_HOLDER_MODULE] = module = candidate
+        # Another plugin version may share this module: each entry carries its schema and is re-validated.
+        if not isinstance(module.__dict__.setdefault('execution_roster', {}), dict):
+            module.__dict__['execution_roster'] = {}
+        if not isinstance(module.__dict__.setdefault('lock', threading.RLock()), type(threading.RLock())):
+            module.__dict__['lock'] = threading.RLock()
+        return module
+
+
+def _adopt_state(home, take_over):
+    """Bind a new roster to the shared state of ``home``; ``take_over(entry)`` constructs it.
+
+    Every earlier instance of this home is retired (inert) once the new one owns the entry."""
+    module = _holder()
+    key = os.path.normcase(str(Path(home).resolve(strict=False)))
+    with module.lock:
+        entry = module.execution_roster.get(key)
+        compatible = (isinstance(entry, dict) and entry.get('schema') == _STATE_SCHEMA
+                      and isinstance(entry.get('lock'), type(threading.RLock())))
+        if compatible:
+            # Wait for an in-flight hook of the previous instance before checking the state it mutates;
+            # the new owner is installed while that lock is still held.
+            with entry['lock']:
+                if _valid_state(entry.get('state')):
+                    roster = take_over(entry)
+                    entry['owner'] = roster
+                    return roster
+        if isinstance(entry, dict):
+            entry['owner'] = None  # retire the previous instance before its state is dropped
+        entry = {'schema': _STATE_SCHEMA, 'lock': threading.RLock(), 'state': _empty_state()}
+        roster = take_over(entry)
+        entry['owner'] = roster
+        module.execution_roster[key] = entry
+        return roster
+
+
 class ExecutionRoster:
-    def __init__(self, ctx, home):
+    def __init__(self, ctx, home, *, shared=None):
         from hermes_constants import profile_name_for_home
         self.ctx = ctx
         self.home = Path(home).resolve(strict=False)
         self.origin_profile = _safe(profile_name_for_home(self.home))
-        self.rows = {}
-        self.children = {}
-        self.aliases = {}
+        # ``shared`` is the process-global entry (register_execution_roster); a bare construction keeps
+        # private state and is always live.
+        self._shared = shared
+        state = shared['state'] if shared is not None else _empty_state()
+        self.rows = state['rows']
+        self.children = state['children']
+        self.aliases = state['aliases']
         # action='continue' rebuilds a finished child under the same subagent_id AND session id.
         # new row key -> {sid, parent, original, child_session}, until its subagent_start or a refusal.
-        self.continuing = {}
-        self.lock = threading.RLock()
+        self.continuing = state['continuing']
+        self.lock = shared['lock'] if shared is not None else threading.RLock()
         self.rpc_supported = False
         # Private native DB compatibility is not admitted by normal registration.
         # Disposable prototype fixtures may inject a factory explicitly; there
         # is no RPC/config switch or implicit fallback.
         self._metadata_factory: Callable[[Path], Any] | None = None
 
+    def _live(self):
+        # A reload registers a new instance on the same shared state; this one then stays inert.
+        return self._shared is None or self._shared.get('owner') is self
+
     def _owner(self):
         from hermes_constants import get_hermes_home
+        if not self._live():
+            return False
         return os.path.normcase(str(Path(get_hermes_home()).resolve(strict=False))) == os.path.normcase(str(self.home))
 
     def _event(self, root, session):
@@ -724,7 +842,7 @@ class ExecutionRoster:
 
 
 def register_execution_roster(ctx, home):
-    roster = ExecutionRoster(ctx, home)
+    roster = _adopt_state(home, lambda entry: ExecutionRoster(ctx, home, shared=entry))
     ctx.register_hook('pre_tool_call', roster.pre)
     ctx.register_hook('post_tool_call', roster.post)
     ctx.register_hook('subagent_start', roster.start)

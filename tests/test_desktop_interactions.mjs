@@ -276,14 +276,14 @@ for (const phase of ['routes', 'initial-status', 'final-status']) {
   })
 }
 
-test('preset click fills exact BAT models in draft only and does not alter custom routes', async () => {
+test('model edits stay in the draft until saved and do not alter custom routes; no preset cards remain', async () => {
   const h = harness()
-  h.click('preset-non-openai')
-  assert.equal(h.byId('model-main-model').props.value, 'mimo-v2.6-pro')
-  assert.equal(h.byId('model-main-provider').props.value, 'xiaomi')
-  assert.equal(h.selectValue('model-main-reasoning'), 'max')
-  assert.equal(h.byId('model-title-model').props.value, 'deepseek-flash')
-  assert.equal(h.selectValue('model-title-reasoning'), 'none')
+  assert.equal([...walk(h.tree)].some(node => String(node.props?.id || '').startsWith('preset-')), false)
+  assert.equal(text(h.tree).includes('추천 구성'), false)
+  assert.equal(text(h.tree).includes('사용자 지정 조합'), false)
+  h.input('model-main-model', 'edited-main-model')
+  h.input('model-main-provider', 'edited-provider')
+  assert.equal(h.byId('model-main-model').props.value, 'edited-main-model')
   assert.equal(h.calls.length, 0)
   h.click('global-save'); await h.flush()
   const payload = h.calls.find(c => c.operation === 'preview').body
@@ -293,10 +293,8 @@ test('preset click fills exact BAT models in draft only and does not alter custo
   assert.deepEqual(payload.model_targets, ['claire'])
   assert.deepEqual(payload.routing_targets, [])
   assert.equal(Object.hasOwn(payload.models, 'delegation'), false, 'the page never sends the delegation model')
-  assert.equal(payload.models.compression.reasoning, 'medium')
-  h.click('preset-openai')
-  for (const [role, fields] of Object.entries(models)) if (role !== 'delegation') for (const [field, value] of Object.entries(fields))
-    assert.equal(field === 'reasoning' ? h.selectValue(`model-${role}-reasoning`) : h.byId(`model-${role}-${field}`).props.value, value)
+  assert.deepEqual(payload.models.main, { ...models.main, provider: 'edited-provider', model: 'edited-main-model' })
+  assert.deepEqual(payload.models.compression, models.compression)
   assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
 })
 
@@ -319,14 +317,14 @@ test('none and explicit subset survive source changes and refresh; a removed han
 
 test('single save validates then applies once without a preview or confirmation control', async () => {
   const h = harness()
-  h.click('preset-non-openai')
+  h.input('model-main-model', 'edited-main-model')
   assert.equal(h.calls.length, 0)
   assert.throws(() => h.byId('confirm-preview'))
   h.click('global-save'); await h.flush()
   assert.deepEqual(h.calls.map(c => c.operation), ['preview', 'apply'])
   assert.deepEqual(h.calls[1].body, { plan_id: 'test-plan' })
   // A confirmed save reloads the saved state by itself; editing continues without a manual refresh.
-  assert.equal(h.byId('preset-non-openai').props.disabled, false)
+  assert.equal(h.byId('model-main-model').props.disabled, false)
   assert.throws(() => h.button('실제 상태 확인 후 편집 재개'))
 })
 
@@ -336,7 +334,6 @@ test('save locks editing and duplicate clicks even while validation is pending',
   const click = h.byId('global-save').props.onClick
   click(); h.render(); click(); h.render()
   assert.equal(h.calls.length, 1)
-  assert.equal(h.byId('preset-non-openai').props.disabled, true)
   assert.equal(h.byId('model-main-model').props.disabled, true)
   assert.equal(h.button('상태 새로고침').props.disabled, true)
   finish({ plan_id: 'only-once', changes: [] }); await h.flush()
@@ -348,7 +345,7 @@ test('validation rejection unlocks safely and never applies', async () => {
   h.setResponder(() => { throw new Error('validation timeout') })
   h.click('global-save'); await h.flush()
   assert.equal(h.calls.filter(c => c.operation === 'apply').length, 0)
-  assert.equal(h.byId('preset-non-openai').props.disabled, false)
+  assert.equal(h.byId('model-main-model').props.disabled, false)
   assert.equal(h.byId('global-save').props.disabled, false)
 })
 
@@ -361,7 +358,7 @@ test('scope change during validation cancels before writes and old failure canno
   h.setResponder(op => op === 'preview' ? { plan_id: 'new-plan', changes: [] } : new Promise(r => { newResolve = r }))
   h.click('global-save'); await h.flush()
   oldReject(new Error('old validation timed out')); await h.flush()
-  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  assert.equal(h.byId('model-main-model').props.disabled, true)
   newResolve({ status: 'applied' }); await h.flush()
   assert.deepEqual(h.calls.filter(c => c.operation === 'apply').map(c => c.body), [{ plan_id: 'new-plan' }])
   assert.ok(!JSON.stringify(h.data()).includes('old validation'))
@@ -392,12 +389,12 @@ test('scope change during apply locks until original scope is reloaded', async (
   assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
   h.state.connectionId.value = 'other-connection'; h.render()
   finish({ status: 'applied' }); await h.flush()
-  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  assert.equal(h.byId('model-main-model').props.disabled, true)
   h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
-  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  assert.equal(h.byId('model-main-model').props.disabled, true)
   h.state.connectionId.value = 'local'; h.render()
   h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
-  assert.equal(h.byId('preset-non-openai').props.disabled, false)
+  assert.equal(h.byId('model-main-model').props.disabled, false)
 })
 
 test('refresh failure with cached data does not unlock an ambiguous apply', async () => {
@@ -409,7 +406,7 @@ test('refresh failure with cached data does not unlock an ambiguous apply', asyn
   h.click('global-save'); await h.flush()
   h.setRefetcher(async () => ({ data: h.data(), error: new Error('refresh failed') }))
   h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
-  assert.equal(h.byId('preset-non-openai').props.disabled, true)
+  assert.equal(h.byId('model-main-model').props.disabled, true)
 })
 
 test('fresh connection/profile scope starts with its loaded profile only, without leaking previous choices', () => {

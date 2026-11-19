@@ -65,11 +65,6 @@ const styles = {
   choiceCopy: { display: 'flex', flexDirection: 'column', gap: '0.15rem', minWidth: 0, overflowWrap: 'anywhere' },
   profileList: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 13rem), 1fr))', gap: '0.45rem 1rem' },
   profileChoice: { minWidth: 0, display: 'flex', alignItems: 'center', gap: '0.6rem', paddingBlock: '0.3rem' },
-  presetGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 19rem), 1fr))', gap: '0.7rem' },
-  presetCard: { boxSizing: 'border-box', width: '100%', minWidth: 0, padding: '0.9rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.75rem', background: 'transparent', color: 'var(--ui-text-primary)', font: 'inherit', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '0.55rem' },
-  presetSelected: { border: '2px solid var(--ui-accent)', padding: 'calc(0.9rem - 1px)' },
-  presetRoleList: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.25rem 0.7rem' },
-  presetRole: { color: 'var(--ui-text-secondary)', fontSize: '0.75rem', lineHeight: 1.45, overflowWrap: 'anywhere' },
   selectionToolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.6rem', flexWrap: 'wrap' },
   cardSection: { border: '1px solid var(--ui-stroke-tertiary)', borderRadius: '0.9rem', padding: '1rem' },
   notice: { padding: '0.75rem 0', color: 'var(--ui-text-secondary)', lineHeight: 1.55 },
@@ -105,31 +100,6 @@ function freezeDeep(value) {
   return value
 }
 
-export const MODEL_PRESETS = freezeDeep([
-  {
-    id: 'openai',
-    name: 'OpenAI',
-    description: 'OpenAI 계열 모델 조합',
-    models: {
-      main: { provider: 'openai-codex', model: 'gpt-6-astra-900k', reasoning: 'medium' },
-      delegation: { provider: 'openai-codex', model: 'gpt-6-luna-900k', reasoning: 'max' },
-      compression: { provider: 'openai-codex', model: 'gpt-6-luna-900k', reasoning: 'medium' },
-      title: { provider: 'openai-codex', model: 'gpt-6-luna', reasoning: 'none' }
-    }
-  },
-  {
-    id: 'non-openai',
-    name: 'Non-OpenAI',
-    description: '비-OpenAI 모델 조합',
-    models: {
-      main: { provider: 'xiaomi', model: 'mimo-v2.6-pro', reasoning: 'max' },
-      delegation: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'max' },
-      compression: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'medium' },
-      title: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'none' }
-    }
-  }
-])
-
 export function deepClone(value) {
   return JSON.parse(JSON.stringify(value))
 }
@@ -150,18 +120,6 @@ export const PAGE_MODEL_ROLES = Object.freeze(['main', 'compression', 'title'])
 export function pageModels(models) {
   const source = models && typeof models === 'object' ? models : {}
   return Object.fromEntries(PAGE_MODEL_ROLES.filter(role => Object.prototype.hasOwnProperty.call(source, role)).map(role => [role, deepClone(source[role])]))
-}
-
-export function selectedModelPreset(models) {
-  return MODEL_PRESETS.find(preset => sameValue(pageModels(models), pageModels(preset.models)))?.id || 'custom'
-}
-
-// A preset fills the three roles this page edits; the delegation role keeps its loaded value.
-export function applyModelPresetDraft(draft, presetId) {
-  const preset = MODEL_PRESETS.find(item => item.id === presetId)
-  if (!preset || !draft || typeof draft !== 'object' || !draft.routing) return null
-  const next = deepClone(draft)
-  return { ...next, models: { ...(next.models || {}), ...pageModels(preset.models) } }
 }
 
 function uniqueProfileNames(names) {
@@ -3765,8 +3723,6 @@ function RouterPage({ ctx: pluginContext }) {
     setRoutingTargets(current => reconcileModelTargets(current, profileNames))
   }
 
-  const applyPreset = presetId => updateDraft(current => applyModelPresetDraft(current, presetId))
-
   const setSectionTargets = next => {
     if (renderGeneration !== generationRef.current || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     invalidatePlan()
@@ -4415,34 +4371,6 @@ function RouterPage({ ctx: pluginContext }) {
   // The menu lists the loaded profile's connected services; it never follows
   // the save targets, which are chosen separately below.
   const modelCatalog = selectedProfile && activeProfile ? { profile: selectedProfile, activeProfile, connectionId: connectionId || null } : null
-  const currentPreset = draft ? selectedModelPreset(draft.models) : 'custom'
-  const modelPresetCards = draft ? jsxs('div', {
-    style: { display: 'flex', flexDirection: 'column', gap: '0.7rem' },
-    children: [
-      jsx('p', { style: styles.hint, children: '추천 구성을 고르면 아래 기본 대화·대화 압축·제목 생성 모델만 바뀝니다. 저장을 눌러야 적용되며, 예비 모델이나 시간 제한은 바꾸지 않습니다.' }),
-      jsx('div', {
-        style: styles.presetGrid,
-        children: MODEL_PRESETS.map(preset => jsxs('button', {
-          id: `preset-${preset.id}`,
-          type: 'button',
-          'aria-pressed': currentPreset === preset.id,
-          disabled,
-          onClick: () => applyPreset(preset.id),
-          style: currentPreset === preset.id ? { ...styles.presetCard, ...styles.presetSelected } : styles.presetCard,
-          children: [
-            jsxs('div', { style: styles.statusLine, children: [jsx('strong', { children: preset.name }), jsx(Badge, { variant: 'muted', children: currentPreset === preset.id ? '현재 일치' : '초안에 채우기' })] }),
-            jsx('span', { style: styles.hint, children: preset.description }),
-            jsx('div', { style: styles.presetRoleList, children: CONVERSATION_ROLES.map(role => {
-              const route = preset.models[role.id]
-              return jsx('span', { style: styles.presetRole, children: `${role.label}: ${route.provider}/${route.model} · ${route.reasoning}` }, role.id)
-            }) })
-          ]
-        }, preset.id))
-      }),
-      jsx('p', { role: 'status', 'aria-live': 'polite', style: styles.hint, children: currentPreset === 'custom' ? '현재 모델은 사용자 지정 조합입니다.' : `현재 세 모델이 ${MODEL_PRESETS.find(item => item.id === currentPreset)?.name} 프리셋과 일치합니다.` })
-    ]
-  }) : null
-
   const chainText = chain => Array.isArray(chain) && chain.length
     ? chain.map(item => `${item?.provider || '—'}/${item?.model || '—'}`).join(' → ')
     : '없음'
@@ -4524,7 +4452,6 @@ function RouterPage({ ctx: pluginContext }) {
   const modelFields = draft ? jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' },
     children: [
-      modelPresetCards,
       modelCatalog && nativeModelMenu() ? jsx('p', { id: 'model-catalog-note', role: 'note', style: styles.hint, children: `각 모델을 누르면 불러온 프로필(${selectedProfile})에 연결된 서비스의 모델 목록에서 검색해 고를 수 있습니다. 다른 프로필에도 함께 저장한다면 그 프로필에 같은 서비스가 연결되어 있는지 확인하세요.` }) : null,
       jsx('p', { id: 'fast-inheritance-note', role: 'note', style: styles.hint, children: '메인 세션에서 선택한 Fast 모드는 작업 슬롯으로 맡기는 새 작업이 시작할 때 상속합니다. 지원하지 않는 모델·제공자에는 Fast 옵션을 보내지 않으며, auto/cold의 남은 시간을 연장하지 않습니다. Fast 요청에는 API 추가 요금이나 Codex 크레딧 사용 증가가 있을 수 있습니다. 요청한 모드와 제공자가 실제 처리한 등급은 다를 수 있으며, 업데이트된 실행 기능은 새 세션에서 확인하세요.' }),
       jsx('h3', { style: styles.groupTitle, children: '대화' }),
@@ -5970,7 +5897,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.13.0',
+  version: '0.13.1',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
