@@ -46,8 +46,18 @@ def rows(r, sid='root'):
     return r.list({'session_id': sid}, session_id=sid)['rows']
 
 
-def test_normal_registration_never_opens_private_native_metadata(env, monkeypatch):
+def test_registration_bans_unadmitted_adapter_and_admitted_read_is_readonly(env, monkeypatch):
+    """Two separate contracts (redefined for the v0.13.2 adopted exception):
+
+    1. The unadmitted research adapter ``execution_metadata`` is NEVER imported by
+       normal registration, and the dormant ``_metadata_factory`` seam stays None.
+    2. The ADMITTED bound-row read (``delegation_reports``) does open this origin's
+       state.db read-only for a hook-bound async row — but it never writes the body
+       and never creates sidecars on a non-database file (fail closed). The old
+       "never opens private native metadata" name was retired with the adoption.
+    """
     import builtins
+    from model_router import delegation_reports
     r, _, home = env
     opened = []
     original_import = builtins.__import__
@@ -59,6 +69,12 @@ def test_normal_registration_never_opens_private_native_metadata(env, monkeypatc
             raise AssertionError('The unadmitted metadata adapter must not be imported')
         return original_import(name, globals, locals, fromlist, level)
     monkeypatch.setattr(builtins, '__import__', deny_private_metadata)
+    admitted_opens = []
+    original_enter = delegation_reports.DelegationRouteReports.__enter__
+    def spy_enter(self):
+        admitted_opens.append(self.home)
+        return original_enter(self)
+    monkeypatch.setattr(delegation_reports.DelegationRouteReports, '__enter__', spy_enter)
     (home / 'state.db').write_bytes(b'PRIVATE_UNREADABLE_SENTINEL')
     args = {'tasks': [{'execution': 'profile', 'profile': 'target'}]}
     pre(r, args)
@@ -66,7 +82,8 @@ def test_normal_registration_never_opens_private_native_metadata(env, monkeypatc
     post(r, {'status': 'dispatched', 'delegation_id': 'native-call', 'subagent_ids': ['sa-native']}, args)
     r.stop(parent_session_id='segment-1', child_session_id='rotated-child', child_status='completed')
     assert r._metadata_factory is None and rows(r)[0]['status'] == 'queued'
-    assert not opened
+    assert not opened  # contract 1: unadmitted adapter never imported
+    assert admitted_opens  # contract 2: the admitted reader IS used for the bound row
     assert (home / 'state.db').read_bytes() == b'PRIVATE_UNREADABLE_SENTINEL'
     assert not (home / 'state.db-shm').exists() and not (home / 'state.db-wal').exists()
     r.stop(parent_session_id='segment-1', child_session_id='original-child', child_status='completed')
@@ -777,3 +794,101 @@ def test_reload_state_is_per_home(tmp_path, monkeypatch):
     assert rows(other) == [] and other.children == {}
     current['home'] = homes[0]
     assert len(rows(first)) == 1  # registering another profile does not retire this one
+
+
+# --- whole-call refusal settles requested rows (no phantom active row) -----
+
+def test_whole_call_refusal_settles_requested_rows(env):
+    r, _, _ = env
+    args = {'tasks': [{'execution': 'model', 'purpose': 'semantic-final'}]}
+    pre(r, args)
+    assert rows(r)[0]['status'] == 'requested'
+    post(r, {'error': 'Task 0: Automatic route refused: choose model + purpose OR profile + explicit target, never both.'}, args)
+    row = rows(r)[0]
+    assert row['status'] == 'error'
+    assert row.get('delegation_id') is None and row.get('subagent_id') is None
+    from model_router.execution_roster import _TERMINAL
+    assert row['status'] in _TERMINAL  # terminal, so the strip never counts it as 실행 중
+
+
+def test_whole_call_refusal_settles_every_requested_row(env):
+    r, _, _ = env
+    args = {'tasks': [{'purpose': 'implementation'}, {'purpose': 'plan'}, {'execution': 'profile', 'profile': 'writer'}]}
+    pre(r, args)
+    assert len(rows(r)) == 3
+    post(r, {'error': 'delegation backend failed'}, args)
+    assert [row['status'] for row in rows(r)] == ['error', 'error', 'error']
+
+
+def test_late_top_level_error_never_overwrites_a_dispatched_row(env):
+    r, _, _ = env
+    args = {'tasks': [{'execution': 'profile', 'profile': 'claire'}]}
+    pre(r, args)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='sa-0-x')
+    post(r, {'status': 'dispatched', 'delegation_id': 'deleg-x', 'subagent_ids': ['sa-0-x']}, args)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=1000)
+    assert rows(r)[0]['status'] == 'completed'
+    post(r, {'error': 'late unrelated error'}, args)  # same call id, after completion
+    assert rows(r)[0]['status'] == 'completed'
+
+
+def test_error_with_results_still_processes_inline_evidence(env):
+    r, _, _ = env
+    args = {'tasks': [{'execution': 'profile', 'profile': 'claire'}]}
+    pre(r, args)
+    post(r, {'error': 'partial', 'results': [{'task_index': 0, 'status': 'completed',
+        'route': {'backend': 'model-router-auto', 'label': 'profile:claire', 'model': 'm', 'provider': 'p'}}]}, args)
+    row = rows(r)[0]
+    assert row['observed']['model'] == 'm' and row['status'] == 'completed'
+
+
+def test_error_with_refused_list_uses_per_task_apply(env):
+    r, _, _ = env
+    args = {'tasks': [{'purpose': 'implementation'}, {'purpose': 'plan'}]}
+    pre(r, args)
+    post(r, {'error': 'batch', 'refused': [{'task_index': 0, 'status': 'refused', 'error': 'no'}]}, args)
+    by_index = {row['task_index']: row for row in rows(r)}
+    assert by_index[0]['status'] == 'error'
+    assert by_index[1]['status'] == 'requested'
+
+
+# --- terminal hook status settles cancel/timeout/abandon phantom rows (R1) --
+
+def test_terminal_hook_status_settles_unbound_requested_rows(env):
+    r, _, _ = env
+    args = {'tasks': [{'execution': 'model', 'purpose': 'implementation'}]}
+    for status, expected in [('timeout', 'timeout'), ('cancelled', 'cancelled'), ('error', 'error'), ('interrupted', 'interrupted')]:
+        pre(r, args, tool_call_id=f'call-{status}')
+        # Core sends a plain-text result (no JSON payload) plus a terminal status kwarg.
+        post(r, f"Error executing tool 'delegate_task': {status}", args, tool_call_id=f'call-{status}', status=status, error_type='tool_x')
+        row = [x for x in rows(r) if x['task_index'] == 0][-1]
+        assert row['status'] == expected
+        assert row.get('delegation_id') is None and row.get('subagent_id') is None
+
+
+def test_terminal_hook_status_never_overwrites_a_dispatched_row(env):
+    r, _, _ = env
+    args = {'tasks': [{'execution': 'profile', 'profile': 'claire'}]}
+    pre(r, args)
+    r.start(parent_session_id='segment-1', child_session_id='child', child_subagent_id='sa-0-x')
+    post(r, {'status': 'dispatched', 'delegation_id': 'deleg-x', 'subagent_ids': ['sa-0-x']}, args)
+    r.stop(parent_session_id='segment-1', child_session_id='child', child_status='completed', duration_ms=1000)
+    post(r, 'late plain-text error', args, status='error', error_type='tool_x')
+    assert rows(r)[0]['status'] == 'completed'
+
+
+def test_completed_hook_status_does_not_force_settle(env):
+    r, _, _ = env
+    args = {'tasks': [{'purpose': 'implementation'}]}
+    pre(r, args)
+    post(r, 'plain text with no payload', args, status='completed')
+    assert rows(r)[0]['status'] == 'requested'  # completed is not a failure; no forced error
+
+
+def test_dispatched_payload_with_completed_hook_binds_normally(env):
+    r, _, _ = env
+    args = {'tasks': [{'execution': 'profile', 'profile': 'claire'}]}
+    pre(r, args)
+    post(r, {'status': 'dispatched', 'delegation_id': 'deleg-y', 'subagent_ids': ['sa-0-y']}, args, status='completed')
+    row = rows(r)[0]
+    assert row['status'] == 'dispatched' and row['delegation_id'] == 'deleg-y' and row['subagent_id'] == 'sa-0-y'

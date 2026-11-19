@@ -16,7 +16,7 @@ function load(overrides = {}) {
     useState: value => [value, () => {}], useRef: value => ({ current: value }), useEffect: effect => effects.push(effect),
     useQuery: options => { queryOptions = options; return query }, useValue: atom => atom.get(), ...overrides })
   const code = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '').replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '').replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-  const api = new Function(...Object.keys(params), code + '\nreturn {executionTokenText,executionTokenTotal,executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,executionSpare,composerShowsFocused,pluginDefinition}')( ...Object.values(params))
+  const api = new Function(...Object.keys(params), code + '\nreturn {executionTokenText,executionTokenTotal,executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,executionSpare,composerStripVisible,pluginDefinition}')( ...Object.values(params))
   // Leaf rendering/invalidation fixture. Actual observer transport/fences are
   // exercised separately in test_active_execution_observer.mjs.
   const observer = { cacheId: 'leaf-fixture', revisionAtom: { get: () => 1 }, eligible: selected => Boolean(api.executionScopeKey(selected)),
@@ -172,6 +172,49 @@ test('model and provider stay one pair from one source; the roster model is neve
   const routed = snapshot(); routed.rows[0] = { ...routed.rows[0], observed: { kind: 'model', role: 'light', model: 'route-model', provider: 'route-provider', evidence: 'runtime_reported' } }
   assert.deepEqual(api.mergeExecutionRows(routed, live('running'), 'claire').map(item => [item.model, item.provider, item.model_source])[0], ['route-model', 'route-provider', 'route'])
 })
+test('a completed profile delegation shows its stored route report instead of 모델 보고 없음', () => {
+  // The origin's API hooks never see a profile-routed child's calls and the live roster is gone
+  // after completion; the backend fills observed from the stored delegation route report.
+  const api = load(), data = snapshot()
+  data.rows[0] = { ...data.rows[0], status: 'completed', duration_seconds: 144,
+    observed: { kind: 'profile', role: null, profile: 'wallace', backend: 'model-router-auto',
+      model: 'qwen/qwen4-max:free', provider: 'nous', evidence: 'runtime_reported' } }
+  const [merged] = api.mergeExecutionRows(data, { subagents: [] }, 'claire')
+  assert.deepEqual([merged.model, merged.provider, merged.model_source], ['qwen/qwen4-max:free', 'nous', 'route'])
+  assert.equal(merged.status, 'completed')
+  const line = text(api.ExecutionLine({ row: merged }))
+  assert.match(line, /완료 프로필 · wallace qwen\/qwen4-max:free 2분 24초/)
+  assert.match(line, /실행: qwen\/qwen4-max:free · nous \(런타임 보고\)/)
+  assert.doesNotMatch(line, /모델 보고 없음|아직 API 호출 보고 없음/)
+  assert.match(text(api.ExecutionStrip({ rows: [merged] }).props.children[0]), /프로필 · wallace · qwen\/qwen4-max:free · 완료 2분 24초/)
+  const panel = text(api.ExecutionRow({ row: merged }))
+  assert.match(panel, /실행 모델: qwen\/qwen4-max:free · nous/); assert.match(panel, /런타임 보고/)
+  // Replay counters coexist with the stored route report (the screenshot's 11 calls / token total).
+  const withCounters = { ...merged, api_call_count: 11, token_total: 324449, tool_count: 17 }
+  const counted = text(api.ExecutionLine({ row: withCounters }))
+  assert.match(counted, /모델 호출 11회/); assert.match(counted, /토큰 32만 \(완료 보고 기준\)/)
+  assert.match(counted, /qwen\/qwen4-max:free · nous \(런타임 보고\)/)
+  // Without the stored report the honest placeholder stays (running or unsupported origins).
+  const bare = api.mergeExecutionRows(snapshot(), { subagents: [] }, 'claire')[0]
+  assert.match(text(api.ExecutionLine({ row: { ...bare, status: 'completed' } })), /모델 보고 없음/)
+})
+test('a whole-call refused request is settled as 오류, never counted as 실행 중', () => {
+  // The roster settles a top-level delegate_task refusal to status 'error'; the strip must
+  // count it as a failed row, not leave a phantom active request running forever.
+  const api = load(), data = snapshot()
+  data.rows[0] = { ...data.rows[0], status: 'error' }
+  const [merged] = api.mergeExecutionRows(data, { subagents: [] }, 'claire')
+  assert.equal(merged.status, 'error')
+  const summary = text(api.ExecutionStrip({ rows: [merged] }).props.children[0])
+  assert.match(summary, /서브에이전트 · 오류 1/)
+  assert.doesNotMatch(summary, /실행 중/)
+  assert.match(text(api.ExecutionLine({ row: merged })), /오류/)
+  // A still-requested row IS active (the pre-refusal state), proving the count tracks status.
+  const pending = snapshot(); pending.rows[0] = { ...pending.rows[0], status: 'requested' }
+  const [requested] = api.mergeExecutionRows(pending, { subagents: [] }, 'claire')
+  assert.equal(requested.status, 'requested')
+  assert.match(text(api.ExecutionStrip({ rows: [requested] }).props.children[0]), /실행 중 1/)
+})
 test('a spare-model switch names the model that ran and the routed model it replaced', () => {
   const api = load()
   const data = snapshot(); data.rows[0] = { ...data.rows[0], requested: { kind: 'model', role: 'light', slot: 'code-simple', profile: null }, status: 'running',
@@ -196,42 +239,18 @@ test('a spare-model switch names the model that ran and the routed model it repl
   assert.equal(api.executionSpare({ ...row, models: [row.models[0]] }), null)
   assert.equal(api.executionSpare({ ...row, model_source: 'roster' }), null)
 })
-test('with split chats the strip shows only in the surface holding the focused chat', () => {
+test('the composer strip gates on the public SDK session identity, not host markup', () => {
   const api = load()
-  const surface = (target, attrs = {}) => ({ getAttribute: name => name === 'data-composer-target' ? target : attrs[name] ?? null, hasAttribute: name => name in attrs })
-  const node = (target, attrs) => ({ closest: selector => selector === '[data-chat-surface]' && target !== undefined ? surface(target, attrs) : null })
-  const root = tiles => ({ querySelectorAll: () => tiles.map(id => surface(`tile:${id}`)) })
-  // runtime ids: primary runs 'ra'; tile B runs 'rb'.
-  const shows = (el, stored, tiles, focusedRuntime, primary = 'ra') => api.composerShowsFocused(el, stored, root(tiles), focusedRuntime, primary)
-  assert.equal(shows(node('tile:B'), 'B', ['B', 'C'], 'rb'), true)
-  assert.equal(shows(node('tile:C'), 'B', ['B', 'C'], 'rb'), false)
-  assert.equal(shows(node('main'), 'B', ['B', 'C'], 'rb'), false, 'focused chat is in a tile')
-  assert.equal(shows(node('main'), 'A', ['B', 'C'], 'ra'), true, 'focused chat is the primary (positive runtime match)')
-  // Focused tile B parked (unmounted) behind another tab: no tile:B node, but the runtime is B's.
-  assert.equal(shows(node('main'), 'B', [], 'rb'), false, 'a missing tile node is not proof the primary holds the chat')
-  // The same chat open in the primary and a tile: the tile shows it, the primary hides.
-  assert.equal(shows(node('main'), 'B', ['B'], 'ra', 'ra'), false)
-  assert.equal(shows(node('tile:B'), 'B', ['B'], 'ra', 'ra'), true)
-  // Fresh draft / unresolved runtime: the primary needs a positive match.
-  assert.equal(shows(node('main'), null, ['B'], null), false)
-  assert.equal(shows(node('main'), null, ['B'], 'ra'), true)
-  assert.equal(shows(node('tile:B'), null, ['B'], 'ra'), false)
-  assert.equal(api.composerShowsFocused(node('tile:x"]\n'), 'x"]\n', root(['x"]\n'])), true, 'ids are compared, never put into a selector')
-  // Popped-out composers resolve through their owner surface id.
-  const owned = { closest: selector => selector === '[data-composer-owner]' ? { getAttribute: () => 'surface-2' } : null }
-  const surfaces = { querySelectorAll: () => [{ getAttribute: name => ({ 'data-composer-surface-id': 'surface-2', 'data-composer-target': 'tile:C' })[name] ?? null, hasAttribute: () => false }] }
-  assert.equal(api.composerShowsFocused(owned, 'B', surfaces), false)
-  assert.equal(api.composerShowsFocused(owned, 'C', surfaces), true)
-  const mainOwned = { getAttribute: name => ({ 'data-composer-surface-id': 'surface-1', 'data-composer-target': 'main' })[name] ?? null, hasAttribute: () => false }
-  const poppedMain = { closest: selector => selector === '[data-composer-owner]' ? { getAttribute: () => 'surface-1' } : selector === '[data-floating-composer-target]' ? { getAttribute: () => 'main' } : null }
-  const withMain = { querySelectorAll: () => [mainOwned, surface('tile:B')] }
-  assert.equal(api.composerShowsFocused(poppedMain, 'B', withMain, 'rb', 'ra'), false, 'popped-out primary resolves to the primary surface')
-  assert.equal(api.composerShowsFocused(poppedMain, 'A', withMain, 'ra', 'ra'), true)
-  const floating = { closest: selector => selector === '[data-floating-composer-target]' ? { getAttribute: () => 'tile:B' } : null }
-  assert.equal(api.composerShowsFocused(floating, 'B', root([])), true)
-  assert.equal(api.composerShowsFocused(floating, 'C', root([])), false)
-  assert.equal(api.composerShowsFocused(node(undefined), 'B', root([])), true, 'unknown markup fails open')
-  assert.equal(api.composerShowsFocused(node('other'), 'B', root([])), true)
+  // Positive identity match only; an unknown composer session or focus hides the strip.
+  assert.equal(api.composerStripVisible('A', 'A'), true)
+  assert.equal(api.composerStripVisible('A', 'B'), false)
+  assert.equal(api.composerStripVisible(null, 'A'), false)
+  assert.equal(api.composerStripVisible('A', null), false)
+  assert.equal(api.composerStripVisible('', 'A'), false)
+  assert.equal(api.composerStripVisible('A', ''), false)
+  // Ids are compared by value, never parsed as markup or put into a selector.
+  assert.equal(api.composerStripVisible('x"]\n', 'x"]\n'), true)
+  assert.equal(api.composerStripVisible('tile:A', 'A'), false, 'a raw tile target is not a stored session id')
 })
 
 test('full-profile job controls and the profile-job guide stay reachable from the composer strip', () => {

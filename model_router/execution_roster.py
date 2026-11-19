@@ -11,9 +11,11 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
 
+from .delegation_reports import DelegationRouteReports
 from .slots import PURPOSE_SLOTS
 
 _SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}\Z", re.ASCII)
@@ -27,6 +29,11 @@ _BACKENDS = {'model-router', 'model-router-auto', 'model-router-profiles'}
 # input = uncached prompt; cache_read/cache_write = cached prompt; output includes reasoning where the
 # provider counts it there.
 _TOKEN_BUCKETS = ('input', 'cache_read', 'cache_write', 'output')
+
+# Stored route-report lookups per roster read, newest rows first; permanently
+# unresolvable units are negative-cached so the cap cannot starve recent work.
+_MAX_STORED_ROUTE_LOOKUPS = 32
+_MAX_ROUTE_NEGATIVE = 256
 
 
 def _safe(value):
@@ -211,10 +218,15 @@ class ExecutionRoster:
         self.continuing = state['continuing']
         self.lock = shared['lock'] if shared is not None else threading.RLock()
         self.rpc_supported = False
-        # Private native DB compatibility is not admitted by normal registration.
-        # Disposable prototype fixtures may inject a factory explicitly; there
-        # is no RPC/config switch or implicit fallback.
+        # The unadmitted research adapter (execution_metadata) is never imported
+        # here; disposable prototype fixtures may inject a factory explicitly.
+        # Separately, list() reads scalar route reports from THIS origin's
+        # async-delegation ledger for already hook-bound rows (delegation_reports):
+        # read-only, fail-closed, outside the hook lock. See PLAN.md / SECURITY.md.
         self._metadata_factory: Callable[[Path], Any] | None = None
+        # Per-instance optimization only (not shared holder state): units that can
+        # never produce a route report are not re-read on every poll.
+        self._route_negative: OrderedDict = OrderedDict()
 
     def _live(self):
         # A reload registers a new instance on the same shared state; this one then stays inert.
@@ -399,6 +411,69 @@ class ExecutionRoster:
                     child['status'] = _status(terminal['status'])
                     child['activity_at'] = terminal['stopped_at']
                     self._reconcile(child)
+
+    def _route_pending(self, pairs):
+        # In-memory only, under the lock: lookup keys for already hook-bound rows
+        # that still lack a model from every live source. Newest rows first, and
+        # units negative-cached as permanently unresolvable are never re-read, so
+        # the per-read cap cannot starve recent work behind old dead rows.
+        pending = []
+        for key, row in pairs:
+            if not row.get('delegation_id') or type(row.get('task_index')) is not int:
+                continue
+            if row.get('model') or (row.get('observed') or {}).get('model'):
+                continue
+            if (row['delegation_id'], row['task_index']) in self._route_negative:
+                continue
+            pending.append((key, row['delegation_id'], row['task_index'],
+                            row['parent_session_id'], row.get('subagent_id'), row.get('updated_at') or 0.0))
+        pending.sort(key=lambda item: item[5], reverse=True)
+        return pending[:_MAX_STORED_ROUTE_LOOKUPS]
+
+    def _read_stored_routes(self, pending):
+        # An async dispatch result carries only ids; the per-task route report lands
+        # in the origin's stored delegation ledger when the child finishes. A
+        # profile-routed child converses as its target profile, so this origin's API
+        # hooks never see its calls and the stored report is the only origin-local
+        # model evidence. Reads happen OUTSIDE the shared hook lock: a busy ledger
+        # must never hold up pre_tool_call or API hooks. Scalars only, fail closed.
+        out = []
+        if not pending:
+            return out
+        try:
+            with DelegationRouteReports(self.home) as reports:
+                for key, unit, idx, parent, short, _ts in pending:
+                    entry = reports.report(unit=unit, task_index=idx, parent=parent, short=short)
+                    observed = _observed(entry) if entry is not None else None
+                    if observed is not None and (observed['evidence'] == 'unknown' or not observed.get('model')):
+                        observed, entry = None, None
+                    state = None
+                    if entry is None and reports.conn is not None:
+                        state = reports.unit_state(unit=unit, parent=parent)
+                    out.append((key, observed, state))
+        except Exception:
+            pass
+        return out
+
+    def _apply_stored_routes(self, results):
+        # Under the lock again: re-check live evidence before adopting — a hook may
+        # have answered while the ledger was read. Never touch row.model/provider
+        # (the API-hook source); the stored report is route evidence only.
+        for key, observed, state in results:
+            row = self.rows.get(key)
+            if row is None:
+                continue
+            adopted = False
+            if observed is not None and not row.get('model') and not (row.get('observed') or {}).get('model'):
+                row['observed'] = observed
+                row['updated_at'] = time.time()
+                adopted = True
+            if not adopted and state is not None and state != 'running':
+                # Pruned ('absent') or finished without a usable route: this unit can
+                # never produce one. Stop re-reading it (bounded; oldest evicted).
+                self._route_negative[(row.get('delegation_id'), row.get('task_index'))] = None
+                while len(self._route_negative) > _MAX_ROUTE_NEGATIVE:
+                    self._route_negative.popitem(last=False)
 
     @staticmethod
     def _child_stop(child, status, duration):
@@ -691,21 +766,27 @@ class ExecutionRoster:
             root, session, call = map(_safe, (conversation_id, session_id, tool_call_id))
             if not all((root, session, call)):
                 return None
-            if isinstance(result, str):
-                if len(result) > 2_000_000:
-                    return None
-                result = json.loads(result)
-            if not isinstance(result, dict):
-                return None
+            parsed = result if isinstance(result, dict) else None
+            if isinstance(result, str) and len(result) <= 2_000_000:
+                try:
+                    loaded = json.loads(result)
+                except Exception:
+                    loaded = None
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            # The core's terminal post_tool_call carries status/error_type for cancelled, timed-out
+            # or abandoned calls whose result is plain text (no JSON payload). Use that terminal
+            # failure status as an auxiliary signal so an unbound requested row never lingers active.
+            hook_status = _status(kwargs.get('status'))
             if args.get('action') == 'continue':
-                if self._post_continue(root, session, call, args, result):
+                if parsed is not None and self._post_continue(root, session, call, args, parsed):
                     self._event(root, session)
                 return None
             changed = False
             with self.lock:
                 rows = {k[3]: v for k, v in self.rows.items() if k[:3] == (root, session, call)}
-                if args.get('action') == 'list' and result.get('action') == 'list':
-                    entries = result.get('subagents')
+                if parsed is not None and args.get('action') == 'list' and parsed.get('action') == 'list':
+                    entries = parsed.get('subagents')
                     if isinstance(entries, list) and len(entries) <= 512:
                         for entry in entries:
                             if not isinstance(entry, dict):
@@ -722,7 +803,28 @@ class ExecutionRoster:
                                 matches[0]['updated_at'] = time.time()
                                 changed = True
                 elif rows:
-                    changed = self._apply(rows, result)
+                    if parsed is not None:
+                        if (isinstance(parsed.get('error'), str) and parsed.get('status') != 'dispatched'
+                                and not any(isinstance(parsed.get(f), list) for f in ('results', 'refused', 'inline_results'))):
+                            # Whole-call refusal (e.g. routing refused before any dispatch): settle the
+                            # still-unbound requested rows so a refused request never lingers as active.
+                            # A row that already dispatched keeps its own evidence; a late top-level error
+                            # never overwrites it. Per-task refusals ride the 'refused' list through _apply.
+                            for row in rows.values():
+                                if row['status'] == 'requested' and not row.get('delegation_id') and not row.get('subagent_id'):
+                                    _set_status(row, 'error')
+                                    row['updated_at'] = time.time()
+                                    changed = True
+                        else:
+                            changed = self._apply(rows, parsed)
+                    # Terminal failure hook status (cancel/timeout/abandon), with or without a payload,
+                    # settles only the still-unbound requested rows; dispatched/bound rows keep evidence.
+                    if hook_status in ('error', 'interrupted', 'cancelled', 'timeout'):
+                        for row in rows.values():
+                            if row['status'] == 'requested' and not row.get('delegation_id') and not row.get('subagent_id'):
+                                _set_status(row, hook_status)
+                                row['updated_at'] = time.time()
+                                changed = True
                     self._reconcile()
             if changed:
                 self._event(root, session)
@@ -833,8 +935,17 @@ class ExecutionRoster:
                     return empty
                 root = roots.pop()
                 empty['conversation_id'] = root
-                selected = [r for r in self.rows.values() if r['conversation_id'] == root][-128:]
+                pairs = [(k, r) for k, r in self.rows.items() if r['conversation_id'] == root][-128:]
+                selected = [r for _, r in pairs]
                 self._refresh_stored_terminal(selected)
+                pending = self._route_pending(pairs)
+            # Ledger reads stay outside the shared hook lock (busy-DB hold time).
+            results = self._read_stored_routes(pending)
+            with self.lock:
+                try:
+                    self._apply_stored_routes(results)
+                except Exception:
+                    pass
                 empty['rows'] = copy.deepcopy(selected)
             return empty
         except Exception:

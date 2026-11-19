@@ -5509,80 +5509,31 @@ export function ExecutionStrip({ rows, unavailable, jobControls = null, jobsPane
     ] })
   ] })
 }
-// Host-markup compatibility layer, not an SDK API: composer.top renders with no per-composer
-// owner, and the strip describes the FOCUSED chat. With several chats split in one window, show
-// it only where that chat is shown. Chat surfaces carry data-composer-target: 'main', or 'tile:'
-// plus the stored session id; a popped-out composer host carries data-floating-composer-target
-// or data-composer-owner (the surface id). Unknown markup fails open (shown).
-function chatSurfaces(root) { return Array.from(root?.querySelectorAll?.('[data-chat-surface]') || []) }
-// The chat surface an element belongs to, also for a popped-out composer portalled to the document body.
-function composerSurfaceOf(element, root) {
-  const surface = element?.closest?.('[data-chat-surface]')
-  if (surface?.getAttribute?.('data-composer-target')) return surface
-  const owner = element?.closest?.('[data-composer-owner]')?.getAttribute?.('data-composer-owner')
-  return owner ? chatSurfaces(root).find(item => item.getAttribute?.('data-composer-surface-id') === owner) || null : null
+// Public SDK seam, feature-detected. A composer.top contribution renders once per mounted
+// composer with no owner argument. useComposerSession() (host SDK, added in PR 144792) tells the
+// contribution which session its OWN composer belongs to, so the strip shows only for the
+// focused chat. Hosts without the hook fall back to always showing the strip (the pre-gate
+// behaviour). No host markup is read and no document-level listeners are attached: the earlier
+// data-chat-surface gate broke on composer refactors and is retired (catalog review PR 155752).
+export function composerStripVisible(composerStoredId, focusedStoredId) {
+  // Positive identity match only; an unknown composer session or focus hides the strip.
+  return Boolean(composerStoredId) && Boolean(focusedStoredId) && composerStoredId === focusedStoredId
 }
-function composerTargetOf(element, root) {
-  const surface = composerSurfaceOf(element, root)
-  const target = surface?.getAttribute?.('data-composer-target')
-  if (target) return { target, surface }
-  const floating = element?.closest?.('[data-floating-composer-target]')?.getAttribute?.('data-floating-composer-target')
-  return floating ? { target: floating, surface: null } : null
+function composerSessionStoredId(session) {
+  if (typeof session === 'string') return session || null
+  const id = session?.storedSessionId
+  return typeof id === 'string' && id ? id : null
 }
-export function composerShowsFocused(element, focusedStoredId, root = globalThis.document, focusedRuntimeId = null, primaryRuntimeId = null) {
-  const found = composerTargetOf(element, root)
-  if (!found) return true
-  const { target } = found
-  if (target.startsWith('tile:')) return Boolean(focusedStoredId) && target === `tile:${focusedStoredId}`
-  if (target !== 'main') return true
-  // The primary shows only with positive identity: the host's focused runtime id IS the primary's
-  // runtime id (host.state.activeSessionId). A missing tile node is not proof (a parked tile can
-  // stay focused while unmounted).
-  if (!focusedRuntimeId || focusedRuntimeId !== primaryRuntimeId) return false
-  if (!focusedStoredId) return true
-  // Attribute comparison, not a selector: ids never need escaping.
-  const inTile = chatSurfaces(root).some(item => item.getAttribute?.('data-composer-target') === `tile:${focusedStoredId}`)
-  if (!inTile) return true
-  // The focused chat is open in a tile. The SDK does not say which chat the primary shows, and
-  // pointer, focus and keyboard-shortcut paths all move focus differently, so the primary hides:
-  // when the same chat is also open in the primary, its strip shows in the tile only. A missing
-  // strip is better than another chat's strip.
-  return false
-}
-// Every mounted gate. A chat surface mounting or unmounting (its composer mounts a gate) makes
-// the others re-check, with no id change needed: a tile can mount after an async runtime bind.
-const composerGates = new Set()
-function recheckComposerGates() { for (const recheck of [...composerGates]) recheck() }
-export function ComposerFocusGate({ children }) {
+function SdkComposerFocusGate({ children }) {
   const focusedStored = useValue(host.state?.focusedStoredSessionId || EXECUTION_EMPTY_ATOM)
-  const focusedRuntime = useValue(host.state?.focusedSessionId || EXECUTION_EMPTY_ATOM)
-  const primaryRuntime = useValue(host.state?.activeSessionId || EXECUTION_EMPTY_ATOM)
-  const anchor = useRef(null)
-  const [visible, setVisible] = useState(false)
-  useEffect(() => {
-    // Tiles open, close and move by gestures that need not change focus: re-check after pointer,
-    // focus and key events too (attribute reads only; React skips unchanged answers).
-    let live = true
-    const timers = new Set()
-    const check = () => { if (live) setVisible(composerShowsFocused(anchor.current, focusedStored, globalThis.document, focusedRuntime, primaryRuntime)) }
-    check()
-    const doc = globalThis.document
-    const later = () => {
-      const timer = globalThis.setTimeout(() => { timers.delete(timer); check() }, 0); timers.add(timer)
-    }
-    composerGates.add(later)
-    recheckComposerGates()
-    for (const type of ['pointerup', 'focusin', 'keyup']) doc?.addEventListener?.(type, later, true)
-    return () => {
-      live = false
-      composerGates.delete(later)
-      for (const timer of timers) globalThis.clearTimeout(timer)
-      for (const type of ['pointerup', 'focusin', 'keyup']) doc?.removeEventListener?.(type, later, true)
-      recheckComposerGates()
-    }
-  }, [focusedStored, focusedRuntime, primaryRuntime])
-  return jsx('div', { ref: anchor, style: { display: 'contents' }, 'data-model-router-focus-gate': visible ? 'shown' : 'hidden', children: visible ? children() : null })
+  const session = DesktopSDK.useComposerSession()
+  const visible = composerStripVisible(composerSessionStoredId(session), focusedStored)
+  return jsx('div', { style: { display: 'contents' }, 'data-model-router-focus-gate': visible ? 'shown' : 'hidden', children: visible ? children() : null })
 }
+function AlwaysShowFocusGate({ children }) {
+  return jsx('div', { style: { display: 'contents' }, 'data-model-router-focus-gate': 'shown', children: children() })
+}
+export const ComposerFocusGate = (typeof DesktopSDK !== 'undefined' && typeof DesktopSDK.useComposerSession === 'function') ? SdkComposerFocusGate : AlwaysShowFocusGate
 export function ExecutionPanel({ compact = false, ctx, observer } = {}) {
   const { scope, key, query, data } = useExecutionSnapshot(observer)
   const fence = useExecutionFence()
@@ -5897,7 +5848,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.13.1',
+  version: '0.13.2',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
