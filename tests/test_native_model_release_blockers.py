@@ -163,6 +163,16 @@ def test_referenced_managed_env_provider_still_fails_closed(tmp_path, monkeypatc
     assert service2._read_model_overlay("default")["roles"]["main"]["available"] is False
 
 
+def test_model_preview_refuses_switch_to_an_unused_managed_env_provider(tmp_path, monkeypatch):
+    service = _real_overlay_service(tmp_path, monkeypatch, USER_CONFIG, UNUSED)
+    cfg = service._profile_home("default") / "config.yaml"
+    original = cfg.read_bytes()
+    request = native_body(service, {"main": route("unused-lab", "yaml-main", "high")})
+    with pytest.raises(ValueError, match="would not resolve"):
+        service.preview(request)
+    assert cfg.read_bytes() == original and not service.store_path.exists()
+
+
 def test_whole_managed_file_unavailability_and_non_entry_env_keep_denying(tmp_path, monkeypatch):
     # An existing but apparently empty managed file cannot prove overlay absence.
     service = _real_overlay_service(tmp_path, monkeypatch, USER_CONFIG, {}, managed_file=True)
@@ -230,6 +240,16 @@ def test_non_reasoning_extra_body_keeps_the_role_verified(svc):
     assert row(service.status())["models"]["compression"] == route("zai", "c", "low")
 
 
+def test_extra_body_model_is_not_shown_as_the_configured_model(svc):
+    service, fake, _ = svc
+    fake.values["default"]["auxiliary.title_generation.extra_body"] = {"model": "runtime-model-override"}
+    status = row(service.status())
+    assert "title" not in status["models"]
+    assert status["model_roles"]["title"]["reason"] == "model_override"
+    assert "runtime-model-override" not in json.dumps(status)
+    assert "main" in status["models"]
+
+
 # --- (4) CAS binds the main role's dependencies -------------------------------------------------
 
 def test_fallback_plan_refuses_a_same_name_alias_added_after_preview(svc):
@@ -238,6 +258,22 @@ def test_fallback_plan_refuses_a_same_name_alias_added_after_preview(svc):
     fake.values["default"]["model_aliases"] = {"heavy0": {"provider": "xiaomi", "model": "spare"}}
     with pytest.raises(RevisionConflict):
         service.apply(plan["plan_id"])
+    assert fake.calls == []
+
+
+def test_fallback_preview_refuses_alias_added_as_primary_is_projected(svc, monkeypatch):
+    service, fake, _ = svc
+    request = fallback_request(service, {"enabled": True, "chain": chain("spare")}, [confirmation("native")])
+    project = service._native_models
+
+    def project_and_edit(*args, **kwargs):
+        result = project(*args, **kwargs)
+        fake.values["default"]["model_aliases"] = {"heavy0": {"provider": "xiaomi", "model": "spare"}}
+        return result
+
+    monkeypatch.setattr(service, "_native_models", project_and_edit)
+    with pytest.raises(RevisionConflict, match="during fallback preview"):
+        service.fallback_preview(request)
     assert fake.calls == []
 
 

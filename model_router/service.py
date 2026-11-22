@@ -153,20 +153,21 @@ def _scope_names_only(keys: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(key for key in keys if key in NAMED_ENTRY_KEYS or key.endswith(".extra_body"))
 
 
-def _env_entry_referenced(role: str, snapshot: Any) -> bool:
+def _env_entry_referenced(role: str, flags: Any, route_values: Any) -> bool:
     """Whether `role`'s route may use a named entry whose managed value holds an env expression.
 
     The role references its own provider (and main's, which it may inherit), `custom:<name>` and the
     main model's `<prefix>/` / `<prefix>:` and alias name. Unclear values or provider vocabulary
     count as referencing every entry (fails closed). extra_body entries are not transport: a
-    reasoning key there already makes the role unverified (_project_roles).
+    route override there already makes the role unverified (_project_roles). `route_values`
+    supplies candidates from the snapshot or the prospective effective model configuration.
     """
-    flagged = [(key, name) for key, name in getattr(snapshot, "entry_env", ()) if not key.endswith(".extra_body")]
+    flagged = [(key, name) for key, name in flags if not key.endswith(".extra_body")]
     if not flagged:
         return False
     names: set[str] = set()
     for owner in (("main",) if role == "main" else ("main", role)):
-        for value in (snapshot.raw(MODEL_KEYS[owner][0]), snapshot.effective(MODEL_KEYS[owner][0])):
+        for value in route_values(MODEL_KEYS[owner][0]):
             if value is None:
                 continue
             if not isinstance(value, str):
@@ -175,7 +176,7 @@ def _env_entry_referenced(role: str, snapshot: Any) -> bool:
             names.add(lowered)
             if lowered.startswith("custom:"):
                 names.add(lowered[len("custom:"):].strip())
-    for value in (snapshot.raw(MODEL_KEYS["main"][1]), snapshot.effective(MODEL_KEYS["main"][1])):
+    for value in route_values(MODEL_KEYS["main"][1]):
         if value is None:
             continue
         if not isinstance(value, str):
@@ -373,7 +374,10 @@ def _project_roles(values: dict[str, Any], overlay: dict[str, Any] | None) -> tu
         provider_key, model_key, effort_key = MODEL_KEYS[role]
         # A managed api_mode/base_url the plan would clear is a managed key of this role too.
         role_managed = any(key in managed for key in (*keys, *STALE_KEYS.get(role, ())))
-        available = bool(_overlay_role(overlay, role).get("available"))
+        role_overlay = _overlay_role(overlay, role)
+        available = bool(role_overlay.get("available")) and not _env_entry_referenced(
+            role, role_overlay.get("entry_env", ()), lambda key: (values.get(key),),
+        )
         meta: dict[str, Any] = {"state": "unverified", "source": "explicit", "editable": False}
         raw_provider, raw_model = values.get(provider_key), values.get(model_key)
         aux = role in AUXILIARY_FALLBACK_KEYS
@@ -447,6 +451,9 @@ def _project_roles(values: dict[str, Any], overlay: dict[str, Any] | None) -> tu
         if aux:
             extra_key, *flag_key = AUX_ROUTE_KEYS[role]
             extra = values.get(extra_key)
+            if isinstance(extra, dict) and "model" in extra:
+                meta["reason"] = "model_override"
+                continue
             if isinstance(extra, dict) and any(_reasoning_body_key(name) for name in extra):
                 # auxiliary.<task>.extra_body reasoning wins over reasoning_effort (incl. enabled: false).
                 meta["reason"] = "reasoning_override"
@@ -1285,10 +1292,12 @@ class Service:
             except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged, OSError, ValueError):
                 roles[role] = {"available": False, "digest": None}
                 continue
-            if unsafe.intersection(snapshot.warnings) or not snapshot.effective_available or _env_entry_referenced(role, snapshot):
+            entry_env = getattr(snapshot, "entry_env", ())
+            if (unsafe.intersection(snapshot.warnings) or not snapshot.effective_available
+                    or _env_entry_referenced(role, entry_env, lambda key: (snapshot.raw(key), snapshot.effective(key)))):
                 roles[role] = {"available": False, "digest": None}
                 continue
-            roles[role] = {"available": True, "digest": snapshot.provenance_digest}
+            roles[role] = {"available": True, "digest": snapshot.provenance_digest, "entry_env": entry_env}
             for key in keys:
                 if any(effective_config._managed_applies(item, key) for item in snapshot.managed_keys):
                     value = snapshot.effective(key)
@@ -1477,15 +1486,17 @@ class Service:
                 overrides[key] = value
                 if values[key] != value:
                     writes.append({"profile": name, "key": key, "before": values[key], "after": value})
+        for role in submitted:
+            # Bind before projecting, so a concurrent edit cannot be promoted to the baseline.
+            if role == "main":
+                self._bind_main_dependencies(name, values)
+            self._bind_dependency_views(name, AUX_ROUTE_KEYS.get(role, ()), values)
         prospective, prospective_roles = self._native_models(name, overrides=overrides, overlay=overlay)
         for role, desired in submitted.items():
             if prospective_roles[role]["state"] != "verified" or prospective.get(role) != desired:
                 raise ValueError(f"the {role} model of {name} would not resolve to the submitted route")
-            # Bind what this prospective projection relied on beyond the role's own keys, so a
-            # change between preview and apply refuses the apply before its first write.
-            if role == "main":
-                self._bind_main_dependencies(name, values)
-            self._bind_dependency_views(name, AUX_ROUTE_KEYS.get(role, ()), values)
+        if any(self._cas_current(name, key, expected) != expected for key, expected in values.items()):
+            raise RevisionConflict("model settings changed during preview; preview again")
         approved_roles[name] = copy.deepcopy(submitted)
         prospective_models[name] = prospective
         model_provenance[name] = _overlay_digest(overlay, list(submitted))
@@ -2944,13 +2955,18 @@ class Service:
         applies (a model target of the same plan), otherwise as the profile's config resolves it now.
         None when it cannot be verified. Its config keys are bound into the plan's CAS snapshot
         (credential/endpoint keys by digest) and its managed provenance into `provenance`."""
+        # Pin the baseline before projecting the primary, then confirm projection did not cross
+        # a config edit. This avoids pairing the old primary with a newer comparison baseline.
+        values = snapshots.setdefault(profile, {})
+        self._bind_main_dependencies(profile, values)
         overlay = self._read_model_overlay(profile)
-        if base_plan is not None and profile in (base_plan.get("prospective_models") or {}):
-            main = base_plan["prospective_models"][profile].get("main")
-        elif base_plan is not None and profile in (base_plan.get("model_targets") or []) and (base_plan.get("approved_models") or {}).get(profile):
-            main = base_plan["approved_models"][profile].get("main")
-        else:
-            main = self._native_models(profile, overlay=overlay)[0].get("main")
+        approved = ((base_plan or {}).get("approved_roles") or {}).get(profile, {}).get("main")
+        if approved is None and base_plan is not None and profile in (base_plan.get("model_targets") or []):
+            approved = (base_plan.get("approved_models") or {}).get(profile, {}).get("main")
+        overrides = dict(zip(MODEL_KEYS["main"], (approved["provider"], approved["model"], approved["reasoning"]))) if approved else None
+        main = self._native_models(profile, overrides=overrides, overlay=overlay)[0].get("main")
+        if approved is not None and main != approved:
+            main = None
         # Managed provenance: main's own, united with the roles a pending model plan already relies
         # on (combined path), so the recorded digest covers both before any write.
         relied = {"main"}
@@ -2961,11 +2977,13 @@ class Service:
             elif recorded.startswith("roles:"):
                 relied.update(role for role in recorded[len("roles:"):].split(":", 1)[0].split(",") if role in MODEL_ROLES)
         main_digest = _overlay_digest(overlay, sorted(relied))
+        if (any(self._cas_current(profile, key, expected) != expected for key, expected in values.items())
+                or (recorded is not None and not _overlay_digest_holds(overlay, recorded))):
+            raise RevisionConflict("primary model settings changed during fallback preview; preview again")
         if main is not None and not main_digest:
             main = None
         if provenance is not None and main is not None:
             provenance[profile] = main_digest
-        self._bind_main_dependencies(profile, snapshots.setdefault(profile, {}))
         return copy.deepcopy(main)
 
     def fallback_preview(self, body: dict) -> dict[str, Any]:
