@@ -100,7 +100,7 @@ def test_routing_scope_ignores_dirty_models_and_refuses_a_changed_nested_fallbac
     assert cli.calls == []
 
 
-def test_legacy_no_scope_does_not_overwrite_canonical_model_drift_without_targets(tmp_path, monkeypatch):
+def test_legacy_no_scope_does_not_overwrite_an_external_model_edit_without_targets(tmp_path, monkeypatch):
     service, cli, body = setup(tmp_path, monkeypatch)
     before_bytes = service.store_path.read_bytes()
     before = json.loads(before_bytes)["profiles"]
@@ -118,8 +118,13 @@ def test_legacy_no_scope_does_not_overwrite_canonical_model_drift_without_target
     after = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
     assert after["p2"] == before["p2"]
     row = find_profile(service.status(), "p2")
-    assert "models.main" in row["drift"]
-    assert row["actual_models"]["main"]["model"] == "external-drift"
+    # The config is the source of the models: an external edit is shown as the model, not as drift,
+    # and the stored mirror is not rewritten by a read or a save that does not target it.
+    assert not any(item.startswith("models.") or item == "actual_models_unavailable" for item in row["drift"])
+    assert row["models"]["main"]["model"] == row["actual_models"]["main"]["model"] == "external-drift"
+    assert row["models"]["compression"]["model"] == "external-drift"  # inherited, follows main
+    assert row["model_roles"]["compression"]["source"] == "inherited"
+    assert service.store_path.read_bytes() == before_bytes
     assert cli.calls == []
 
 

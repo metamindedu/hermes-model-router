@@ -14,9 +14,10 @@ output-schema validation and result delivery. No production Router launch method
 or coding_route start creates a process. Historical worker modules remain for
 already-started work; the archived launcher test oracle is not a runtime entry.
 
-- `model-router`: required per-task `purpose`; the existing canonical Heavy/Light
-  declarations and follow rules resolve the model. External model drift refuses
-  rather than silently adopting different canonical settings.
+- `model-router`: required per-task `purpose`; fixed slots keep their configured
+  routes. A slot that follows a Hermes model role uses the profile's current,
+  verified model on the next dispatch. Unverifiable inherited routes fail closed;
+  an unrelated change to a native model no longer disables the whole provider.
 - `model-router-profiles`: per-task allowlisted `profile`, or an explicitly saved
   default. It uses native target-profile binding and retains the parent toolset
   ceiling and transcript ownership. Both the settings grant and the provider

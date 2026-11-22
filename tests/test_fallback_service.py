@@ -216,7 +216,7 @@ def test_native_chain_merges_legacy_keys_and_explicit_apply_projects_both_keys(t
     assert service.routing_config("default")["fallback"]["enabled"] is False
 
 
-def test_native_off_clears_both_legacy_keys_and_retains_draft_chain(tmp_path, monkeypatch):
+def test_native_off_clears_both_legacy_keys_and_keeps_the_stored_chain(tmp_path, monkeypatch):
     service, fake, _root = setup_service(tmp_path, monkeypatch)
     chain = [{"provider": "xiaomi", "model": "mimo-v2"}]
     enable = service.fallback_preview(fallback_body(
@@ -234,10 +234,12 @@ def test_native_off_clears_both_legacy_keys_and_retains_draft_chain(tmp_path, mo
     assert fake.values["default"]["fallback_model"] == []
     assert fake.values["default"]["fallback_providers"] == []
     native = profile(service.status())["fallbacks"]["native"]
+    # The status projects the chain Hermes uses (now none); the stored block keeps the chain.
     assert native["enabled"] is False
-    assert native["chain"] == chain
-    assert native["actual_chain"] == []
-    assert native["drift"] is False
+    assert native["chain"] == [] and native["actual_chain"] == []
+    assert native["drift"] is False and native["managed"] is True
+    stored = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]["default"]["native_fallback"]
+    assert stored == {"enabled": False, "chain": chain}
 
 
 def test_advanced_native_entry_is_sanitized_and_read_only(tmp_path, monkeypatch):

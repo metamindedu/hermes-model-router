@@ -177,7 +177,11 @@ def test_preview_apply_projects_models_only_to_targets_and_clears_existing_stale
     assert cli.values["p2"]["model.api_mode"] == ""
     assert cli.values["p2"]["delegation.base_url"] == "https://private-delegation.example/v1"
     assert cli.values["p1"]["model.provider"] == "openai-codex"
-    assert find_profile(service.status(), "p2")["models"] == desired
+    # Status projects each role from p2's own config: its delegation keeps a direct endpoint
+    # (delegation.base_url), so that role is unverified and left out instead of shown as a route.
+    row = find_profile(service.status(), "p2")
+    assert row["models"] == {role: value for role, value in desired.items() if role != "delegation"}
+    assert row["model_roles"]["delegation"] == {"state": "unverified", "source": "explicit", "editable": False, "reason": "direct_endpoint"}
     assert receipt["revision"] == body["expected_revision"] + 1
     assert (root / "plugin-data" / "model-router" / "backups").is_dir()
 

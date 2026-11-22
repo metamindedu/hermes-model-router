@@ -243,12 +243,16 @@ def test_advanced_owned_declarations_never_leak_to_the_dto(fixture):
     assert 'PRIVATE_FIXTURE_MARKER' not in json.dumps(dto)
 
 
-def test_native_semantic_accessor_refuses_canonical_model_drift(fixture, monkeypatch):
+def test_native_semantic_accessor_follows_the_config_and_keeps_its_revision_fence(fixture, monkeypatch):
+    # Supersedes the global model-drift denial: routes follow the config's models (see
+    # tests/test_native_model_authority.py); the revision fence against a concurrent save remains.
     service, _, _ = fixture
     monkeypatch.setattr(service, 'routing_config', lambda profile: {'revision': 7})
     monkeypatch.setattr(service, '_load_store', lambda: {'revision': 7, 'profiles': {'default': {'models': {'main': 'stored'}}}})
     monkeypatch.setattr(service, '_actual_models', lambda profile: {'main': 'external-change'})
-    with pytest.raises(RevisionConflict, match='model drift'): service.native_route_config('default')
+    assert service.native_route_config('default') == {'revision': 7}
+    monkeypatch.setattr(service, '_load_store', lambda: {'revision': 8, 'profiles': {}})
+    with pytest.raises(RevisionConflict, match='changed during native dispatch'): service.native_route_config('default')
 
 
 def test_real_supported_config_writer_in_an_isolated_installed_home(tmp_path, monkeypatch):

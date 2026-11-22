@@ -184,19 +184,19 @@ def test_a_spare_differing_from_the_new_main_model_only_in_case_is_refused(tmp_p
     assert fake.values["default"]["model.default"] == "new-main"
 
 
-def test_a_spare_is_compared_with_the_stored_main_model_not_the_actual_one(tmp_path, monkeypatch):
-    # The page mirrors this (tests/test_fallback_desktop.mjs): stored primary main, a different actual
-    # main in config. A spare equal to the actual main is accepted; one equal to the stored main is not.
+def test_a_spare_is_compared_with_the_real_main_model_not_the_stored_mirror(tmp_path, monkeypatch):
+    # Supersedes the stored-main comparison: the main model is the profile's own config. With the
+    # main model edited elsewhere, a spare equal to the real main is refused; one equal to the old
+    # stored mirror is an ordinary spare.
     service, fake, _ = bystander_setup(tmp_path, monkeypatch)
-    stored_main = profile(service.status())["models"]["main"]
+    stored_main = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]["default"]["models"]["main"]
     actual = fake.values["default"]["model.default"] = "runtime-main"
     provider = stored_main["provider"]
     assert stored_main["model"] != actual
     status = service.status()
-    assert profile(status)["models"]["main"] == stored_main
-    assert profile(status)["actual_models"]["main"]["model"] == actual
+    assert profile(status)["models"]["main"]["model"] == profile(status)["actual_models"]["main"]["model"] == actual
     runtime_spare = {"enabled": True, "chain": [{"provider": provider.upper(), "model": actual.upper()}]}
-    assert service.fallback_preview(fallback_preview_body(service, runtime_spare))["changes"]
-    stored_spare = {"enabled": True, "chain": [{"provider": provider.upper(), "model": stored_main["model"].upper()}]}
     with pytest.raises(ValueError, match="differ from the primary model"):
-        service.fallback_preview(fallback_preview_body(service, stored_spare))
+        service.fallback_preview(fallback_preview_body(service, runtime_spare))
+    stored_spare = {"enabled": True, "chain": [{"provider": provider.upper(), "model": stored_main["model"].upper()}]}
+    assert service.fallback_preview(fallback_preview_body(service, stored_spare))["changes"]

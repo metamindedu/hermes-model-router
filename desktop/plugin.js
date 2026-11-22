@@ -305,6 +305,166 @@ export function copyPageExpectations(profiles) {
   return Object.fromEntries((Array.isArray(profiles) ? profiles : []).map(row => [row?.name, pageExpectation(row)]).filter(([name, value]) => typeof name === 'string' && value))
 }
 
+// Hermes-native model settings. A service that reports `model_settings_schema: 1` at the status root
+// reads every model role from Hermes itself: a row's `models` and `actual_models` are the same native
+// projection, `model_roles[role]` says how far it is known ({state: verified|unverified, source:
+// explicit|inherited, editable, reason}) and an unresolved role is omitted. Such a service takes a
+// partial `models` mapping (only the roles a save writes) with `model_settings_schema: 1` and per-role
+// `expected` subsets. Without the key the page keeps the earlier whole-mapping wire unchanged.
+export const MODEL_SETTINGS_SCHEMA = 1
+// A role's endpoint, credential and api_mode keys are never shown or sent: the service itself refuses a
+// provider change that would leave or enter one (change it in Hermes) and binds them at apply.
+// The drafted models a save projects onto its model targets: every role, or only `modelRoles`.
+export function projectedModels(models, modelRoles = null) {
+  if (!Array.isArray(modelRoles)) return models === undefined ? undefined : deepClone(models)
+  const source = models && typeof models === 'object' ? models : {}
+  return Object.fromEntries(modelRoles.filter(role => Object.prototype.hasOwnProperty.call(source, role)).map(role => [role, deepClone(source[role])]))
+}
+const projectsRole = (projection, role) => Boolean(projection?.models && Object.prototype.hasOwnProperty.call(projection.models, role))
+export function modelSettingsCapable(status) {
+  return status?.model_settings_schema === MODEL_SETTINGS_SCHEMA
+}
+const routeObject = value => Boolean(value && typeof value === 'object' && !Array.isArray(value))
+// What the status says about one role of one profile. Only a role with both a projected value and
+// its metadata is resolved; nothing else is ever shown or saved as that profile's current model.
+export function modelRoleInfo(row, role) {
+  const roles = row?.model_roles && typeof row.model_roles === 'object' ? row.model_roles : null
+  const meta = roles && routeObject(roles[role]) ? roles[role] : null
+  const resolved = Boolean(meta && routeObject(row?.models?.[role]))
+  return {
+    resolved,
+    state: resolved && ['verified', 'unverified'].includes(meta.state) ? meta.state : null,
+    source: resolved && ['explicit', 'inherited'].includes(meta.source) ? meta.source : null,
+    editable: resolved && meta.editable === true,
+    reason: resolved && typeof meta.reason === 'string' ? meta.reason : ''
+  }
+}
+// A role an explicit copy (a hand-picked target list) carries without being edited: one Hermes holds
+// as its own verified, explicit, editable value. An inherited or unverified role is copied only when
+// it is edited, so a copy never turns an inherited role into a stored one by itself.
+export function modelRoleCopyable(row, role) {
+  const info = modelRoleInfo(row, role)
+  return info.editable && info.state === 'verified' && info.source === 'explicit'
+}
+// The page roles whose drafted value differs from the frozen one.
+export function editedModelRoles(draftModels, frozenModels) {
+  return PAGE_MODEL_ROLES.filter(role => !sameValue(draftModels?.[role] ?? null, frozenModels?.[role] ?? null))
+}
+// The roles one save writes: every edited role, plus on explicit copy intent every copyable role.
+export function requestedModelRoles(row, draftModels, frozenModels, copyIntent) {
+  const edited = editedModelRoles(draftModels, frozenModels)
+  return PAGE_MODEL_ROLES.filter(role => edited.includes(role) || (copyIntent === true && modelRoleCopyable(row, role)))
+}
+// The model values of a status row as the draft holds them: with role metadata, unresolved page
+// roles are left out (never a placeholder the operator could take for the current value).
+function draftModelsFromRow(row) {
+  if (!row?.models || typeof row.models !== 'object') return null
+  if (!row.model_roles || typeof row.model_roles !== 'object') return deepClone(row.models)
+  return Object.fromEntries(Object.entries(row.models)
+    .filter(([role, value]) => routeObject(value) && (!PAGE_MODEL_ROLES.includes(role) || modelRoleInfo(row, role).resolved))
+    .map(([role, value]) => [role, deepClone(value)]))
+}
+const setOrDelete = (target, key, value) => {
+  if (value === undefined || value === null) delete target[key]
+  else target[key] = deepClone(value)
+}
+const liveNativeFallbackExpectation = row => {
+  const native = row?.fallbacks?.native
+  return native ? { enabled: native.enabled ?? null, chain: native.chain ?? [], actual_chain: native.actual_chain ?? [] } : null
+}
+// A same-revision status refresh on a Hermes-native service: every model role and the conversation
+// spare models that no pending save holds follow the newest status, in the draft, the frozen
+// baselines and the frozen expectations alike, so an ordinary external change is simply shown and
+// is never written back. A held role (edited, or carried by an explicit copy) and held spare models
+// keep their frozen values in every profile, so a change elsewhere stays a conflict for that save.
+// Returns the inputs themselves when nothing changed. Writes nothing.
+export function refreshCleanModelState({ rows, selected, draft, profileBaselines, expectationBaselines, heldRoles = [],
+  holdNativeFallback = false, nativeFallbackDraft = null, nativeFallbackBaseline = null }) {
+  const held = new Set(Array.isArray(heldRoles) ? heldRoles : [])
+  const list = Array.isArray(rows) ? rows : []
+  const roles = ROLES.map(role => role.id).filter(role => !held.has(role))
+  let nextBaselines = profileBaselines, nextExpectations = expectationBaselines, nextDraft = draft
+  let nextFallbackDraft = nativeFallbackDraft, nextFallbackBaseline = nativeFallbackBaseline
+  for (const row of list) {
+    const name = row?.name
+    if (typeof name !== 'string') continue
+    const live = draftModelsFromRow(row)
+    const base = profileBaselines?.[name]
+    if (base?.models && live) {
+      const models = { ...base.models }
+      for (const role of roles) setOrDelete(models, role, live[role])
+      if (!sameValue(models, base.models)) {
+        if (nextBaselines === profileBaselines) nextBaselines = { ...profileBaselines }
+        nextBaselines[name] = { ...base, models }
+      }
+    }
+    const expect = expectationBaselines?.[name]
+    if (expect?.models && row.models) {
+      const models = { ...expect.models }, actual = { ...(expect.actual_models || {}) }
+      for (const role of roles) { setOrDelete(models, role, row.models?.[role]); setOrDelete(actual, role, row.actual_models?.[role]) }
+      const nativeLive = liveNativeFallbackExpectation(row)
+      const native = !holdNativeFallback && expect.native_fallback && nativeLive ? deepClone(nativeLive) : expect.native_fallback
+      if (!sameValue(models, expect.models) || !sameValue(actual, expect.actual_models || {}) || !sameValue(native ?? null, expect.native_fallback ?? null)) {
+        if (nextExpectations === expectationBaselines) nextExpectations = { ...expectationBaselines }
+        nextExpectations[name] = { ...expect, models, actual_models: actual, ...(native ? { native_fallback: native } : {}) }
+      }
+    }
+    if (name !== selected) continue
+    if (draft?.models && live) {
+      const models = { ...draft.models }
+      for (const role of roles) setOrDelete(models, role, live[role])
+      if (!sameValue(models, draft.models)) nextDraft = { ...draft, models }
+    }
+    if (!holdNativeFallback) {
+      const fresh = copyNativeFallbackDraft(row.fallbacks?.native)
+      if (fresh && nativeFallbackBaseline && !sameValue(fresh, nativeFallbackBaseline)) {
+        nextFallbackDraft = deepClone(fresh)
+        nextFallbackBaseline = deepClone(fresh)
+      }
+    }
+  }
+  return { profileBaselines: nextBaselines, expectationBaselines: nextExpectations, draft: nextDraft,
+    nativeFallbackDraft: nextFallbackDraft, nativeFallbackBaseline: nextFallbackBaseline,
+    changed: nextBaselines !== profileBaselines || nextExpectations !== expectationBaselines || nextDraft !== draft ||
+      nextFallbackDraft !== nativeFallbackDraft || nextFallbackBaseline !== nativeFallbackBaseline }
+}
+// Held roles that changed elsewhere since they were frozen, for the loaded profile and every model
+// target: only those block, and only the model write (see pageLiveDrift).
+function modelRoleDrift(rows, names, roles, frozenExpectations) {
+  const items = []
+  for (const name of uniqueProfileNames(names)) {
+    const row = rows.find(item => item?.name === name)
+    const expect = frozenExpectations?.[name]
+    if (!row || !expect?.models) continue
+    for (const role of roles) {
+      if (!sameValue(row.models?.[role] ?? null, expect.models?.[role] ?? null) || !sameValue(row.actual_models?.[role] ?? null, expect.actual_models?.[role] ?? null)) {
+        items.push({ profile: name, part: EXTERNAL_ROLE_LABELS[role] || role, models: true, role })
+      }
+    }
+  }
+  return items
+}
+// Whether every role a save writes can still be written for each target, read from the given rows.
+export function modelRoleWriteError(rows, sourceName, targets, roles, editedRoles) {
+  const list = Array.isArray(rows) ? rows : []
+  const source = list.find(row => row?.name === sourceName)
+  for (const role of editedRoles || []) {
+    if (!modelRoleInfo(source, role).editable) {
+      return `${EXTERNAL_ROLE_LABELS[role] || role}: ${sourceName} 프로필에서 이 역할을 지금 바꿀 수 없어(${modelRoleInfo(source, role).reason || 'Hermes 설정을 확인할 수 없음'}) 저장하지 않습니다. 상태를 새로고침해 현재 값을 다시 불러오세요.`
+    }
+  }
+  for (const name of targets || []) {
+    const row = list.find(item => item?.name === name)
+    for (const role of roles || []) {
+      const meta = row?.model_roles?.[role]
+      if (routeObject(meta) && meta.editable !== true) {
+        return `${EXTERNAL_ROLE_LABELS[role] || role}: ${name} 프로필에서는 이 역할을 바꿀 수 없습니다(${typeof meta.reason === 'string' && meta.reason ? meta.reason : '관리되는 설정'}). 적용 대상에서 빼거나 그 역할의 변경을 되돌리세요.`
+      }
+    }
+  }
+  return ''
+}
+
 // The frozen expectations one request body needs: every profile and field it may write. Routing
 // membership and its skill switch can be repaired on any loaded profile, so a routing-scope body
 // covers every profile the page froze.
@@ -325,13 +485,22 @@ export function pageExpectationsFor(operation, body, frozen, liveNames = []) {
   for (const update of [...(body?.fallback_updates || []), ...(operation === '/fallback-preview' ? body?.updates || [] : [])]) {
     if (update?.auxiliary_fallback && typeof update.auxiliary_fallback === 'object') auxiliaryTasks.set(update.profile, Object.keys(update.auxiliary_fallback))
   }
+  // A Hermes-native partial model save: the model fields cover exactly the roles it writes (a role the
+  // page found unresolved is expected as absent, null).
+  const modelRoles = operation === '/preview' && body?.model_settings_schema === MODEL_SETTINGS_SCHEMA && body?.models && typeof body.models === 'object'
+    ? Object.keys(body.models).filter(role => PAGE_MODEL_ROLES.includes(role)) : null
+  const fieldValue = (value, field, tasks) => field === 'auxiliary_fallback' && tasks
+    ? Object.fromEntries(tasks.map(task => [task, deepClone(value.auxiliary_fallback[task])]))
+    : modelRoles && (field === 'models' || field === 'actual_models')
+      ? Object.fromEntries(modelRoles.map(role => [role, deepClone(value[field]?.[role] ?? null)]))
+      : deepClone(value[field])
   return [...need].map(([name, fields]) => {
     const value = frozen?.[name]
     if (!value || [...fields].some(field => !value[field])) throw new Error(`${name} 프로필은 이 화면에서 확인한 값이 없어 저장하지 않았습니다. 상태 새로고침 후 다시 저장하세요.`)
     const tasks = auxiliaryTasks.get(name)
     if (fields.has('auxiliary_fallback') && tasks?.some(task => !value.auxiliary_fallback[task])) throw new Error(`${name} 프로필은 이 화면에서 확인한 값이 없어 저장하지 않았습니다. 상태 새로고침 후 다시 저장하세요.`)
-    return { profile: name, ...Object.fromEntries([...fields].sort().map(field => [field, field === 'auxiliary_fallback' && tasks
-      ? Object.fromEntries(tasks.map(task => [task, deepClone(value.auxiliary_fallback[task])])) : deepClone(value[field])])) }
+    const item = { profile: name, ...Object.fromEntries([...fields].sort().map(field => [field, fieldValue(value, field, tasks)])) }
+    return item
   })
 }
 
@@ -343,7 +512,7 @@ export function externalChangeFromError(error) {
   return typeof profile === 'string' && profile && typeof field === 'string' && EXTERNAL_CHANGE_FIELD_RE.test(field)
     ? { profile, field } : null
 }
-const EXTERNAL_FIELD_LABELS = { models: '저장된 모델', actual_models: '실제 모델 설정', routing: '작업 라우팅', native_fallback: '대화 예비 모델', auxiliary_fallback: '대화 압축·제목 생성 예비 모델' }
+const EXTERNAL_FIELD_LABELS = { models: '저장된 모델', actual_models: '실제 모델 설정', model_roles: '모델 연결 설정', routing: '작업 라우팅', native_fallback: '대화 예비 모델', auxiliary_fallback: '대화 압축·제목 생성 예비 모델' }
 const EXTERNAL_ROLE_LABELS = { main: '대화 모델', delegation: '작업 위임 모델', compression: '압축 모델', title: '제목 모델' }
 export function externalChangeLabel(conflict) {
   const [base, role] = String(conflict?.field || '').split('.')
@@ -361,15 +530,19 @@ export function externalChangeStepMessage(conflict, label) {
 
 // Values that changed elsewhere since they were frozen, at the same store revision. Early feedback
 // only: the service refuses such a save by itself (see pageExpectation).
-export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations) {
+// `modelCheck` ({roles, targets}) is given on a Hermes-native service: then only the roles a pending
+// save holds are compared, for the loaded profile and each model target, and such an item ({models:
+// true}) blocks only the model write. Without it every model role of the loaded profile is compared.
+export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations, modelCheck = null) {
   const items = []
   const same = (live, loaded) => sameValue(live ?? null, loaded ?? null)
   const list = Array.isArray(rows) ? rows : []
   const current = list.find(row => row.name === selected)
   const frozen = frozenProfiles?.[selected]
   const expect = frozenExpectations?.[selected]
+  if (modelCheck) items.push(...modelRoleDrift(list, [selected, ...(modelCheck.targets || [])], modelCheck.roles || [], frozenExpectations))
   if (current && frozen) {
-    if (!same(current.models, frozen.models) || (expect && !same(current.actual_models || {}, expect.actual_models))) items.push({ profile: selected, part: '대화·작업 모델' })
+    if (!modelCheck && (!same(current.models, frozen.models) || (expect && !same(current.actual_models || {}, expect.actual_models)))) items.push({ profile: selected, part: '대화·작업 모델' })
     if (!same(current.routing?.heavy, frozen.routing?.heavy) || !same(current.routing?.light, frozen.routing?.light)) items.push({ profile: selected, part: '작업 라우팅' })
     if (!same(current.slots?.declarations, frozen.slots)) items.push({ profile: selected, part: '작업 슬롯 모델' })
   }
@@ -532,7 +705,7 @@ export function copyProfileDraft(profile) {
   if (!profile || typeof profile !== 'object' || !profile.models || !profile.routing) return null
   const timeouts = timeoutDraftFromSettings(profile.timeouts)
   return deepClone({
-    models: profile.models,
+    models: draftModelsFromRow(profile),
     routing: profile.routing,
     ...(profile.slots?.declarations ? { slots: profile.slots.declarations } : {}),
     ...(timeouts ? { timeouts } : {})
@@ -623,14 +796,20 @@ export function toggleName(names, name, checked) {
 
 // The retired routed-job fallback (`routing.fallback`) is never sent: the plugin keeps the stored
 // value when it is absent, and only fallback_preview could change it.
-export function buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets) {
+// `modelRoles` (a Hermes-native service only) narrows a body that writes models to those roles and
+// opts in with `model_settings_schema`. A non-model save carries no incidental roles.
+export function buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets, modelRoles = null) {
   const { fallback: _retiredFallback, ...routing } = deepClone(draft.routing) || {}
+  const targets = Array.isArray(modelTargets) ? [...modelTargets] : []
+  const partial = Array.isArray(modelRoles)
+  const models = pageModels(draft.models)
   return {
+    ...(partial ? { model_settings_schema: MODEL_SETTINGS_SCHEMA } : {}),
     expected_revision: revision,
     profile,
     // Never the delegation role: each target keeps its own (see PAGE_MODEL_ROLES).
-    models: pageModels(draft.models),
-    model_targets: Array.isArray(modelTargets) ? [...modelTargets] : [],
+    models: partial ? Object.fromEntries((targets.length ? PAGE_MODEL_ROLES.filter(role => modelRoles.includes(role)) : []).map(role => [role, deepClone(draft.models?.[role] ?? null)])) : models,
+    model_targets: targets,
     routing: { ...routing, enabled: routingProfiles.includes(profile) },
     routing_profiles: [...routingProfiles],
     ...(routingTargets === undefined ? {} : { routing_targets: [...routingTargets] })
@@ -855,7 +1034,8 @@ export function resolveAuxiliaryRoute(route, main) {
 // The task's own route each receiving target will have, as the service compares it: the drafted
 // route for a model-copy target, otherwise the primary the status reports for that profile.
 export function auxiliaryPrimaryRoute(row, task, projection = null) {
-  if (projection?.model_targets?.includes(row?.name) && projection.models?.[task] && projection.models?.main) return resolveAuxiliaryRoute(projection.models[task], projection.models.main)
+  // A partial (Hermes-native) save projects only the roles it writes; any other role stays the target's own.
+  if (projection?.model_targets?.includes(row?.name) && projection.models?.[task] && (projection.models?.main || row?.models?.main)) return resolveAuxiliaryRoute(projection.models[task], projection.models.main || row.models.main)
   const primary = row?.auxiliary_fallbacks?.[task]?.primary
   return primary && typeof primary.provider === 'string' && typeof primary.model === 'string' ? primary : null
 }
@@ -1022,7 +1202,7 @@ export function primaryRouteForFallback(row, role, projection = null) {
   if (configured?.follow === 'custom' && configured.custom) return configured.custom
   const modelRole = role === 'heavy' ? 'main' : 'delegation'
   // A model copy never changes a target's delegation role, so only the main model is projected.
-  if (modelRole === 'main' && projection?.model_targets?.includes(row?.name)) return projection.models?.[modelRole] || null
+  if (modelRole === 'main' && projection?.model_targets?.includes(row?.name) && projectsRole(projection, 'main')) return projection.models?.[modelRole] || null
   return row?.models?.[modelRole] || row?.actual_models?.[modelRole] || null
 }
 
@@ -1087,7 +1267,7 @@ function fallbackScopeValidation(scope, value, rows, projection) {
       // (a profile without a stored entry reports its actual models there). Never the actual main
       // model of a stored entry: the service accepts a spare equal to it.
       for (const row of rows) {
-        const primary = projection?.model_targets?.includes(row.name) ? projection.models?.main : row.models?.main
+        const primary = projection?.model_targets?.includes(row.name) && projectsRole(projection, 'main') ? projection.models?.main : row.models?.main
         const folded = foldedRouteIdentity(primary)
         if (folded && value.chain.some(item => foldedRouteIdentity(item) === folded)) {
           return `${row.name}의 기본 대화 모델과 대화 예비 모델은 달라야 합니다(대소문자만 다른 경우 포함).`
@@ -1118,11 +1298,11 @@ export function buildFallbackPreviewBody(revision, scope, targetNames, value, pr
 
 // `auxiliaryWrite` ({ [task]: { targets, value } | null }) adds the compression and title-generation
 // spare models to the same fallback updates (see auxiliaryFallbackUpdates).
-export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets, timeoutSettings = null, auxiliaryWrite = null) {
-  const body = buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets)
+export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets, timeoutSettings = null, auxiliaryWrite = null, modelRoles = null) {
+  const body = buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets, modelRoles)
   const rows = Array.isArray(profiles) ? profiles : []
   const byName = new Map(rows.map(row => [row.name, row]))
-  const projection = { profile, models: deepClone(draft.models), routing: deepClone(body.routing), model_targets: [...body.model_targets], routing_targets: body.routing_targets }
+  const projection = { profile, models: projectedModels(draft.models, modelRoles), routing: deepClone(body.routing), model_targets: [...body.model_targets], routing_targets: body.routing_targets }
   const errors = []
   const updatesByProfile = new Map()
   const confirmations = []
@@ -1267,7 +1447,7 @@ export function buildModelSectionPreviewBody(snapshot, storeScope, revision = sn
   if (!baseline?.models || !baseline?.routing || !snapshot.draft) return { body: null, errors: ['불러온 기준 설정을 확인할 수 없습니다. 상태를 새로고침하세요.'] }
   const routing = deepClone(snapshot.draft.routing)
   const body = buildPreviewBody(revision, snapshot.profile, { models: deepClone(snapshot.draft.models), routing },
-    snapshot.modelTargets, snapshot.routingProfiles, snapshot.routingTargets)
+    snapshot.modelTargets, snapshot.routingProfiles, snapshot.routingTargets, snapshot.modelRoles ?? null)
   return { body, errors: snapshot.routingTargetError ? [snapshot.routingTargetError] : [] }
 }
 
@@ -1279,7 +1459,7 @@ export function buildModelSectionPreviewBody(snapshot, storeScope, revision = sn
 export function buildModelSectionFallbackBody(snapshot, revision = snapshot?.revision) {
   const errors = [...(snapshot?.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : []),
     ...(snapshot?.auxiliaryFallbackTargetError ? [snapshot.auxiliaryFallbackTargetError] : [])]
-  const projection = { profile: snapshot?.profile, models: snapshot?.draft?.models, model_targets: snapshot?.modelTargets || [] }
+  const projection = { profile: snapshot?.profile, models: projectedModels(snapshot?.draft?.models, snapshot?.modelRoles ?? null), model_targets: snapshot?.modelTargets || [] }
   let native = null
   if (snapshot?.fallbackWrite || !snapshot?.auxiliaryWrite) {
     const targets = Array.isArray(snapshot?.fallbackWrite?.targets) ? snapshot.fallbackWrite.targets : []
@@ -1300,7 +1480,8 @@ export function buildModelSectionFallbackBody(snapshot, revision = snapshot?.rev
   if (errors.length) return { body: null, errors }
   const updates = new Map((native?.updates || []).map(update => [update.profile, { ...update }]))
   for (const update of auxiliary.updates) updates.set(update.profile, { ...(updates.get(update.profile) || { profile: update.profile }), auxiliary_fallback: update.auxiliary_fallback })
-  return { body: { expected_revision: revision, updates: [...updates.values()], confirmations: [...(native?.confirmations || []), ...auxiliary.confirmations] }, errors: [] }
+  return { body: { expected_revision: revision, updates: [...updates.values()], confirmations: [...(native?.confirmations || []), ...auxiliary.confirmations],
+    ...(Array.isArray(snapshot.modelRoles) ? { model_settings_schema: MODEL_SETTINGS_SCHEMA } : {}) }, errors: [] }
 }
 
 // What one model-section save writes to each profile, read from the request bodies themselves: the
@@ -1346,7 +1527,7 @@ export function buildScopedPreviewBody(snapshot, saveScope) {
   const body = buildPreviewBody(snapshot.revision, snapshot.profile, {
     models: deepClone(models),
     routing: deepClone(routing)
-  }, modelTargets, routingProfiles, routingTargets)
+  }, modelTargets, routingProfiles, routingTargets, snapshot.modelRoles ?? null)
   body.save_scope = saveScope
   if (saveScope !== 'timeouts') return { body, errors: [] }
   const timeoutResult = buildTimeoutUpdates(
@@ -1695,10 +1876,21 @@ function section(title, description, content, trailing = null) {
   })
 }
 
-function StatusView({ profile }) {
+// One sentence on what a Hermes-native service reports for a role (see modelRoleInfo).
+export function modelRoleStateText(info) {
+  if (!info?.resolved) return 'Hermes 설정에서 이 역할의 모델을 확인할 수 없습니다. 이 화면에서는 바꾸지 않고 그대로 둡니다.'
+  if (!info.editable) return `이 화면에서 바꿀 수 없는 설정입니다${info.reason ? `(${readableValue(info.reason)})` : ''}. 기존 설정은 그대로 둡니다.`
+  const parts = [info.source === 'inherited' ? 'Hermes 설정에 따로 지정하지 않아 물려받은 값입니다. 고쳐 저장하면 이 역할을 직접 지정합니다.' : 'Hermes 설정에서 읽은 현재 값입니다.']
+  if (info.state !== 'verified') parts.push('실제로 이 값을 쓰는지는 확인되지 않았습니다.')
+  return parts.join(' ')
+}
+
+// `nativeModels`: on a Hermes-native service the stored and the actual models are one value, so a
+// per-role model difference is never reported as something to save again.
+function StatusView({ profile, nativeModels = false }) {
   if (!profile) return null
   const actual = profile.actual_models && typeof profile.actual_models === 'object' ? profile.actual_models : {}
-  const drift = Array.isArray(profile.drift) ? profile.drift : []
+  const drift = (Array.isArray(profile.drift) ? profile.drift : []).filter(item => !(nativeModels && typeof item === 'string' && item.startsWith('models.')))
   return jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.7rem' },
     children: [
@@ -2566,7 +2758,12 @@ export function submittedEditCoverage(view, sent) {
       if ((scope === null || scope === 'models') && Array.isArray(body.model_targets) && body.model_targets.length) {
         covered.add('copy.models')
         // The page sends the roles it edits (never the delegation role).
-        if (sameValue(pageModels(body.models), pageModels(view.models))) covered.add('models')
+        // A Hermes-native partial body covers the edit when it carries every edited role as drafted.
+        if (body.model_settings_schema === MODEL_SETTINGS_SCHEMA && Array.isArray(view.editedRoles)) {
+          const sent = body.models && typeof body.models === 'object' ? body.models : {}
+          if (view.editedRoles.every(role => Object.prototype.hasOwnProperty.call(sent, role)) &&
+            Object.keys(sent).every(role => sameValue(sent[role] ?? null, view.models?.[role] ?? null))) covered.add('models')
+        } else if (sameValue(pageModels(body.models), pageModels(view.models))) covered.add('models')
       }
       if ((scope === null || scope === 'routing') && body.routing) {
         const routingTargets = Array.isArray(body.routing_targets) ? body.routing_targets : [body.profile]
@@ -3382,7 +3579,14 @@ function RouterPage({ ctx: pluginContext }) {
     : !slotTargetsAllowed.length ? (slotsCopyOk
       ? `작업 슬롯 모델: 선택한 프로필(${selectedTargets.join(', ')})에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않습니다. 불러온 프로필(${selectedProfile})을 적용 대상에 넣거나 다른 프로필을 고르세요.`
       : `작업 슬롯 모델: ${slotSkipReason}입니다. 불러온 프로필(${selectedProfile})을 적용 대상에 넣거나, 그 슬롯의 모델 기준을 다시 고르세요.`) : '') : ''
-  const modelWriteNeeded = modelDraftChanged || routingTargetEdited
+  // A Hermes-native service (status `model_settings_schema: 1`) takes only the roles a save writes:
+  // each edited role, and on explicit copy intent each role Hermes holds as a verified explicit value.
+  // Those roles are 'held': their frozen values stay, everything else follows the newest status.
+  const modelSettings = modelSettingsCapable(statusQuery.data)
+  const editedRoles = modelSettings && draft && frozenProfile ? editedModelRoles(draft.models, frozenProfile.models) : []
+  const requestedRoles = modelSettings ? (draft && frozenProfile ? requestedModelRoles(currentRow, draft.models, frozenProfile.models, routingTargetEdited) : []) : null
+  const requestedRolesKey = modelSettings ? requestedRoles.join(',') : null
+  const modelWriteNeeded = modelSettings ? requestedRoles.length > 0 : (modelDraftChanged || routingTargetEdited)
   // Role models go to the target list only while there is an edit or fresh copy intent; a list that
   // merely persisted across a reload or profile change copies nothing.
   const modelWriteTargets = modelWriteNeeded ? selectedTargets : []
@@ -3411,17 +3615,20 @@ function RouterPage({ ctx: pluginContext }) {
   // ('fallback') or one auxiliary task's spare models ('auxiliary').
   const conflictDrift = conflict => ({ profile: conflict.profile, part: externalChangeLabel(conflict), fallback: conflict.field === 'native_fallback',
     ...(String(conflict.field).startsWith('auxiliary_fallback') ? { auxiliary: String(conflict.field).split('.')[1] || 'all' } : {}) })
-  const driftKind = item => item.fallback ? 'fallback' : item.auxiliary ? 'auxiliary' : 'store'
+  const driftKind = item => item.fallback ? 'fallback' : item.auxiliary ? 'auxiliary' : item.models ? 'models' : 'store'
   const serverDrift = serverConflict ? [conflictDrift(serverConflict)] : []
-  const driftItems = [...pageLiveDrift(profiles, selectedProfile, profileBaselines, expectationBaselines), ...serverDrift]
+  // On a Hermes-native service only the held roles of the loaded profile and the model targets count.
+  const modelCheck = modelSettings ? { roles: [...requestedRoles], targets: [...modelWriteTargets] } : null
+  const driftItems = [...pageLiveDrift(profiles, selectedProfile, profileBaselines, expectationBaselines, modelCheck), ...serverDrift]
   const storeDrift = driftItems.filter(item => driftKind(item) === 'store')
+  const modelDrift = driftItems.filter(item => driftKind(item) === 'models')
   const fallbackDrift = driftItems.some(item => item.fallback)
   const auxiliaryDriftFor = task => driftItems.filter(item => item.auxiliary === task || item.auxiliary === 'all')
   const liveDrift = driftItems
   // Re-checked when a save is dispatched, against the newest status, so a callback kept from an
   // earlier render never sends while the current state is blocked.
   const driftNow = (kind, tasks = null) => {
-    const items = [...pageLiveDrift(statusDataRef.current?.profiles || [], selectedProfile, profileBaselines, expectationBaselines),
+    const items = [...pageLiveDrift(statusDataRef.current?.profiles || [], selectedProfile, profileBaselines, expectationBaselines, modelCheck),
       ...(serverConflictRef.current ? [conflictDrift(serverConflictRef.current)] : [])]
     return items.some(item => kind === 'all' || (driftKind(item) === kind && (kind !== 'auxiliary' || !tasks || item.auxiliary === 'all' || tasks.includes(item.auxiliary))))
   }
@@ -3438,6 +3645,31 @@ function RouterPage({ ctx: pluginContext }) {
     return fallbackCapabilitiesSupported(status?.fallback_capabilities) && row?.fallbacks?.native?.editable === true
   }
   const storeDriftError = storeDrift.length ? liveDriftMessage(storeDrift) : ''
+  const modelDriftError = modelDrift.length ? liveDriftMessage(modelDrift) : ''
+  const modelRoleError = modelSettings && modelWriteNeeded ? modelRoleWriteError(profiles, selectedProfile, modelWriteTargets, requestedRoles, editedRoles) : ''
+  // Re-checked at dispatch against the newest status: the service still reads models from Hermes, and
+  // every role this save writes can still be written for each target.
+  const modelSettingsStillCurrent = () => modelSettingsCapable(statusDataRef.current) === modelSettings &&
+    (!modelSettings || !modelWriteNeeded || !modelRoleWriteError(statusDataRef.current?.profiles, selectedProfile, modelWriteTargets, requestedRoles, editedRoles))
+  // A same-revision status on a Hermes-native service: whatever no pending save holds follows it in the
+  // draft and every frozen baseline (see refreshCleanModelState). The conversation spare models are
+  // held while they are edited or the section has copy intent. Nothing is written or consented here.
+  const holdNativeFallback = Boolean(nativeFallbackDraftChanged || routingTargetEdited)
+  useEffect(() => {
+    if (!modelSettings || revisionChanged || !statusQuery.data || !selectedProfile || !draft || !profileBaselines || !expectationBaselines ||
+      applyPendingRef.current || needsReloadRef.current || refreshPendingRef.current || setupPendingRef.current) return
+    const next = refreshCleanModelState({ rows: profiles, selected: selectedProfile, draft, profileBaselines, expectationBaselines,
+      heldRoles: requestedRoles, holdNativeFallback, nativeFallbackDraft: fallbackDrafts.native, nativeFallbackBaseline: fallbackBaselines.native })
+    if (!next.changed) return
+    if (next.profileBaselines !== profileBaselines) setProfileBaselines(next.profileBaselines)
+    if (next.expectationBaselines !== expectationBaselines) setExpectationBaselines(next.expectationBaselines)
+    if (next.draft !== draft) setDraft(next.draft)
+    if (next.nativeFallbackDraft !== fallbackDrafts.native || next.nativeFallbackBaseline !== fallbackBaselines.native) {
+      setFallbackDrafts(current => ({ ...current, native: next.nativeFallbackDraft }))
+      setFallbackBaselines(current => ({ ...current, native: next.nativeFallbackBaseline }))
+    }
+  }, [modelSettings, revisionChanged, statusQuery.data, selectedProfile, draft, profileBaselines, expectationBaselines, requestedRolesKey, holdNativeFallback,
+    fallbackDrafts.native, fallbackBaselines.native, applyPending, needsReload])
   const nativeSectionEditable = Boolean(nativeDelegationDraft && currentRow?.native_delegation?.editable === true)
   const nativeSlotCopy = Boolean(nativeSectionEditable && nativeModelMode(nativeDelegationDraft.backend) && nativeSlotDraftReady(nativeDelegationDraft, currentRow.native_delegation))
   const nativeTargetReasons = Object.fromEntries(profiles.map(row => [row.name, nativeSectionEditable ? nativeDelegationTargetReason(row, nativeDelegationDraft.backend, nativeSlotCopy, selectedProfile) : '']))
@@ -3491,14 +3723,14 @@ function RouterPage({ ctx: pluginContext }) {
   const fallbackDriftError = fallbackDrift ? liveDriftMessage(driftItems.filter(item => item.fallback)) : ''
   // The same check the combined body runs: no spare model may equal the main model a target will have.
   const nativeFallbackIssue = nativeFallbackWriteNeeded ? fallbackScopeValidation('native', fallbackValueForScope('native', nativeFallbackDraft),
-    nativeFallbackWriteTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean), { profile: selectedProfile, models: draft?.models, model_targets: modelWriteTargets }) : ''
+    nativeFallbackWriteTargets.map(name => profiles.find(item => item.name === name)).filter(Boolean), { profile: selectedProfile, models: projectedModels(draft?.models, requestedRoles), model_targets: modelWriteTargets }) : ''
   const nativeFallbackSaveError = nativeFallbackTargetError || (nativeFallbackWriteNeeded ? fallbackDriftError : '') || (nativeFallbackIssue ? `대화 예비 모델: ${nativeFallbackIssue}` : '')
   // The compression and title-generation spare models, task by task, in the conversation spare models'
   // pattern: written to the section's targets that can take them when the draft's value differs from
   // the loaded one, or on copy intent while the chain is on (switching a chain off is copied only as
   // an explicit edit, so a hand-picked list never clears other profiles' chains by itself).
   const auxiliaryState = currentRow?.auxiliary_fallbacks || null
-  const auxiliaryModelProjection = { profile: selectedProfile, models: draft?.models, model_targets: modelWriteTargets }
+  const auxiliaryModelProjection = { profile: selectedProfile, models: projectedModels(draft?.models, requestedRoles), model_targets: modelWriteTargets }
   const auxiliary = Object.fromEntries(AUXILIARY_TASKS.map(task => {
     const taskDraft = auxiliaryDrafts[task.id]
     const changed = auxiliaryFallbackChanged(taskDraft, auxiliaryBaselines[task.id])
@@ -3586,7 +3818,7 @@ function RouterPage({ ctx: pluginContext }) {
     'routing.slots': Boolean(draft && frozenProfile && differs(draft.slots, frozenProfile.slots)),
     // A hand-picked model target list is a pending copy of the role models, of the slot models while
     // their cards are on screen, and of the delegation method to profiles stored on a plugin method.
-    'copy.models': Boolean(routingTargetEdited),
+    'copy.models': Boolean(routingTargetEdited && (!modelSettings || requestedRoles.length > 0)),
     // (never while a slot still follows the delegation model: such slot models are not copied)
     'copy.slots': Boolean(routingTargetEdited && slotCardsVisible && draft?.slots && slotsCopyOk && slotTargetsAllowed.length > 0),
     'native.copy': Boolean(routingTargetEdited && nativeBackendCopyable && selectedTargets.some(name => nativeBackendSelectable(nativeDelegationBaselines[name]?.backend))),
@@ -3602,7 +3834,7 @@ function RouterPage({ ctx: pluginContext }) {
       [`copy.aux.${task.id}`, Boolean(auxiliary[task.id].copy && auxiliary[task.id].targets.length)]])),
     reenable: frozenReenable.length > 0 }
   // The drafted value of each edit, for checking what a save actually sent.
-  editViewRef.current = { profile: selectedProfile, models: draft?.models ?? null,
+  editViewRef.current = { profile: selectedProfile, models: draft?.models ?? null, editedRoles: modelSettings ? [...editedRoles] : null,
     routing: draft ? { heavy: draft.routing?.heavy, light: draft.routing?.light } : null, slots: draft?.slots ?? null,
     native: nativeDelegationDraft ? { backend: nativeDelegationDraft.backend, slotPolicy: nativeDelegationDraft.slotPolicy ?? null,
       autoSlotPolicy: nativeDelegationDraft.autoSlotPolicy ?? null, profile_routes: nativeDelegationDraft.profile_routes,
@@ -3614,13 +3846,13 @@ function RouterPage({ ctx: pluginContext }) {
   const noNativeTargetError = nativeDraftChanged && selectedTargets.length && !nativeWriteTargets.length
     ? '바꾼 ‘맡기는 방식·예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다. 받을 수 있는 프로필을 선택하거나 그 변경을 되돌리세요.' : ''
   const sectionSaveError = (missingModelTargets.length && (sectionWriteNeeded || routingTargetEdited) ? vanishedMessage(missingModelTargets) : '') ||
-    ((modelWriteNeeded || routingCopyPending) ? storeDriftError : '') || nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
+    ((modelWriteNeeded || routingCopyPending) ? storeDriftError : '') || (modelWriteNeeded ? modelDriftError || modelRoleError : '') || nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
     nativeFallbackSaveError || auxiliarySaveError ||
     (nativeWriteNeeded && !nativeStorageAvailable ? '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.' : '')
   const customSlotCount = draft?.slots ? TASK_SLOTS.filter(slot => draft.slots[slot.id]?.follow === 'custom').length : 0
   const spareSlotCount = nativeSlotCopy ? TASK_SLOTS.filter(slot => nativeDraftSlotPolicy(nativeDelegationDraft)[slot.id].mode === 'custom').length : 0
   const sectionSaveSummary = [
-    modelWriteNeeded ? '대화 모델' : null,
+    modelWriteNeeded ? (modelSettings ? `대화 모델(${requestedRoles.map(role => ROLES.find(item => item.id === role)?.label || role).join('·')})` : '대화 모델') : null,
     routingCopyPending ? `작업 슬롯 모델(직접 지정 ${customSlotCount}개)` : null,
     nativeFallbackWriteNeeded ? `대화 예비 모델: ${nativeFallbackDraft.enabled ? `${nativeFallbackDraft.chain.length}개 사용` : '사용 안 함'}` : null,
     ...AUXILIARY_TASKS.map(task => auxiliary[task.id].writeNeeded ? `${task.label} 예비 모델: ${auxiliary[task.id].value.length ? `${auxiliary[task.id].value.length}개 사용` : '사용 안 함'}` : null),
@@ -3820,6 +4052,9 @@ function RouterPage({ ctx: pluginContext }) {
     revision: draftRevision,
     draft: deepClone(saveDraft),
     modelTargets: [...modelWriteTargets],
+    // The roles a Hermes-native save writes (null: the earlier whole-mapping body).
+    modelRoles: modelSettings ? [...requestedRoles] : null,
+    modelRoleError,
     // Membership is sent back as loaded; only the re-enable save changes it.
     routingProfiles: [...loadedRoutingProfiles],
     routingTargets: [...routingWriteTargets],
@@ -3924,8 +4159,10 @@ function RouterPage({ ctx: pluginContext }) {
     // follow-up of a combined save uses the same frozen values: its first write (the delegation
     // method) touches none of them, so nothing is advanced.
     const liveNames = (Array.isArray(snapshot.profiles) ? snapshot.profiles : []).map(row => row.name)
-    const withExpected = (op, body) => ['/preview', '/fallback-preview'].includes(op) && snapshot.pageExpectations && body
-      ? { ...body, expected: pageExpectationsFor(op, body, snapshot.pageExpectations, liveNames) } : body
+    const withExpected = (op, body) => {
+      return ['/preview', '/fallback-preview'].includes(op) && snapshot.pageExpectations && body
+        ? { ...body, expected: pageExpectationsFor(op, body, snapshot.pageExpectations, liveNames) } : body
+    }
     const noteConflict = error => {
       const conflict = externalChangeFromError(error)
       if (conflict && isSaveCurrent(snapshot, token)) { serverConflictRef.current = conflict; setServerConflict(conflict) }
@@ -4113,6 +4350,7 @@ function RouterPage({ ctx: pluginContext }) {
     if (!sectionWriteNeeded || sectionSaveError) return
     // Checked again now, against the newest status: this callback may come from an earlier render.
     if (storeNeeded && driftNow('store')) return
+    if (modelWriteNeeded && (driftNow('models') || !modelSettingsStillCurrent())) return
     if (nativeFallbackWriteNeeded && driftNow('fallback')) return
     if (auxiliaryWriteNeeded && driftNow('auxiliary', AUXILIARY_TASKS.filter(task => auxiliary[task.id].writeNeeded).map(task => task.id))) return
     if ((nativeFallbackWriteNeeded || nativeFallbackDraftChanged) && !fallbackSourceEditableNow()) return
@@ -4131,12 +4369,14 @@ function RouterPage({ ctx: pluginContext }) {
     // step changes that model for a spare-model target, the check is valid only after that step.
     const mainChangedFor = name => base.modelTargets.includes(name) && (() => {
       const row = base.profiles.find(item => item.name === name)
+      if (Array.isArray(base.modelRoles) && !base.modelRoles.includes('main')) return false
       return routeIdentity(base.draft.models?.main) !== routeIdentity(row?.models?.main) || routeIdentity(base.draft.models?.main) !== routeIdentity(row?.actual_models?.main)
     })()
     // An auxiliary task's spare models are checked against that task's own model (which follows the
     // main model while its provider is 'auto'), so a change of either defers the check the same way.
     const roleChangedFor = (name, role) => base.modelTargets.includes(name) && (() => {
       const row = base.profiles.find(item => item.name === name)
+      if (Array.isArray(base.modelRoles) && !base.modelRoles.includes(role)) return false
       return routeIdentity(base.draft.models?.[role]) !== routeIdentity(row?.models?.[role]) || routeIdentity(base.draft.models?.[role]) !== routeIdentity(row?.actual_models?.[role])
     })()
     const auxiliaryTargetsChanging = AUXILIARY_TASKS.some(task => (fallbackSnapshot.auxiliaryWrite?.[task.id]?.targets || [])
@@ -4216,6 +4456,7 @@ function RouterPage({ ctx: pluginContext }) {
 
   const saveAll = () => {
     if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || liveDrift.length || pageVanished.length || driftNow('all') || !currentRow || !draft || !statusQuery.data || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
+    if (!modelSettingsStillCurrent()) return
     // The whole-page save carries the conversation and auxiliary spare models too: same dispatch-time source checks.
     if ((nativeFallbackWriteNeeded || nativeFallbackDraftChanged) && !fallbackSourceEditableNow()) return
     if (AUXILIARY_TASKS.some(task => (auxiliary[task.id].writeNeeded || auxiliary[task.id].changed) && !auxiliarySourceEditableNow(task.id))) return
@@ -4246,19 +4487,20 @@ function RouterPage({ ctx: pluginContext }) {
             currentByProfile: snapshot.currentTimeoutsByProfile,
             copyIntent: snapshot.timeoutTargetEdited
           },
-          snapshot.auxiliaryWrite
+          snapshot.auxiliaryWrite,
+          snapshot.modelRoles
         )
         const routingUpdates = (combined.body.fallback_updates || [])
           .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
           .map(update => update.profile)
         const projectedErrors = projectedRoutingFallbackErrors(snapshot.profiles, {
           profile: snapshot.profile,
-          models: snapshot.draft.models,
+          models: projectedModels(snapshot.draft.models, snapshot.modelRoles),
           routing: combined.body.routing,
           model_targets: combined.body.model_targets,
           routing_targets: combined.body.routing_targets
         }, routingUpdates)
-        return { body: combined.body, errors: [...new Set([...combined.errors, ...projectedErrors, ...(snapshot.routingTargetError ? [snapshot.routingTargetError] : []), ...(snapshot.noTargetError ? [snapshot.noTargetError] : []),
+        return { body: combined.body, errors: [...new Set([...combined.errors, ...projectedErrors, ...(snapshot.routingTargetError ? [snapshot.routingTargetError] : []), ...(snapshot.noTargetError ? [snapshot.noTargetError] : []), ...(snapshot.modelRoleError ? [snapshot.modelRoleError] : []),
           ...(snapshot.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : []), ...(snapshot.auxiliaryFallbackTargetError ? [snapshot.auxiliaryFallbackTargetError] : [])])] }
       }
     })
@@ -4442,12 +4684,22 @@ function RouterPage({ ctx: pluginContext }) {
       ] })
   }
 
-  const conversationCard = role => jsx(ModelCard, { id: `model-card-${role.id}`, title: role.label, description: role.description,
+  // On a Hermes-native service the card says what Hermes reports for the role (unresolved, managed,
+  // inherited or unverified) instead of a second 'actual' value; a role that cannot be written here is
+  // shown read-only and an unresolved one shows no value at all.
+  const conversationCard = role => {
+    const info = modelSettings ? modelRoleInfo(currentRow, role.id) : null
+    const held = editedRoles.includes(role.id)
+    return jsx(ModelCard, { id: `model-card-${role.id}`, title: role.label, description: role.description,
     model: [
-      jsx(RoleRouteFields, { prefix: `model-${role.id}`, route: draft.models?.[role.id], disabled, catalog: modelCatalog, onChange: (field, value) => updateRole(role.id, field, value) }),
-      jsx('p', { style: styles.actual, children: `실제 설정: ${readableValue(currentRow?.actual_models?.[role.id])}` })
+      jsx(RoleRouteFields, { prefix: `model-${role.id}`, route: info && !info.resolved && !held ? null : draft.models?.[role.id],
+        disabled: disabled || Boolean(info && !info.editable), catalog: modelCatalog, onChange: (field, value) => updateRole(role.id, field, value) }),
+      info
+        ? jsx('p', { id: `model-${role.id}-native-state`, role: 'note', style: styles.actual, children: modelRoleStateText(info) })
+        : jsx('p', { style: styles.actual, children: `실제 설정: ${readableValue(currentRow?.actual_models?.[role.id])}` })
     ],
     spare: role.id === 'main' ? conversationFallback : auxiliaryEditor(AUXILIARY_TASKS.find(task => task.id === role.id)) }, role.id)
+  }
 
   const modelFields = draft ? jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' },
@@ -4682,7 +4934,7 @@ function RouterPage({ ctx: pluginContext }) {
       jsx(InitialSetupCard, { pluginContext, data: statusQuery.data, scopeKey, settingsBusy: applyPending || setupPending || statusQuery.isFetching, begin: beginProfilePreparation, finish: finishProfilePreparation, onPrepared: profilePreparationChanged }),
       jsx(ProfilePreparationCard, { pluginContext, data: statusQuery.data, scopeKey, settingsBusy: applyPending || setupPending || statusQuery.isFetching, begin: beginProfilePreparation, finish: finishProfilePreparation, onPrepared: profilePreparationChanged }),
       profiles.length === 0 ? jsx('div', { role: 'status', style: styles.notice, children: '관리할 프로필이 없습니다. Hermes에서 프로필을 만든 뒤 상태를 새로고침하세요.' }) : null,
-      profiles.length ? section('불러올 프로필', '아래에 불러올 설정을 고릅니다. 실제로 바꿀 프로필은 각 카드의 적용 대상에서 따로 선택하세요.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `지금 사용 중인 프로필: ${activeProfile || '확인 중'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow }) : null) : null,
+      profiles.length ? section('불러올 프로필', '아래에 불러올 설정을 고릅니다. 실제로 바꿀 프로필은 각 카드의 적용 대상에서 따로 선택하세요.', jsxs('div', { style: styles.fields, children: [jsx(ChoiceField, { id: 'profile-select', label: '프로필', value: selectedProfile || '', disabled: disabled || !profiles.length, onChange: selectProfile, options: profiles.map(row => ({ value: row.name, label: row.name })) }), jsx('div', { style: { ...styles.field, justifyContent: 'flex-end' }, children: jsx('span', { style: styles.hint, children: `지금 사용 중인 프로필: ${activeProfile || '확인 중'}` }) })] }), currentRow ? jsx(StatusView, { profile: currentRow, nativeModels: modelSettings }) : null) : null,
       profiles.length ? section('모델', '대화와 작업에 쓸 모델, 그 모델을 쓸 수 없을 때의 예비 모델을 카드마다 정합니다. 모두 맨 아래 적용 대상에서 고른 프로필에 한 번에 저장합니다.', jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '1.4rem' }, children: [
         jsx('div', { id: 'conversation-models', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: modelFields }),
         jsx(NativeDelegationCard, { dto: currentRow?.native_delegation, draft: nativeDelegationDraft, catalog: modelCatalog,
@@ -5848,7 +6100,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.13.2',
+  version: '0.14.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

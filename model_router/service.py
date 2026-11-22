@@ -70,6 +70,317 @@ STALE_KEYS = {
     "main": ("model.base_url", "model.api_mode"),
     "delegation": ("delegation.base_url", "delegation.api_mode"),
 }
+# Keys that bind a role to a direct endpoint or credential. While any is set, provider/model/reasoning
+# alone do not identify where the role runs, so a task route that copies them is not that route.
+ENDPOINT_KEYS = {
+    "main": ("model.base_url", "model.api_key"),
+    "delegation": ("delegation.base_url", "delegation.api_key"),
+    "compression": ("auxiliary.compression.base_url", "auxiliary.compression.api_key",
+                    "auxiliary.compression.key_env", "auxiliary.compression.api_key_env"),
+    "title": ("auxiliary.title_generation.base_url", "auxiliary.title_generation.api_key",
+              "auxiliary.title_generation.key_env", "auxiliary.title_generation.api_key_env"),
+}
+# The model settings wire: status rows project each role from the profile's own Hermes config
+# (`models` and `actual_models` are the same projection) with `model_roles[role]` metadata. A preview
+# that sends `model_settings_schema: 1` edits only the roles it names.
+MODEL_SETTINGS_SCHEMA = 1
+NATIVE_EDIT_ROLES = ("main", "compression", "title")
+ROLE_STATES = ("verified", "unverified")
+ROLE_SOURCES = ("explicit", "inherited")
+# Hidden destinations: a role's endpoint/credential keys and the legacy base_url/api_mode override
+# slots are never shown, and no model save writes or clears them. A provider change that would leave
+# (or, for an auxiliary role, enter) a configured hidden destination is refused before any write: it
+# stays an explicit change in Hermes. Every hidden key a planned role actually depends on is bound by
+# digest into the plan's CAS snapshot, so a change between preview and apply refuses the apply. No
+# compare token, key or secret-derived value is ever sent on the wire (status is read-only and works
+# across separate Service processes: status, preview and apply share nothing but the config/store).
+
+
+def _role_keys(role: str) -> tuple[str, ...]:
+    return (*MODEL_KEYS[role], *ENDPOINT_KEYS[role])
+
+
+# Config keys that change how Hermes reads `model.default` / the main reasoning without being role
+# keys: direct aliases (hermes_cli/model_switch.py resolve_startup_model_route), configured provider
+# names (`provider/model` and `custom:<name>:model` decoding) and per-model reasoning overrides
+# (hermes_constants.resolve_reasoning_config). Only names (and the overrides) are kept in memory:
+# alias/provider entries can carry endpoints and credentials, which are never parsed or dialed.
+ROUTE_DEPENDENCY_KEYS = ("model_aliases", "model.aliases", "providers", "custom_providers", "agent.reasoning_overrides")
+
+
+def _role_scope_keys(role: str) -> tuple[str, ...]:
+    """Every config key whose raw value or managed provenance decides `role`'s projected route.
+
+    A non-main role can inherit the main model, so its scope includes main's. Overlay availability,
+    managed provenance digests and CAS bindings are scoped to this set: an unrelated role's
+    overlay never changes (or invalidates) this role. Stable: independent of the current values.
+    """
+    keys: list[str] = []
+    for name in ((*_role_keys("main"), *STALE_KEYS["main"]) if role != "main" else ()):
+        keys.append(name)
+    keys.extend((*_role_keys(role), *STALE_KEYS.get(role, ()), *ROUTE_DEPENDENCY_KEYS))
+    return tuple(dict.fromkeys(keys))
+
+
+def _route_dependency_view(key: str, value: Any) -> Any:
+    """The part of a ROUTE_DEPENDENCY_KEYS value the projection reads: entry names only for aliases and
+    providers (never their endpoints or credentials). A malformed container stays non-dict/non-list."""
+    if value is None or key == "agent.reasoning_overrides":
+        return value
+    if key == "custom_providers":
+        if not isinstance(value, list):
+            return False
+        return [{"name": entry.get("name")} if isinstance(entry, dict) else None for entry in value]
+    return {str(name): True for name in value} if isinstance(value, dict) else False
+
+
+def _main_model_not_literal(values: dict[str, Any]) -> str | None:
+    """Why `model.default` may not run literally on `model.provider`, or None when it provably does.
+
+    Hermes decodes the configured default before choosing a provider (resolve_startup_model_route):
+    a direct alias name, a `<known provider>:<model>` string and a `<configured provider>/<model>`
+    string each name another route. Their targets are not resolved here (alias entries may hold
+    endpoints/credentials): such a main role is unverified. Unknown host vocabulary fails closed.
+    """
+    raw = values.get(MODEL_KEYS["main"][1])
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    lowered = stripped.lower()
+    for source in ("model_aliases", "model.aliases"):
+        aliases = values.get(source)
+        if aliases is None:
+            continue
+        if not isinstance(aliases, dict):
+            return "alias_unverified"
+        if lowered in {str(name).strip().lower() for name in aliases}:
+            return "alias"
+    colon = stripped.find(":")
+    if colon > 0 and stripped[:colon].strip() and stripped[colon + 1:].strip():
+        try:
+            from hermes_cli.models import _KNOWN_PROVIDER_NAMES as known  # type: ignore
+            known = {str(name).lower() for name in known}
+        except Exception:
+            return "qualified_unverified"
+        if stripped[:colon].strip().lower() in known:
+            return "qualified_model"
+    if "/" in stripped:
+        prefix = stripped.split("/", 1)[0].strip().lower()
+        providers, custom = values.get("providers"), values.get("custom_providers")
+        if (providers is not None and not isinstance(providers, dict)) or (custom is not None and not isinstance(custom, list)):
+            return "provider_prefix_unverified"
+        configured = {str(name).strip().lower() for name in (providers or {}) if str(name).strip()}
+        configured.update(f"custom:{str(entry.get('name')).strip().lower()}" for entry in (custom or [])
+                          if isinstance(entry, dict) and isinstance(entry.get("name"), str) and entry["name"].strip())
+        if configured:
+            try:
+                from hermes_cli.models import normalize_provider  # type: ignore
+                canonical = str(normalize_provider(prefix)).lower()
+            except Exception:
+                return "provider_prefix_unverified"
+            if prefix in configured or canonical in configured:
+                return "provider_prefix"
+    return None
+
+
+def _reasoning_override(model: str, overrides: Any) -> tuple[bool, str | None]:
+    """Hermes' per-model `agent.reasoning_overrides` entry for `model` (resolve_reasoning_config).
+
+    Returns (applies, effort): (False, None) when no entry applies; (True, effort) for an entry this
+    page can show; (True, None) when one applies (or may apply) but is not a plain effort."""
+    if overrides is None or overrides == {}:
+        return False, None
+    if not isinstance(overrides, dict):
+        return True, None
+    try:
+        from hermes_constants import resolve_per_model_reasoning_effort  # type: ignore
+        result = resolve_per_model_reasoning_effort(model, overrides)
+    except Exception:
+        return True, None
+    if result is None:
+        return False, None
+    if isinstance(result, dict) and result.get("enabled") is False and set(result) == {"enabled"}:
+        return True, "none"
+    effort = result.get("effort") if isinstance(result, dict) and result.get("enabled") is True else None
+    return True, effort if isinstance(effort, str) and effort in EFFORTS else None
+
+
+def _overlay_role(overlay: dict[str, Any] | None, role: str) -> dict[str, Any]:
+    """`role`'s scoped overlay entry {available, digest}; an overlay without per-role entries (test
+    doubles, older readers) applies its top-level availability and digest to every role."""
+    overlay = overlay or {}
+    scoped = (overlay.get("roles") or {}).get(role)
+    if isinstance(scoped, dict):
+        return scoped
+    return {"available": bool(overlay.get("available")), "digest": overlay.get("digest")}
+
+
+def _overlay_digest(overlay: dict[str, Any] | None, roles: tuple[str, ...] | list[str]) -> str | None:
+    """The managed provenance digest a plan records for `roles` of one profile (see
+    _overlay_digest_holds). Scoped when the overlay has per-role entries; None when any is unavailable."""
+    overlay = overlay or {}
+    if not isinstance(overlay.get("roles"), dict):
+        return overlay.get("digest") if overlay.get("available") else None
+    selected = sorted(set(roles))
+    parts = {role: _overlay_role(overlay, role) for role in selected}
+    if not selected or any(not part.get("available") or not isinstance(part.get("digest"), str) for part in parts.values()):
+        return None
+    return "roles:" + ",".join(selected) + ":" + _digest({role: part["digest"] for role, part in parts.items()})
+
+
+def _overlay_digest_holds(overlay: dict[str, Any] | None, recorded: Any) -> bool:
+    """Whether a recorded _overlay_digest still describes the current overlay (fails closed)."""
+    if not isinstance(recorded, str):
+        return False
+    if recorded.startswith("roles:"):
+        roles = recorded[len("roles:"):].split(":", 1)[0].split(",")
+        if any(role not in MODEL_ROLES for role in roles):
+            return False
+        return _overlay_digest(overlay, roles) == recorded
+    return bool((overlay or {}).get("available")) and (overlay or {}).get("digest") == recorded
+
+
+def _unset(value: Any, *, auto: bool) -> bool:
+    """An absent role value: missing, empty, or (where Hermes reads it so) `auto`."""
+    if value is None:
+        return True
+    return isinstance(value, str) and (value == "" or (auto and value.casefold() == "auto"))
+
+
+def _direct_endpoint(role: str, values: dict[str, Any]) -> bool:
+    """Whether the role runs on an endpoint/credential its provider/model/reasoning do not name.
+
+    An inline credential (or key env) always is. The main model's `model.base_url` with a named
+    provider is not: Hermes resolves a route naming that same provider through the profile's own
+    `model.base_url` (runtime_provider._config_base_url_for_provider), so a route that copies the
+    main model reaches the same endpoint; `custom`/`auto`/no provider with a base_url is a bare direct
+    endpoint. Any delegation/auxiliary base_url is a direct endpoint of that role alone.
+    """
+    keys = ENDPOINT_KEYS[role]
+    base_key, credential_keys = keys[0], keys[1:]
+    if any(not _unset(values.get(key), auto=False) for key in credential_keys):
+        return True
+    if _unset(values.get(base_key), auto=False):
+        return False
+    if role != "main":
+        return True
+    provider = values.get(MODEL_KEYS["main"][0])
+    return not isinstance(provider, str) or provider.casefold() in {"", "auto", "custom"} or provider.casefold().startswith("custom:")
+
+
+def _project_roles(values: dict[str, Any], overlay: dict[str, Any] | None) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]]]:
+    """Each model role as the profile's Hermes config resolves it, and how far that is known.
+
+    `values` maps every key of _role_keys to its configured value (`overlay` supplies managed keys).
+    Returns (models, roles): `models` holds only verified roles; `roles[role]` is
+    {state, source, editable[, reason]}. Nothing here fabricates a route: a role whose route cannot
+    be established exactly is `unverified` and left out of `models`.
+    """
+    managed = set((overlay or {}).get("managed") or ())
+    models: dict[str, dict[str, str]] = {}
+    roles: dict[str, dict[str, Any]] = {}
+
+    def effort_of(value: Any) -> str | None:
+        if value is None or value == "":
+            return ""
+        return value if isinstance(value, str) and value in EFFORTS else None
+
+    main_effort = effort_of(values.get(MODEL_KEYS["main"][2]))
+    for role in MODEL_ROLES:
+        keys = _role_keys(role)
+        provider_key, model_key, effort_key = MODEL_KEYS[role]
+        # A managed api_mode/base_url the plan would clear is a managed key of this role too.
+        role_managed = any(key in managed for key in (*keys, *STALE_KEYS.get(role, ())))
+        available = bool(_overlay_role(overlay, role).get("available"))
+        meta: dict[str, Any] = {"state": "unverified", "source": "explicit", "editable": False}
+        raw_provider, raw_model = values.get(provider_key), values.get(model_key)
+        aux = role in AUXILIARY_FALLBACK_KEYS
+        inherit_provider = role != "main" and _unset(raw_provider, auto=True)
+        inherit_model = role != "main" and _unset(raw_model, auto=aux)
+        if inherit_provider and inherit_model:
+            meta["source"] = "inherited"
+        roles[role] = meta
+        if not available:
+            meta["reason"] = "provenance_unavailable"
+            continue
+        if any(effective_config._contains_env_ref(values.get(key)) for key in keys):
+            meta["reason"] = "dynamic"
+            continue
+        # Writes never go through a managed overlay; a managed role is shown read-only.
+        meta["editable"] = not role_managed
+        if _direct_endpoint(role, values):
+            meta["editable"] = False
+            meta["reason"] = "direct_endpoint"
+            continue
+        effort = effort_of(values.get(effort_key))
+        if effort is None:
+            meta["reason"] = "invalid"
+            continue
+        main = models.get("main")
+        if role == "main":
+            if _unset(raw_provider, auto=False) or _unset(raw_model, auto=False):
+                meta["reason"] = "unresolved"
+                continue
+            if isinstance(raw_provider, str) and raw_provider.casefold() == "auto":
+                meta["reason"] = "auto_provider"
+                continue
+            rerouted = _main_model_not_literal(values)
+            if rerouted is not None:
+                # An alias / provider-qualified default runs elsewhere; never shown as provider+string.
+                meta["reason"] = rerouted
+                continue
+            provider, model = raw_provider, raw_model
+            applies, override = _reasoning_override(raw_model if isinstance(raw_model, str) else "", values.get("agent.reasoning_overrides"))
+            if applies and override is None:
+                meta["reason"] = "reasoning_override"
+                continue
+            if applies:
+                # Hermes' per-model override wins over agent.reasoning_effort for this model.
+                effort = override
+        elif inherit_provider and inherit_model:
+            if main is None:
+                meta["reason"] = "inherits_unverified"
+                continue
+            provider, model = main["provider"], main["model"]
+        elif inherit_provider:
+            # Delegation keeps the parent's provider with its own model; an auxiliary task with a
+            # model but no provider goes through Hermes' auto-detection, which is not known here.
+            if aux:
+                meta["reason"] = "auto_provider"
+                continue
+            if main is None:
+                meta["reason"] = "inherits_unverified"
+                continue
+            provider, model = main["provider"], raw_model
+        elif inherit_model:
+            # A provider without a model runs on that provider's catalog default: not known here.
+            meta["reason"] = "provider_default_model"
+            continue
+        else:
+            provider, model = raw_provider, raw_model
+        if not effort:
+            if role == "main":
+                effort = "medium"
+            elif main_effort is None:
+                meta["reason"] = "inherits_unverified"
+                continue
+            elif any(_reasoning_override(name, values.get("agent.reasoning_overrides"))[0]
+                     for name in {model, (main or {}).get("model")} if isinstance(name, str)):
+                # Which per-model override an inheriting role's effort follows is not known here.
+                meta["reason"] = "reasoning_override"
+                continue
+            else:
+                effort = main_effort or "medium"
+        try:
+            route = _route({"provider": provider, "model": model, "reasoning": effort})
+        except ValueError:
+            meta["reason"] = "invalid"
+            continue
+        meta["state"] = "verified"
+        if role_managed:
+            meta["reason"] = "managed"
+        models[role] = route
+    return models, roles
 DELEGATION_FALLBACK_KEY = "delegation.fallback_providers"
 # Hermes' own per-task spare models for two auxiliary tasks (auxiliary.<task>.fallback_chain). The
 # plugin writes only provider/model entries here, straight into the profile's config: nothing is kept
@@ -90,6 +401,13 @@ def _submitted_models(value: Any) -> tuple[dict[str, dict[str, str]], bool]:
     if isinstance(value, dict) and set(value) == set(MODEL_ROLES) - {"delegation"}:
         return {role: _route(value[role]) for role in MODEL_ROLES if role != "delegation"}, True
     return _models(value), False
+
+
+def _native_submitted_models(value: Any) -> dict[str, dict[str, str]]:
+    """The model settings wire's `models`: a non-empty subset of main, compression and title."""
+    if not isinstance(value, dict) or not value or set(value) - set(NATIVE_EDIT_ROLES):
+        raise ValueError("models must name one or more of main, compression and title")
+    return {role: _route(value[role]) for role in NATIVE_EDIT_ROLES if role in value}
 
 
 AUXILIARY_ENV_MASK = "[env]"
@@ -842,6 +1160,73 @@ class Service:
                 return {}
             raise ServiceError(f"profile {profile} has invalid model settings") from exc
 
+    @staticmethod
+    def _all_role_keys() -> tuple[str, ...]:
+        return tuple(key for role in MODEL_ROLES for key in _role_keys(role))
+
+    def _read_model_overlay(self, profile: str) -> dict[str, Any]:
+        """Managed provenance of the model role keys through Hermes' supported helpers.
+
+        Returns {available, managed: {key: effective value}, digest, roles}. Each role is read over its
+        own _role_scope_keys: `roles[role]` is {available, digest}, so an unverifiable or changed
+        overlay of one role never makes an unrelated role unverified or invalidates its plan (the
+        digest a plan records comes from _overlay_digest over the roles it relies on). `available` is
+        True when any role is; `digest` (every role) is kept for older callers. A role is unavailable
+        when provenance cannot be verified (helpers missing, unreadable or unverifiable managed
+        config). Only nonsecret digests leave this method; alias/provider entries keep names only.
+        """
+        unsafe = {"scoped_managed_provenance_unavailable", "scoped_managed_env_expression_readonly", "scoped_effective_unavailable"}
+        home = self._profile_home(profile)
+        managed: dict[str, Any] = {}
+        roles: dict[str, dict[str, Any]] = {}
+        for role in MODEL_ROLES:
+            keys = _role_scope_keys(role)
+            try:
+                snapshot = effective_config.read_key_scoped(home, keys)
+            except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged, OSError, ValueError):
+                roles[role] = {"available": False, "digest": None}
+                continue
+            if unsafe.intersection(snapshot.warnings) or not snapshot.effective_available:
+                roles[role] = {"available": False, "digest": None}
+                continue
+            roles[role] = {"available": True, "digest": snapshot.provenance_digest}
+            for key in keys:
+                if any(effective_config._managed_applies(item, key) for item in snapshot.managed_keys):
+                    value = snapshot.effective(key)
+                    managed[key] = _route_dependency_view(key, value) if key in ROUTE_DEPENDENCY_KEYS else value
+        if not any(item["available"] for item in roles.values()):
+            return {"available": False, "managed": {}, "digest": None, "roles": roles}
+        return {"available": True, "managed": managed, "roles": roles,
+                "digest": _digest({role: item["digest"] for role, item in roles.items()})}
+
+    def _native_models(
+        self, profile: str, overrides: dict[str, Any] | None = None, overlay: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]]]:
+        """The profile's model roles as its own Hermes config resolves them now (see _project_roles).
+
+        Read-only: nothing is written to the config or the store. `overrides` replaces configured
+        values (a plan's prospective writes); managed keys always keep their managed value. Never
+        raises for an unreadable config: every role is then unverified.
+        """
+        if overlay is None:
+            overlay = self._read_model_overlay(profile)
+        values: dict[str, Any] = {}
+        try:
+            for key in self._all_role_keys():
+                values[key] = self._read_key(profile, key)
+            for key in ROUTE_DEPENDENCY_KEYS:
+                values[key] = _route_dependency_view(key, self._read_key(profile, key))
+        except (ServiceError, ValueError, OSError):
+            models, roles = _project_roles({}, {"available": False})
+            for meta in roles.values():
+                meta["reason"] = "config_unreadable"
+            return models, roles
+        for key, value in (overrides or {}).items():
+            values[key] = copy.deepcopy(value)
+        for key, value in (overlay.get("managed") or {}).items():
+            values[key] = copy.deepcopy(value)
+        return _project_roles(values, overlay)
+
     def _kept_role_route(self, profile: str, role: str, main: dict[str, str]) -> dict[str, str]:
         """One non-main role of `profile` as _actual_models resolves it over the given main route,
         from the profile's own config keys (nothing is written)."""
@@ -885,6 +1270,122 @@ class Service:
         _route(light)
         for slot in routing.get("slots", {}):
             _route(slot_model.slot_route(routing, models, slot))
+
+    @staticmethod
+    def _check_live_routes(routing: dict[str, Any], live: dict[str, dict[str, str]]) -> None:
+        """Validate the routes a declaration resolves to over a live role snapshot.
+
+        A follow route to a role that is not verified is not validated here: it resolves to no route
+        and only the tasks that follow it are refused at dispatch. Custom routes are always checked.
+        """
+        declarations = [routing["heavy"], routing["light"], *(routing.get("slots") or {}).values()]
+        for declaration in declarations:
+            if declaration["follow"] == "custom":
+                _route(declaration["custom"])
+            elif declaration["follow"] in live:
+                _route(live[declaration["follow"]])
+
+    @staticmethod
+    def _hidden_keys(role: str) -> tuple[str, ...]:
+        """The role's hidden destination keys: endpoint/credential and legacy override slots."""
+        return tuple(dict.fromkeys((*ENDPOINT_KEYS.get(role, ()), *STALE_KEYS.get(role, ()))))
+
+    def _bind_hidden(self, profile: str, role: str, values: dict[str, Any]) -> bool:
+        """Bind `role`'s hidden keys of `profile` into a CAS snapshot (digests only, never the value).
+        Returns whether any of them is configured (nonempty)."""
+        configured = False
+        for key in self._hidden_keys(role):
+            raw = self._read_optional_key(profile, key)
+            values[key] = {"sha256": _digest(raw)}
+            configured = configured or not _unset(raw, auto=False)
+        return configured
+
+    def _plan_native_models(
+        self, name: str, submitted: dict[str, dict[str, str]], entries: dict[str, Any], after: dict[str, Any],
+        changes: list, snapshots: dict, writes: list, approved_roles: dict, prospective_models: dict,
+        model_provenance: dict,
+    ) -> None:
+        """Plan one target of a model settings wire save: only the submitted roles are compared and
+        written; every other role keeps its config exactly (an inherited role stays inherited).
+
+        The CAS snapshot holds the edited roles' own keys and every hidden key they depend on (only as
+        digests), and the plan records the managed provenance digest so apply refuses a new overlay
+        before its first write. Hidden keys are never written or cleared (see the hidden destination
+        note at ENDPOINT_KEYS). Nothing is written here.
+        """
+        overlay = self._read_model_overlay(name)
+        current, roles = self._native_models(name, overlay=overlay)
+        for role in submitted:
+            if not roles[role]["editable"]:
+                raise ValueError(f"the {role} model of {name} is read-only here ({roles[role].get('reason', 'unverified')})")
+        values = snapshots.setdefault(name, {})
+        overrides: dict[str, Any] = {}
+        before_writes = len(writes)
+        managed_keys = set(overlay.get("managed") or ())
+        main_provider = self._read_key(name, MODEL_KEYS["main"][0])
+        main_hidden = None  # main's hidden keys, bound once when an edited role depends on them
+
+        def same_provider(a: Any, b: Any) -> bool:
+            return isinstance(a, str) and isinstance(b, str) and a.strip().casefold() == b.strip().casefold() != ""
+
+        for role, desired in submitted.items():
+            for key in MODEL_KEYS[role]:
+                values[key] = self._read_key(name, key)
+            own_hidden = self._bind_hidden(name, role, values)
+            meta = roles[role]
+            if role == "main":
+                old_provider = values[MODEL_KEYS["main"][0]]
+            elif meta["state"] == "verified":
+                old_provider = current[role]["provider"]
+            else:
+                raw = values[MODEL_KEYS[role][0]]
+                old_provider = main_provider if _unset(raw, auto=True) else raw
+            # A non-main role on main's provider reaches main's own endpoint/api_mode (Hermes resolves
+            # that provider through model.base_url): main's hidden keys are then a dependency too.
+            uses_main = role != "main" and (same_provider(desired["provider"], main_provider) or same_provider(old_provider, main_provider))
+            if uses_main and main_hidden is None:
+                main_hidden = self._bind_hidden(name, "main", values)
+                values.setdefault(MODEL_KEYS["main"][0], main_provider)
+            if meta["state"] == "verified" and meta["source"] == "explicit" and current.get(role) == desired:
+                continue  # already exactly this route, set on the role itself
+            if not same_provider(old_provider, desired["provider"]):
+                hidden = own_hidden or (uses_main and main_hidden)
+                if any(key in managed_keys for key in (*self._hidden_keys(role), *(self._hidden_keys("main") if uses_main else ()))):
+                    raise ValueError(f"the {role} model of {name} has a managed endpoint override; change it in Hermes first")
+                if hidden:
+                    # Never written or cleared here, and never silently carried to another provider.
+                    raise ValueError(f"the {role} model of {name} uses a custom endpoint, credential or api_mode override; "
+                                     "change its provider in Hermes")
+            changes.append({"profile": name, "field": f"models.{role}", "before": copy.deepcopy(current.get(role)), "after": copy.deepcopy(desired)})
+            for key, value in zip(MODEL_KEYS[role], (desired["provider"], desired["model"], desired["reasoning"])):
+                overrides[key] = value
+                if values[key] != value:
+                    writes.append({"profile": name, "key": key, "before": values[key], "after": value})
+        prospective, prospective_roles = self._native_models(name, overrides=overrides, overlay=overlay)
+        for role, desired in submitted.items():
+            if prospective_roles[role]["state"] != "verified" or prospective.get(role) != desired:
+                raise ValueError(f"the {role} model of {name} would not resolve to the submitted route")
+        approved_roles[name] = copy.deepcopy(submitted)
+        prospective_models[name] = prospective
+        model_provenance[name] = _overlay_digest(overlay, list(submitted))
+        if len(writes) == before_writes or name not in entries or name not in after:
+            return
+        # The legacy store mirror (read by older packages) follows the config it now describes; an
+        # absent entry stays absent and the mirrored delegation route is kept as stored.
+        mirror = copy.deepcopy(after[name]["models"])
+        for role, desired in submitted.items():
+            mirror[role] = copy.deepcopy(desired)
+        mirror_main = prospective.get("main") or mirror["main"]
+        for role in ("compression", "title"):
+            if role in submitted:
+                continue
+            try:
+                mirror[role] = self._kept_role_route(name, role, mirror_main)
+            except (ServiceError, ValueError):
+                pass
+        if mirror != after[name]["models"]:
+            changes.append({"profile": name, "field": "settings.models", "before": after[name]["models"], "after": mirror})
+            after[name]["models"] = mirror
 
     @staticmethod
     def _check_changed_routing_fallbacks(before: dict, after: dict) -> None:
@@ -1023,19 +1524,15 @@ class Service:
         unknown = snapshot is None or not snapshot.effective_available or (
             "native_fallback_malformed" in warnings and not actual_chain
         )
-        if managed:
-            chain = copy.deepcopy(managed_value["chain"])
-            enabled = managed_value["enabled"]
-            expected = chain if enabled else []
-            drift = actual_chain != expected
-        else:
-            chain = copy.deepcopy(actual_chain)
-            enabled = bool(actual_chain)
-            drift = False
+        # The chain Hermes uses is the profile's own config: `chain`/`enabled` project it. The stored
+        # block (`managed`) is a legacy mirror kept for consent; it never overrides what is shown and
+        # an external edit is not drift. Consent is reported only while it matches the real chain.
+        chain = copy.deepcopy(actual_chain)
+        enabled = bool(actual_chain)
+        drift = False
         if unknown:
             # Unknown effective state must not be rendered as OFF.
             enabled = None
-            drift = True if managed else False
         consent = entry.get("fallback_consent", {}).get("native")
         if not managed or not fallback_policy.consent_matches(profile, "native", {"chain": chain}, consent):
             consent = None
@@ -1308,6 +1805,10 @@ class Service:
         """The route the task runs on for this profile once the plan applies (see
         _auxiliary_task_primary): the approved models of a model target of the same plan, otherwise
         the profile's own auxiliary.<task> and model keys. None when not known here."""
+        if base_plan is not None and profile in (base_plan.get("prospective_models") or {}):
+            # Model settings wire: the role as it resolves once the plan applies (None: unverified).
+            route = base_plan["prospective_models"][profile].get(task)
+            return {"provider": route["provider"], "model": route["model"]} if route else None
         if base_plan is not None and profile in (base_plan.get("model_targets") or []):
             approved = (base_plan.get("approved_models") or {}).get(profile)
             if approved and task in approved and "main" in approved:
@@ -1475,6 +1976,7 @@ class Service:
         wanted = [name for name in discovered if profiles is None or name in profiles]
         result: dict[str, Any] = {
             "role_proposal": {"schema": 1, "transport": "native_cli", "available": False, "reason_code": "unsupported_transport"},
+            "model_settings_schema": MODEL_SETTINGS_SCHEMA,
             "revision": stored["revision"] if stored else 0,
             "current_profile": self.active_profile(),
             "profiles": [],
@@ -1507,12 +2009,10 @@ class Service:
 
     def _status_row(self, name: str, entries: dict[str, Any], stored: dict[str, Any] | None) -> dict[str, Any]:
         entry = entries.get(name)
-        try:
-            actual = self._actual_models(name, tolerate=True)
-        except ServiceError:
-            actual = {}
+        # The profile's own Hermes config is the source of every model role; the stored `models` is
+        # a legacy mirror only and is never shown as the current model or compared as drift.
+        models, model_roles = self._native_models(name)
         if entry is None:
-            models = actual
             routing = self._initial_routing(name)
             view_entry = {
                 "models": models,
@@ -1522,15 +2022,10 @@ class Service:
                 "fallback_consent": {"native": None, "routing": None, "delegation": None},
             }
         else:
-            models, routing = entry["models"], entry["routing"]
+            routing = entry["routing"]
             view_entry = entry
+        # Non-model discrepancies only (the routing skill switch).
         drift: list[str] = []
-        if not actual:
-            drift.append("actual_models_unavailable")
-        else:
-            for role in MODEL_ROLES:
-                if models.get(role) != actual.get(role):
-                    drift.append(f"models.{role}")
         try:
             disabled = self._read_disabled(name)
             if (not ROUTING_SKILL_IDS.intersection(disabled)) != bool(routing.get("enabled")):
@@ -1542,7 +2037,8 @@ class Service:
             "models": models,
             "routing": routing,
             "slots": self._slots_dto(name, routing),
-            "actual_models": actual,
+            "actual_models": copy.deepcopy(models),
+            "model_roles": model_roles,
             "drift": drift,
             "fallbacks": self._fallback_dto(name, view_entry),
             "auxiliary_fallbacks": self._auxiliary_status(name),
@@ -1590,14 +2086,16 @@ class Service:
         }
 
     def native_route_config(self, profile: str) -> dict[str, Any]:
-        """Resolve purpose routes without silently adopting externally changed models."""
+        """Purpose routes for native dispatch, read from the profile's current Hermes config.
+
+        A route that follows a model role uses that role exactly as Hermes resolves it now; a role
+        that cannot be verified blocks only the routes that follow it (they are None, and the native
+        provider refuses those tasks). Custom routes are unaffected. Nothing is written.
+        """
         config = self.routing_config(profile)
         stored = self._load_store()
         if (stored["revision"] if stored else 0) != config["revision"]:
             raise RevisionConflict("routing settings changed during native dispatch")
-        entry = stored["profiles"].get(profile) if stored else None
-        if entry is not None and entry["models"] != self._actual_models(profile):
-            raise RevisionConflict("native purpose route denied because the profile has model drift")
         return config
 
     def routing_config(self, profile: str) -> dict[str, Any]:
@@ -1605,11 +2103,13 @@ class Service:
         stored = self._load_store()
         entry = stored["profiles"].get(profile) if stored else None
         if entry is None:
-            models = self._actual_models(profile)
             routing = self._initial_routing(profile)
             revision = stored["revision"] if stored else 0
         else:
-            models, routing, revision = entry["models"], entry["routing"], stored["revision"]
+            routing, revision = entry["routing"], stored["revision"]
+        native, model_roles = self._native_models(profile)
+        # Every role is present; an unverified one is None so whatever follows it is None too.
+        models = {role: copy.deepcopy(native.get(role)) for role in MODEL_ROLES}
         heavy = models["main"] if routing["heavy"]["follow"] == "main" else routing["heavy"]["custom"]
         light = models["delegation"] if routing["light"]["follow"] == "delegation" else routing["light"]["custom"]
         enabled = routing["enabled"] and not ROUTING_SKILL_IDS.intersection(self._read_disabled(profile))
@@ -1620,8 +2120,9 @@ class Service:
         limits = timeouts.read_timeouts(self._profile_home(profile))
         config = {
             "enabled": enabled,
-            "heavy": dict(heavy),
-            "light": dict(light),
+            "heavy": copy.deepcopy(heavy),
+            "light": copy.deepcopy(light),
+            "model_roles": model_roles,
             # What each task slot runs on. Heavy/Light above remain for
             # historical readers and for a slot that has never been set.
             "slots": slot_model.resolved_slots(routing, models),
@@ -1806,13 +2307,9 @@ class Service:
     def _page_expectation_current(self, profile: str, field: str, entries: dict[str, Any]) -> Any:
         """The current value of one expectation field, in the shape the status row reports it."""
         entry = entries.get(profile)
-        if field == "actual_models" or (field == "models" and entry is None):
-            try:
-                return self._actual_models(profile, tolerate=True)
-            except ServiceError:
-                return {}
-        if field == "models":
-            return entry["models"]
+        if field in {"models", "actual_models"}:
+            # Both are the native projection the status row reports (verified roles only).
+            return self._native_models(profile)[0]
         if field == "routing":
             routing = entry["routing"] if entry is not None else self._initial_routing(profile)
             # The effective switch is the canonical flag and the routing skill's own state in the
@@ -1831,7 +2328,12 @@ class Service:
         return {"enabled": native["enabled"], "chain": native["chain"], "actual_chain": native["actual_chain"]}
 
     def _check_page_expectations(self, items: list[dict[str, Any]] | None, entries: dict[str, Any],
-                                 required: dict[str, set[str]] | None = None) -> None:
+                                 required: dict[str, set[str]] | None = None, *, role_subset: bool = False) -> None:
+        """Refuse with ExternalChange when a frozen value no longer holds.
+
+        `role_subset` (the model settings wire): `models`/`actual_models` are compared only for the
+        roles the page froze, the ones it edits, so a sibling role changed elsewhere never blocks it.
+        """
         if items is None:
             return
         by_profile = {item["profile"]: item for item in items}
@@ -1842,9 +2344,11 @@ class Service:
                 held = by_profile.get(profile, {})
                 if base not in held or (part and not (isinstance(held[base], dict) and part in held[base])):
                     raise ValueError(f"expected must cover {field} of {profile}")
+        # Both model fields are the same native projection; the config value is reported first.
+        order = ("actual_models", "models", *(field for field in self.PAGE_EXPECTATION_FIELDS if field not in {"models", "actual_models"}))
         for item in items:
             profile = item["profile"]
-            for field in self.PAGE_EXPECTATION_FIELDS:
+            for field in order:
                 if field not in item:
                     continue
                 current = json.loads(json.dumps(self._page_expectation_current(profile, field, entries)))
@@ -1852,6 +2356,8 @@ class Service:
                     # Only the tasks the page froze (the ones it writes): a sibling task changed
                     # elsewhere never blocks this save.
                     current = {task: current.get(task) for task in item[field]}
+                if role_subset and field in {"models", "actual_models"} and isinstance(current, dict):
+                    current = {role: current[role] for role in item[field] if role in current}
                 if current == item[field]:
                     continue
                 detail = field
@@ -1865,9 +2371,15 @@ class Service:
 
     def preview(self, body: dict) -> dict[str, Any]:
         required = {"expected_revision", "profile", "models", "model_targets", "routing", "routing_profiles"}
-        optional = {"fallback_updates", "fallback_confirmations", "routing_targets", "timeout_updates", "save_scope", "expected", "reenable_profiles"}
+        optional = {"fallback_updates", "fallback_confirmations", "routing_targets", "timeout_updates", "save_scope", "expected",
+                    "reenable_profiles", "model_settings_schema"}
         if not isinstance(body, dict) or not required <= set(body) or set(body) - required - optional:
             raise ValueError("preview body has unknown or missing fields")
+        if "model_settings_schema" in body and (type(body["model_settings_schema"]) is not int or body["model_settings_schema"] != MODEL_SETTINGS_SCHEMA):
+            raise ValueError("model_settings_schema must be 1")
+        # The model settings wire: `models` names only the roles the page edits, written, compared and
+        # read back per role; every other role of every target is left exactly as its config has it.
+        native_wire = "model_settings_schema" in body
         scope = body.get("save_scope")
         if "save_scope" in body and (not isinstance(scope, str) or scope not in {"models", "routing", "timeouts"}):
             raise ValueError("save_scope must be models, routing, or timeouts")
@@ -1923,7 +2435,14 @@ class Service:
         if scope in {"models", "timeouts"} and "routing_targets" in body and routing_targets:
             raise ValueError("routing targets are outside the selected save scope")
         # A page that no longer edits the delegation role leaves it out: each target keeps its own.
-        submitted_models, delegation_kept = _submitted_models(body["models"]) if scope in {None, "models"} else (None, False)
+        if native_wire:
+            if not targets and body["models"] != {}:
+                raise ValueError("native model roles require model targets")
+            submitted_models, delegation_kept = (_native_submitted_models(body["models"]) if targets else None), False
+            if submitted_models is not None and targets and page_expected is None:
+                raise ValueError("model_settings_schema saves require expected values for every model target")
+        else:
+            submitted_models, delegation_kept = _submitted_models(body["models"]) if scope in {None, "models"} else (None, False)
         # The retired routed-job fallback is written only by fallback_preview. A client may omit
         # routing.fallback; the stored value is then kept as it is. One that sends it must send the
         # stored value unchanged (older pages), in every save scope.
@@ -1961,22 +2480,35 @@ class Service:
         entries = dict(stored["profiles"]) if stored else {}
         # Compare the frozen values before projecting anything: a value changed elsewhere (even one
         # that leaves a model unresolvable) is that profile's ExternalChange, not a later error.
-        self._check_page_expectations(page_expected, entries)
+        self._check_page_expectations(page_expected, entries, role_subset=native_wire)
         if scope == "timeouts":
             # Timeout plans do not project or initialize canonical model/routing state.
             all_names = []
             after = copy.deepcopy(entries)
         elif scope == "models":
             # A model-section save may materialize a new canonical entry only
-            # for profiles explicitly selected as model targets.
+            # for profiles explicitly selected as model targets. The model settings wire never
+            # does: the config is the source of the models, and an absent entry stays absent.
             all_names = []
             after = copy.deepcopy(entries)
             for name in targets:
-                if name not in after:
+                if name not in after and not native_wire:
                     after[name] = self._fresh_profile_entry(name, entries)
         else:
             all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
-            projected = {name: self._fresh_profile_entry(name, entries) for name in all_names if name in discovered or name in entries}
+            projected = {}
+            for name in all_names:
+                try:
+                    projected[name] = self._fresh_profile_entry(name, entries)
+                except ServiceError:
+                    # Model settings wire: a profile without a stored entry whose legacy mirror cannot
+                    # be built is left out unless this save would change it (no scope expansion).
+                    if not native_wire:
+                        raise
+                    touched = name in routing_targets or name in reenable_set or \
+                        self._initial_routing(name)["enabled"] != (name in selected)
+                    if touched:
+                        raise
             after = copy.deepcopy(projected)
         if fallback_submitted:
             # Compare with the stored value, or the initial one for a profile without a stored entry
@@ -1997,7 +2529,16 @@ class Service:
         # What each model target must resolve to after apply (readback), when it differs from the
         # models recorded in the store: an omitted delegation role keeps its canonical store value.
         readback_models: dict[str, dict[str, Any]] = {}
-        if submitted_models is not None:
+        # Model settings wire: per target, the roles it edits (readback), what every role resolves to
+        # once applied (dependent checks of a combined save) and the managed provenance digest.
+        approved_roles: dict[str, dict[str, Any]] = {}
+        prospective_models: dict[str, dict[str, Any]] = {}
+        model_provenance: dict[str, str] = {}
+        if submitted_models is not None and native_wire:
+            for name in targets:
+                self._plan_native_models(name, submitted_models, entries, after, changes, snapshots, writes,
+                                         approved_roles, prospective_models, model_provenance)
+        elif submitted_models is not None:
             for name in targets:
                 entry = after[name]
                 desired = submitted_models
@@ -2029,13 +2570,24 @@ class Service:
                             old = profile_values[key]
                             if old != value:
                                 role_writes.append({"profile": name, "key": key, "before": old, "after": value})
-                        if role in STALE_KEYS and actual[role]["provider"] != desired[role]["provider"]:
-                            for key in STALE_KEYS[role]:
-                                old = self._read_optional_key(name, key)
-                                comparable = {"sha256": _digest(old)}
-                                profile_values[key] = comparable
-                                if old not in (None, ""):
-                                    writes.append({"profile": name, "key": key, "before": comparable, "after": ""})
+                        # Hidden endpoint/credential/api_mode keys: every one is bound by digest (a
+                        # change before apply refuses it). A provider change never carries them to the
+                        # new provider: a page save (`expected`) cannot see them, so it is refused (a
+                        # stale page must never wipe an endpoint added after it opened), and so is any
+                        # credential. The one exception is the explicit pre-page API save without
+                        # `expected`: it still clears the legacy base_url/api_mode slots, each listed
+                        # in the preview's changes and CAS-bound by digest until apply.
+                        self._bind_hidden(name, role, profile_values)
+                        if actual[role]["provider"] != desired[role]["provider"]:
+                            stale_keys = STALE_KEYS.get(role, ())
+                            configured = {key for key in self._hidden_keys(role)
+                                          if not _unset(self._read_optional_key(name, key), auto=False)}
+                            if configured - set(stale_keys) or (configured and page_expected is not None):
+                                raise ValueError(f"the {role} model of {name} uses a custom endpoint, credential or api_mode override; "
+                                                 "change its provider in Hermes")
+                            for key in stale_keys:
+                                if key in configured:
+                                    writes.append({"profile": name, "key": key, "before": profile_values[key], "after": ""})
                                     changes.append({"profile": name, "field": key, "before": "[configured]", "after": ""})
                         writes.extend(role_writes)
                 entry["models"] = store_models
@@ -2084,7 +2636,9 @@ class Service:
                 updated = [item for item in disabled if item not in ROUTING_SKILL_IDS]
                 if not desired_skill_on:
                     updated.append(SKILL_NAME)
-                if scope == "routing":
+                if scope == "routing" or native_wire:
+                    # The model settings wire binds a profile's model keys only for the roles it
+                    # writes (see _plan_native_models); a membership change binds the skill list only.
                     profile_values = snapshots.setdefault(name, {"skills.disabled": raw_disabled})
                 else:
                     profile_values = snapshots.setdefault(name, self._profile_digest_keys(name, entry["models"], True))
@@ -2097,7 +2651,19 @@ class Service:
                     changes.append({"profile": name, "field": "skills.disabled", "before": "enabled" if skill_on else "disabled", "after": "enabled" if desired_skill_on else "disabled"})
 
 
-        if scope in {None, "models", "routing"}:
+        if scope in {None, "models", "routing"} and native_wire:
+            # Validated against the live (or, for a model target, prospective) role snapshot of the
+            # profiles this save touches only: never against the legacy stored models, never wider.
+            names = set(routing_validation_names) | (set(targets) if submitted_models is not None else set())
+            for name in sorted(names):
+                entry = after.get(name)
+                if entry is None:
+                    continue
+                live = prospective_models[name] if name in prospective_models else self._native_models(name)[0]
+                self._check_live_routes(entry["routing"], live)
+            if not fallback_updates:
+                self._check_changed_routing_fallbacks(entries, after)
+        elif scope in {None, "models", "routing"}:
             if scope is None:
                 route_validation_names = set(after)
             elif scope == "models":
@@ -2112,7 +2678,8 @@ class Service:
                 self._check_changed_routing_fallbacks(entries, after)
         # The models every explicit model target must resolve to after apply, recorded before an
         # unchanged target's projected entry is dropped below (a NOOP target has no entry to read).
-        approved_models = {name: copy.deepcopy(readback_models.get(name, after[name]["models"])) for name in (targets if submitted_models is not None else []) if name in after}
+        # The model settings wire reads back only the roles it edits (approved_roles).
+        approved_models = {} if native_wire else {name: copy.deepcopy(readback_models.get(name, after[name]["models"])) for name in (targets if submitted_models is not None else []) if name in after}
         if scope in {None, "routing"}:
             # A profile without a stored entry gets one only if this plan changes it: an entry that
             # was merely projected for the membership loop is dropped, so absent stays absent and its
@@ -2123,7 +2690,11 @@ class Service:
             # Every profile and field this save writes must be covered, and must still hold.
             needed: dict[str, set[str]] = {}
             for name in (targets if submitted_models is not None else []):
-                needed.setdefault(name, set()).update({"models", "actual_models"})
+                if native_wire:
+                    # Exactly the edited roles, per target: siblings are neither required nor written.
+                    needed.setdefault(name, set()).update(f"{field}.{role}" for field in ("models", "actual_models") for role in submitted_models)
+                else:
+                    needed.setdefault(name, set()).update({"models", "actual_models"})
             for change in changes:
                 if change["field"] in {"routing", "routing.enabled", "skills.disabled"}:
                     needed.setdefault(change["profile"], set()).add("routing")
@@ -2133,7 +2704,7 @@ class Service:
                         needed.setdefault(update["profile"], set()).add("native_fallback")
                     if isinstance(update.get("auxiliary_fallback"), dict):
                         needed.setdefault(update["profile"], set()).update(f"auxiliary_fallback.{task}" for task in update["auxiliary_fallback"])
-            self._check_page_expectations(page_expected, entries, needed)
+            self._check_page_expectations(page_expected, entries, needed, role_subset=native_wire)
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
         expires_at = datetime.fromtimestamp(expires_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2150,6 +2721,9 @@ class Service:
             # The exact store bytes this plan was computed from (read before and after loading).
             "store_digest": store_digest,
         }
+        if native_wire:
+            plan.update({"model_settings_schema": MODEL_SETTINGS_SCHEMA, "approved_roles": approved_roles,
+                         "prospective_models": prospective_models, "model_provenance": model_provenance})
         if self._store_file_digest() != store_digest:
             raise RevisionConflict("settings changed during preview; preview again")
         for item in timeout_writes:
@@ -2217,8 +2791,12 @@ class Service:
             values = snapshots.setdefault(profile, {})
             values[key] = {"sha256": _digest(raw)}
             # The primary route was checked from these keys: a change before apply refuses the apply
-            # (a model target of the same plan is checked against its approved models instead).
-            if not (base_plan is not None and profile in (base_plan.get("model_targets") or [])):
+            # (a model target of the same plan is checked against its approved models instead). A model
+            # settings wire plan writes only the roles it edits, so every input it does not write is
+            # bound here too; the keys it writes already carry their own before values.
+            legacy_target = (base_plan is not None and profile in (base_plan.get("model_targets") or [])
+                             and base_plan.get("model_settings_schema") != MODEL_SETTINGS_SCHEMA)
+            if not legacy_target:
                 for input_key in self._auxiliary_primary_inputs(task):
                     values.setdefault(input_key, self._read_key(profile, input_key))
             expected.setdefault(profile, {})[task] = copy.deepcopy(desired)
@@ -2239,6 +2817,29 @@ class Service:
         cas[profile] = {AUXILIARY_FALLBACK_KEYS[task]: task_snapshots[task].cas_digest for task in chains}
         provenance[profile] = {AUXILIARY_FALLBACK_KEYS[task]: task_snapshots[task].provenance_digest for task in chains}
 
+    def _native_fallback_primary(self, profile: str, base_plan: dict | None, snapshots: dict,
+                                 provenance: dict[str, str] | None = None) -> dict[str, str] | None:
+        """The main model a native fallback chain is compared with: as it resolves once the plan
+        applies (a model target of the same plan), otherwise as the profile's config resolves it now.
+        None when it cannot be verified. Its config keys are bound into the plan's CAS snapshot
+        (credential/endpoint keys by digest) and its managed provenance into `provenance`."""
+        if base_plan is not None and profile in (base_plan.get("prospective_models") or {}):
+            main = base_plan["prospective_models"][profile].get("main")
+        elif base_plan is not None and profile in (base_plan.get("model_targets") or []) and (base_plan.get("approved_models") or {}).get(profile):
+            main = base_plan["approved_models"][profile].get("main")
+        else:
+            overlay = self._read_model_overlay(profile)
+            main = self._native_models(profile, overlay=overlay)[0].get("main")
+            main_digest = _overlay_digest(overlay, ("main",))
+            if provenance is not None and main_digest and main is not None:
+                provenance.setdefault(profile, main_digest)
+        values = snapshots.setdefault(profile, {})
+        for key in MODEL_KEYS["main"]:
+            values.setdefault(key, self._read_key(profile, key))
+        for key in ENDPOINT_KEYS["main"]:
+            values.setdefault(key, {"sha256": _digest(self._read_key(profile, key))})
+        return copy.deepcopy(main)
+
     def fallback_preview(self, body: dict) -> dict[str, Any]:
         """Prepare a fallback-only update through the same combined-plan builder."""
         return self._prepare_fallback_preview(body)
@@ -2246,9 +2847,13 @@ class Service:
     def _prepare_fallback_preview(self, body: dict, *, base_plan: dict | None = None) -> dict[str, Any]:
         """Prepare explicit scope updates, optionally on a pending model plan."""
         fields = {"expected_revision", "updates", "confirmations"}
-        # A standalone fallback save may carry the page's frozen expectations, too (see preview).
-        if not isinstance(body, dict) or not (set(body) == fields or (base_plan is None and set(body) == fields | {"expected"})):
+        # A standalone fallback save may carry the page's frozen expectations, too (see preview), and
+        # the model settings wire marker (frozen model roles are then compared per role).
+        if not isinstance(body, dict) or not (set(body) == fields or (base_plan is None and fields <= set(body) <= fields | {"expected", "model_settings_schema"})):
             raise ValueError("fallback preview body has unknown or missing fields")
+        if "model_settings_schema" in body and (type(body["model_settings_schema"]) is not int or body["model_settings_schema"] != MODEL_SETTINGS_SCHEMA):
+            raise ValueError("model_settings_schema must be 1")
+        native_wire = (base_plan.get("model_settings_schema") == MODEL_SETTINGS_SCHEMA) if base_plan is not None else "model_settings_schema" in body
         if "expected" in body and isinstance(body["updates"], list) and any(
                 isinstance(update, dict) and set(update) & {"routing_fallback", "delegation_fallback"} for update in body["updates"]):
             raise ValueError("expected covers the conversation fallback only")
@@ -2347,7 +2952,8 @@ class Service:
                 update["profile"]: ({"native_fallback"} if "native_fallback" in update else set()) |
                                    {f"auxiliary_fallback.{task}" for task in (update.get("auxiliary_fallback") or {})}
                 for update in updates
-                if isinstance(update, dict) and set(update) & {"native_fallback", "auxiliary_fallback"} and isinstance(update.get("profile"), str)})
+                if isinstance(update, dict) and set(update) & {"native_fallback", "auxiliary_fallback"} and isinstance(update.get("profile"), str)},
+                role_subset=native_wire)
         all_names = sorted(set(discovered) | set(entries), key=lambda item: (item != "default", item))
         # Only the profiles this plan changes get an entry. Projecting every discovered profile
         # would publish a new canonical entry (pinning its current models) for untargeted profiles.
@@ -2361,6 +2967,8 @@ class Service:
         delegation_expected: dict[str, Any] = {}
         delegation_snapshots: dict[str, str] = {}
         delegation_provenance: dict[str, str] = {}
+        # Managed provenance of the main model each native chain was compared with (checked at apply).
+        primary_provenance: dict[str, str] = {}
 
         def raw_pair_view(raw: Any, *, legacy: bool) -> list[dict[str, str]]:
             if raw in (None, [], {}):
@@ -2405,7 +3013,11 @@ class Service:
                     current_status = self._native_status(profile, entry, native_snapshot)
                     if not current_status["editable"] or current_status["enabled"] is None:
                         raise ValueError("native fallback is read-only for this profile")
-                    primary = entry["models"]["main"]
+                    # The chain is compared with the real primary: the main model as it resolves once
+                    # this plan applies, bound by its config keys (a change before apply refuses it).
+                    primary = self._native_fallback_primary(profile, base_plan, snapshots, primary_provenance)
+                    if desired["enabled"] and primary is None:
+                        raise ValueError("native fallback needs a verified main model")
                     if desired["enabled"] and any(
                         (item["provider"].casefold(), item["model"].casefold())
                         == (primary["provider"].casefold(), primary["model"].casefold())
@@ -2529,8 +3141,11 @@ class Service:
                         "after": new_source,
                     })
 
-        for name, entry in after.items():
-            self._check_primary_routes(entry["routing"], entry["models"])
+        # Only the profiles whose routing this plan changes (a combined base plan validated its own).
+        # Native/auxiliary/delegation spare models never depend on another profile's routes.
+        for name, scopes in parsed_updates:
+            if "routing" in scopes and name in after:
+                self._check_primary_routes(after[name]["routing"], after[name]["models"])
         self._check_changed_routing_fallbacks(entries, after)
         state_changed = after != entries
         plan_id = uuid.uuid4().hex
@@ -2564,6 +3179,14 @@ class Service:
             "timeout_writes": copy.deepcopy(base_plan.get("timeout_writes", [])) if base_plan else [],
             "page_expected": copy.deepcopy(base_plan.get("page_expected")) if base_plan else page_expected,
         }
+        if native_wire:
+            plan["model_settings_schema"] = MODEL_SETTINGS_SCHEMA
+            for key in ("approved_roles", "prospective_models", "model_provenance"):
+                plan[key] = copy.deepcopy((base_plan or {}).get(key) or {})
+            if base_plan is not None:
+                plan["save_scope"] = base_plan.get("save_scope")
+        if primary_provenance:
+            plan["model_provenance"] = {**primary_provenance, **copy.deepcopy(plan.get("model_provenance") or (base_plan or {}).get("model_provenance") or {})}
         # Eligibility, sanitized preview and before hashes all came from the
         # same immutable snapshot. Reject an intervening edit instead of
         # adopting it as the CAS baseline.
@@ -2603,6 +3226,15 @@ class Service:
             _atomic_write(plans_dir / (plan_id + ".json"), _json_bytes(plan))
         return {"plan_id": plan_id, "changes": json.loads(json.dumps(changes)), "warnings": [], "expires_at": expires_at}
 
+    def _check_model_provenance(self, plan: dict, message: str, only: str | None = None) -> None:
+        """The managed provenance of every profile's model keys the plan relies on is unchanged."""
+        for profile, digest in sorted((plan.get("model_provenance") or {}).items()):
+            if only is not None and profile != only:
+                continue
+            overlay = self._read_model_overlay(profile)
+            if not _overlay_digest_holds(overlay, digest):
+                raise RevisionConflict(message)
+
     def _actual_key_matches(self, profile: str, key: str, expected: Any) -> bool:
         observed = self._read_key(profile, key)
         if isinstance(expected, dict) and set(expected) == {"sha256"}:
@@ -2634,7 +3266,8 @@ class Service:
             if revision != plan["revision"]:
                 raise RevisionConflict("settings revision changed; preview again")
             # Compare-and-set before anything is written: what the page saw must still hold.
-            self._check_page_expectations(plan.get("page_expected"), dict((current or {}).get("profiles") or {}))
+            self._check_page_expectations(plan.get("page_expected"), dict((current or {}).get("profiles") or {}),
+                                          role_subset=plan.get("model_settings_schema") == MODEL_SETTINGS_SCHEMA)
             if plan.get("kind") == "native_delegation":
                 return native_service.apply_consumed(self, plan, plan_id)
             if plan.get("kind") == "initial_setup":
@@ -2675,6 +3308,7 @@ class Service:
                 if current_snapshot.cas_digest != expected_snapshot:
                     raise RevisionConflict("delegation config changed since preview")
             self._check_auxiliary_plan_digests(plan, "auxiliary fallback config changed since preview")
+            self._check_model_provenance(plan, "managed model settings changed since preview; reload before apply")
 
             if not plan["changes"]:
                 for item in plan.get("timeout_writes", []):
@@ -2743,6 +3377,9 @@ class Service:
                             raise RevisionConflict("auxiliary managed provenance changed during apply") from exc
                         if not holds:
                             raise RevisionConflict("auxiliary managed provenance changed during apply")
+                    if profile in (plan.get("model_provenance") or {}) and key in self._all_role_keys():
+                        # Never write a model key through a managed overlay that appeared meanwhile.
+                        self._check_model_provenance(plan, "managed model settings changed during apply", only=profile)
                     if not self._actual_key_matches(profile, key, before):
                         raise RevisionConflict("profile config changed during apply")
                     self._write_key(profile, key, after)
@@ -2767,7 +3404,12 @@ class Service:
                     if observed["revision"] != item["expected_revision"] + 1 or any(observed[key] != value for key, value in item["after"].items()):
                         raise RevisionConflict("timeout settings differ from approved selection")
                 approved_models = plan.get("approved_models") or {}
-                for profile in plan.get("model_targets", []):
+                for profile, roles in (plan.get("approved_roles") or {}).items():
+                    # Model settings wire: exactly the edited roles, as the config now resolves them.
+                    resolved, metas = self._native_models(profile)
+                    if any(metas[role]["state"] != "verified" or resolved.get(role) != route for role, route in roles.items()):
+                        raise RevisionConflict("resolved roles differ from approved desired models")
+                for profile in ([] if plan.get("model_settings_schema") == MODEL_SETTINGS_SCHEMA else plan.get("model_targets", [])):
                     # A NOOP target may have no store entry (absent stays absent); it is verified
                     # against the approved values all the same.
                     expected_models = approved_models.get(profile)
