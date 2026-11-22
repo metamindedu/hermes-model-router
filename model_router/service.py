@@ -106,6 +106,32 @@ def _role_keys(role: str) -> tuple[str, ...]:
 # (hermes_constants.resolve_reasoning_config). Only names (and the overrides) are kept in memory:
 # alias/provider entries can carry endpoints and credentials, which are never parsed or dialed.
 ROUTE_DEPENDENCY_KEYS = ("model_aliases", "model.aliases", "providers", "custom_providers", "agent.reasoning_overrides")
+# Named-entry containers of ROUTE_DEPENDENCY_KEYS: only entry names are ever read (overlay included).
+NAMED_ENTRY_KEYS = ("model_aliases", "model.aliases", "providers", "custom_providers")
+# Auxiliary task keys that change an auxiliary role's route without being role keys
+# (agent/auxiliary_client.py): `extra_body` reasoning keys win over `reasoning_effort`
+# (_get_task_extra_body) and title's `prefer_fast_model` swaps the inherited main model for the
+# provider's fast model (_main_route_target). Only extra_body key names and the flag are read.
+AUX_ROUTE_KEYS = {
+    "compression": ("auxiliary.compression.extra_body",),
+    "title": ("auxiliary.title_generation.extra_body", "auxiliary.title_generation.prefer_fast_model"),
+}
+_FALSY_FLAGS = {"", "0", "false", "no", "off", "n", "f"}
+# Keys read through _route_dependency_view (names/flags only) rather than as raw values.
+_DEPENDENCY_VIEW_KEYS = (*ROUTE_DEPENDENCY_KEYS, *(key for keys in AUX_ROUTE_KEYS.values() for key in keys))
+
+
+def _flag_off(value: Any) -> bool:
+    """Whether a config flag provably reads as off (fails closed: anything unclear may be on)."""
+    if value is None or value is False or (type(value) is int and value == 0):
+        return True
+    return isinstance(value, str) and value.strip().lower() in _FALSY_FLAGS
+
+
+def _reasoning_body_key(name: Any) -> bool:
+    """An extra_body key that may carry reasoning/thinking controls (fails closed)."""
+    lowered = str(name).strip().lower()
+    return any(part in lowered for part in ("reason", "think", "effort", "chat_template"))
 
 
 def _role_scope_keys(role: str) -> tuple[str, ...]:
@@ -118,8 +144,59 @@ def _role_scope_keys(role: str) -> tuple[str, ...]:
     keys: list[str] = []
     for name in ((*_role_keys("main"), *STALE_KEYS["main"]) if role != "main" else ()):
         keys.append(name)
-    keys.extend((*_role_keys(role), *STALE_KEYS.get(role, ()), *ROUTE_DEPENDENCY_KEYS))
+    keys.extend((*_role_keys(role), *STALE_KEYS.get(role, ()), *AUX_ROUTE_KEYS.get(role, ()), *ROUTE_DEPENDENCY_KEYS))
     return tuple(dict.fromkeys(keys))
+
+
+def _scope_names_only(keys: tuple[str, ...]) -> tuple[str, ...]:
+    """The names-only keys (effective_config.read_key_scoped `names_only`) of one role scope."""
+    return tuple(key for key in keys if key in NAMED_ENTRY_KEYS or key.endswith(".extra_body"))
+
+
+def _env_entry_referenced(role: str, snapshot: Any) -> bool:
+    """Whether `role`'s route may use a named entry whose managed value holds an env expression.
+
+    The role references its own provider (and main's, which it may inherit), `custom:<name>` and the
+    main model's `<prefix>/` / `<prefix>:` and alias name. Unclear values or provider vocabulary
+    count as referencing every entry (fails closed). extra_body entries are not transport: a
+    reasoning key there already makes the role unverified (_project_roles).
+    """
+    flagged = [(key, name) for key, name in getattr(snapshot, "entry_env", ()) if not key.endswith(".extra_body")]
+    if not flagged:
+        return False
+    names: set[str] = set()
+    for owner in (("main",) if role == "main" else ("main", role)):
+        for value in (snapshot.raw(MODEL_KEYS[owner][0]), snapshot.effective(MODEL_KEYS[owner][0])):
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                return True
+            lowered = value.strip().lower()
+            names.add(lowered)
+            if lowered.startswith("custom:"):
+                names.add(lowered[len("custom:"):].strip())
+    for value in (snapshot.raw(MODEL_KEYS["main"][1]), snapshot.effective(MODEL_KEYS["main"][1])):
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return True
+        lowered = value.strip().lower()
+        names.add(lowered)
+        for sep in ("/", ":"):
+            if sep in lowered:
+                names.add(lowered.split(sep, 1)[0].strip())
+    try:
+        from hermes_cli.models import normalize_provider  # type: ignore
+
+        def canonical(name: str) -> str:
+            return str(normalize_provider(name)).strip().lower()
+        known = names | {canonical(name) for name in names if name}
+    except Exception:
+        return True
+    for key, name in flagged:
+        if name in known or (key in ("providers", "custom_providers") and canonical(name) in known):
+            return True
+    return False
 
 
 def _route_dependency_view(key: str, value: Any) -> Any:
@@ -127,6 +204,11 @@ def _route_dependency_view(key: str, value: Any) -> Any:
     providers (never their endpoints or credentials). A malformed container stays non-dict/non-list."""
     if value is None or key == "agent.reasoning_overrides":
         return value
+    if key.endswith(".extra_body"):
+        # Key names only: Hermes ignores a non-mapping extra_body (_get_task_extra_body).
+        return {str(name): True for name in value} if isinstance(value, dict) else None
+    if key.endswith(".prefer_fast_model"):
+        return value if isinstance(value, (bool, int, float, str)) else {"unclear": True}
     if key == "custom_providers":
         if not isinstance(value, list):
             return False
@@ -358,6 +440,21 @@ def _project_roles(values: dict[str, Any], overlay: dict[str, Any] | None) -> tu
             continue
         else:
             provider, model = raw_provider, raw_model
+        if not isinstance(provider, str) or not isinstance(model, str):
+            # A malformed (list/mapping/number) provider or model is this role's defect alone.
+            meta["reason"] = "invalid"
+            continue
+        if aux:
+            extra_key, *flag_key = AUX_ROUTE_KEYS[role]
+            extra = values.get(extra_key)
+            if isinstance(extra, dict) and any(_reasoning_body_key(name) for name in extra):
+                # auxiliary.<task>.extra_body reasoning wins over reasoning_effort (incl. enabled: false).
+                meta["reason"] = "reasoning_override"
+                continue
+            if flag_key and inherit_provider and inherit_model and not _flag_off(values.get(flag_key[0])):
+                # prefer_fast_model swaps the inherited main model for a provider fast model.
+                meta["reason"] = "fast_model"
+                continue
         if not effort:
             if role == "main":
                 effort = "medium"
@@ -1182,18 +1279,20 @@ class Service:
         for role in MODEL_ROLES:
             keys = _role_scope_keys(role)
             try:
-                snapshot = effective_config.read_key_scoped(home, keys)
+                # Named-entry containers are read names-only: a managed env expression inside an
+                # entry this role does not reference never makes it unavailable (_env_entry_referenced).
+                snapshot = effective_config.read_key_scoped(home, keys, names_only=_scope_names_only(keys))
             except (effective_config.EffectiveConfigUnavailable, effective_config.EffectiveConfigChanged, OSError, ValueError):
                 roles[role] = {"available": False, "digest": None}
                 continue
-            if unsafe.intersection(snapshot.warnings) or not snapshot.effective_available:
+            if unsafe.intersection(snapshot.warnings) or not snapshot.effective_available or _env_entry_referenced(role, snapshot):
                 roles[role] = {"available": False, "digest": None}
                 continue
             roles[role] = {"available": True, "digest": snapshot.provenance_digest}
             for key in keys:
                 if any(effective_config._managed_applies(item, key) for item in snapshot.managed_keys):
                     value = snapshot.effective(key)
-                    managed[key] = _route_dependency_view(key, value) if key in ROUTE_DEPENDENCY_KEYS else value
+                    managed[key] = _route_dependency_view(key, value) if key in _DEPENDENCY_VIEW_KEYS else value
         if not any(item["available"] for item in roles.values()):
             return {"available": False, "managed": {}, "digest": None, "roles": roles}
         return {"available": True, "managed": managed, "roles": roles,
@@ -1214,7 +1313,7 @@ class Service:
         try:
             for key in self._all_role_keys():
                 values[key] = self._read_key(profile, key)
-            for key in ROUTE_DEPENDENCY_KEYS:
+            for key in _DEPENDENCY_VIEW_KEYS:
                 values[key] = _route_dependency_view(key, self._read_key(profile, key))
         except (ServiceError, ValueError, OSError):
             models, roles = _project_roles({}, {"available": False})
@@ -1300,6 +1399,23 @@ class Service:
             configured = configured or not _unset(raw, auto=False)
         return configured
 
+    def _bind_dependency_views(self, profile: str, keys: tuple[str, ...] | list[str], values: dict[str, Any]) -> None:
+        """Bind route-dependency keys of `profile` into a CAS snapshot as digests of their
+        _route_dependency_view (names/flags only): a same-name alias or provider added, or a
+        reasoning override changed, between preview and apply refuses the apply before any write,
+        while an endpoint/credential edit inside an existing entry does not. Never the value."""
+        for key in keys:
+            values.setdefault(key, {"view_sha256": _digest(_route_dependency_view(key, self._read_optional_key(profile, key)))})
+
+    def _bind_main_dependencies(self, profile: str, values: dict[str, Any]) -> None:
+        """Bind everything the main role's projection reads: its role keys, its hidden keys (digest)
+        and its route dependencies (aliases, configured provider names, reasoning overrides)."""
+        for key in MODEL_KEYS["main"]:
+            values.setdefault(key, self._read_key(profile, key))
+        for key in self._hidden_keys("main"):
+            values.setdefault(key, {"sha256": _digest(self._read_optional_key(profile, key))})
+        self._bind_dependency_views(profile, ROUTE_DEPENDENCY_KEYS, values)
+
     def _plan_native_models(
         self, name: str, submitted: dict[str, dict[str, str]], entries: dict[str, Any], after: dict[str, Any],
         changes: list, snapshots: dict, writes: list, approved_roles: dict, prospective_models: dict,
@@ -1365,6 +1481,11 @@ class Service:
         for role, desired in submitted.items():
             if prospective_roles[role]["state"] != "verified" or prospective.get(role) != desired:
                 raise ValueError(f"the {role} model of {name} would not resolve to the submitted route")
+            # Bind what this prospective projection relied on beyond the role's own keys, so a
+            # change between preview and apply refuses the apply before its first write.
+            if role == "main":
+                self._bind_main_dependencies(name, values)
+            self._bind_dependency_views(name, AUX_ROUTE_KEYS.get(role, ()), values)
         approved_roles[name] = copy.deepcopy(submitted)
         prospective_models[name] = prospective
         model_provenance[name] = _overlay_digest(overlay, list(submitted))
@@ -2823,21 +2944,28 @@ class Service:
         applies (a model target of the same plan), otherwise as the profile's config resolves it now.
         None when it cannot be verified. Its config keys are bound into the plan's CAS snapshot
         (credential/endpoint keys by digest) and its managed provenance into `provenance`."""
+        overlay = self._read_model_overlay(profile)
         if base_plan is not None and profile in (base_plan.get("prospective_models") or {}):
             main = base_plan["prospective_models"][profile].get("main")
         elif base_plan is not None and profile in (base_plan.get("model_targets") or []) and (base_plan.get("approved_models") or {}).get(profile):
             main = base_plan["approved_models"][profile].get("main")
         else:
-            overlay = self._read_model_overlay(profile)
             main = self._native_models(profile, overlay=overlay)[0].get("main")
-            main_digest = _overlay_digest(overlay, ("main",))
-            if provenance is not None and main_digest and main is not None:
-                provenance.setdefault(profile, main_digest)
-        values = snapshots.setdefault(profile, {})
-        for key in MODEL_KEYS["main"]:
-            values.setdefault(key, self._read_key(profile, key))
-        for key in ENDPOINT_KEYS["main"]:
-            values.setdefault(key, {"sha256": _digest(self._read_key(profile, key))})
+        # Managed provenance: main's own, united with the roles a pending model plan already relies
+        # on (combined path), so the recorded digest covers both before any write.
+        relied = {"main"}
+        recorded = ((base_plan or {}).get("model_provenance") or {}).get(profile) if base_plan is not None else None
+        if base_plan is not None and profile in ((base_plan.get("model_provenance") or {})):
+            if not isinstance(recorded, str):
+                main = None  # the pending model plan's provenance is already unverifiable
+            elif recorded.startswith("roles:"):
+                relied.update(role for role in recorded[len("roles:"):].split(":", 1)[0].split(",") if role in MODEL_ROLES)
+        main_digest = _overlay_digest(overlay, sorted(relied))
+        if main is not None and not main_digest:
+            main = None
+        if provenance is not None and main is not None:
+            provenance[profile] = main_digest
+        self._bind_main_dependencies(profile, snapshots.setdefault(profile, {}))
         return copy.deepcopy(main)
 
     def fallback_preview(self, body: dict) -> dict[str, Any]:
@@ -3186,7 +3314,9 @@ class Service:
             if base_plan is not None:
                 plan["save_scope"] = base_plan.get("save_scope")
         if primary_provenance:
-            plan["model_provenance"] = {**primary_provenance, **copy.deepcopy(plan.get("model_provenance") or (base_plan or {}).get("model_provenance") or {})}
+            # primary_provenance already unites a pending model plan's roles with main (see
+            # _native_fallback_primary), so it supersedes the narrower recorded digest.
+            plan["model_provenance"] = {**copy.deepcopy(plan.get("model_provenance") or (base_plan or {}).get("model_provenance") or {}), **primary_provenance}
         # Eligibility, sanitized preview and before hashes all came from the
         # same immutable snapshot. Reject an intervening edit instead of
         # adopting it as the CAS baseline.
@@ -3236,10 +3366,17 @@ class Service:
                 raise RevisionConflict(message)
 
     def _actual_key_matches(self, profile: str, key: str, expected: Any) -> bool:
+        return self._cas_current(profile, key, expected) == expected
+
+    def _cas_current(self, profile: str, key: str, expected: Any) -> Any:
+        """The current value of `key` in the form a CAS snapshot recorded it: a digest
+        ({"sha256"}), a digest of the route-dependency view ({"view_sha256"}), or the value."""
         observed = self._read_key(profile, key)
         if isinstance(expected, dict) and set(expected) == {"sha256"}:
-            return _digest(observed) == expected["sha256"]
-        return observed == expected
+            return {"sha256": _digest(observed)}
+        if isinstance(expected, dict) and set(expected) == {"view_sha256"}:
+            return {"view_sha256": _digest(_route_dependency_view(key, observed))}
+        return observed
 
     def apply(self, plan_id: str) -> dict[str, Any]:
         if not isinstance(plan_id, str) or re.fullmatch(r"[0-9a-f]{32}", plan_id) is None:
@@ -3290,7 +3427,7 @@ class Service:
                 self._require_profile(profile)
             # Validate all captured config values before creating backups or writing.
             for profile, values in plan["snapshots"].items():
-                current_values = {key: ({"sha256": _digest(self._read_key(profile, key))} if isinstance(expected, dict) and set(expected) == {"sha256"} else self._read_key(profile, key)) for key, expected in values.items()}
+                current_values = {key: self._cas_current(profile, key, expected) for key, expected in values.items()}
                 if current_values != values or _digest(current_values) != plan["config_digests"][profile]:
                     raise RevisionConflict("profile config changed since preview; reload before apply")
             for profile, expected_snapshot in plan.get("native_snapshots", {}).items():

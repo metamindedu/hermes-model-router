@@ -192,6 +192,9 @@ class NativeFallbackSnapshot:
     warnings: tuple[str, ...]
     keys: tuple[str, ...] = _NATIVE_KEYS
     _raw_presence: tuple[str, ...] = ()
+    # Names-only keys (read_key_scoped ``names_only``): (key, lowercased entry name) of each managed
+    # entry holding an env expression. Names only; the values never enter the snapshot.
+    entry_env: tuple[tuple[str, str], ...] = ()
 
     def raw_present(self, key: str) -> bool:
         return key in self._raw_presence
@@ -219,6 +222,7 @@ class NativeFallbackSnapshot:
             "managed_keys": self.managed_keys,
             "managed_signature": self.managed_signature,
             "warnings": self.warnings,
+            **({"entry_env": self.entry_env} if self.entry_env else {}),
         })
 
 
@@ -253,6 +257,7 @@ def make_key_snapshot(
     managed_signature: str = "fixture-no-managed-config",
     warnings: tuple[str, ...] | list[str] = (),
     raw_presence: tuple[str, ...] | None = None,
+    entry_env: tuple[tuple[str, str], ...] | list = (),
 ) -> NativeFallbackSnapshot:
     """Build an immutable, key-scoped snapshot for explicit fake-helper tests."""
     selected = tuple(keys)
@@ -267,7 +272,43 @@ def make_key_snapshot(
         warnings=tuple(warnings),
         keys=selected,
         _raw_presence=tuple(key for key in selected if key in raw) if raw_presence is None else tuple(raw_presence),
+        entry_env=tuple(sorted({(str(key), str(name)) for key, name in entry_env})),
     )
+
+
+def names_view(value: Any) -> Any:
+    """A names-only projection of a named-entry container: {name: True} for a mapping, [{"name": n}]
+    for a list of entries. Entry bodies (endpoints, credentials) are dropped; a malformed container
+    becomes False (never a mapping or list), so callers still see that it is malformed."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(name): True for name in value}
+    if isinstance(value, list):
+        return [{"name": entry.get("name")} if isinstance(entry, dict) else None for entry in value]
+    return False
+
+
+def _env_entries(value: Any) -> tuple[set[str], bool]:
+    """(lowercased names of entries holding an env expression, whether one cannot be named)."""
+    if not _contains_env_ref(value):
+        return set(), False
+    names: set[str] = set()
+    unnamed = False
+    if isinstance(value, dict):
+        items = [(name, body) for name, body in value.items()]
+    elif isinstance(value, list):
+        items = [(entry.get("name") if isinstance(entry, dict) else None, entry) for entry in value]
+    else:
+        return set(), True
+    for name, body in items:
+        if not _contains_env_ref(body) and not _contains_env_ref(name):
+            continue
+        if isinstance(name, str) and name.strip() and not _contains_env_ref(name):
+            names.add(name.strip().lower())
+        else:
+            unnamed = True
+    return names, unnamed
 
 
 def _raw_path_present(config: dict, key: str) -> bool:
@@ -288,8 +329,16 @@ def read_key_scoped(
     keys: tuple[str, ...] | list[str],
     *,
     helpers: Any | None = None,
+    names_only: tuple[str, ...] | list[str] | frozenset[str] | set[str] = (),
 ) -> NativeFallbackSnapshot:
     """Read selected effective config keys and only their managed provenance.
+
+    ``names_only`` (optional, a subset of ``keys``) names named-entry containers (providers,
+    aliases) of which only entry names are kept: their raw and effective values are names_view
+    projections, and a managed env expression inside one entry is reported per entry name in
+    ``entry_env`` instead of making the whole snapshot read-only (callers decide whether an entry
+    they actually reference is affected). An env expression that cannot be tied to an entry name, and
+    every other key, keep the whole-snapshot ``*_managed_env_expression_readonly`` warning.
 
     ``helpers`` is an explicit test seam matching Hermes' installed helper APIs.
     Production callers omit it and use the genuine installed Hermes helpers.
@@ -306,6 +355,9 @@ def read_key_scoped(
     ):
         raise ValueError("config keys must be a non-empty unique dotted-key list")
     label = "native" if selected_keys == _NATIVE_KEYS else "scoped"
+    names_only_keys = frozenset(names_only)
+    if not names_only_keys <= set(selected_keys):
+        raise ValueError("names_only keys must be selected keys")
     config_path = home / "config.yaml"
     api = helpers if helpers is not None else _helpers()
     try:
@@ -350,9 +402,18 @@ def read_key_scoped(
             # The supported managed loader is fail-open on parse errors. An
             # existing but apparently empty file cannot prove overlay absence.
             warnings.append(f"{label}_managed_provenance_unavailable")
-        if any(_contains_env_ref(value) for value in managed_values.values()):
+        entry_env: set[tuple[str, str]] = set()
+        whole_env = False
+        for key, value in managed_values.items():
+            if key in names_only_keys:
+                names, unnamed = _env_entries(value)
+                entry_env.update((key, name) for name in names)
+                whole_env = whole_env or unnamed
+            elif _contains_env_ref(value):
+                whole_env = True
+        if whole_env:
             warnings.append(f"{label}_managed_env_expression_readonly")
-        if any(_contains_env_ref(_config_value(raw_config, key)) for key in selected_keys):
+        if any(_contains_env_ref(_config_value(raw_config, key)) for key in selected_keys if key not in names_only_keys):
             warnings.append(f"{label}_fallback_env_expression")
 
         effective: dict[str, Any] | None = None
@@ -368,7 +429,8 @@ def read_key_scoped(
                 api.reset_secret_scope(token)
             if isinstance(loaded, api.FailedConfigRead) or not isinstance(loaded, dict):
                 raise EffectiveConfigUnavailable("effective profile config is unavailable")
-            effective = {key: _config_value(loaded, key) for key in selected_keys}
+            effective = {key: names_view(_config_value(loaded, key)) if key in names_only_keys else _config_value(loaded, key)
+                         for key in selected_keys}
         else:
             warnings.append(f"{label}_effective_unavailable")
 
@@ -376,7 +438,8 @@ def read_key_scoped(
         managed_after = _file_signature(managed_path)
         if user_before != user_after or managed_before != managed_after:
             raise EffectiveConfigChanged("profile or managed config changed during snapshot")
-        raw = {key: _config_value(raw_config, key) for key in selected_keys}
+        raw = {key: names_view(_config_value(raw_config, key)) if key in names_only_keys else _config_value(raw_config, key)
+               for key in selected_keys}
         effective_values = effective if effective is None else {key: effective[key] for key in selected_keys}
         return make_key_snapshot(
             keys=selected_keys,
@@ -386,6 +449,7 @@ def read_key_scoped(
             managed_signature=managed_signature,
             warnings=warnings,
             raw_presence=tuple(key for key in selected_keys if _raw_path_present(raw_config, key)),
+            entry_env=tuple(entry_env),
         )
     except (EffectiveConfigUnavailable, EffectiveConfigChanged):
         raise
