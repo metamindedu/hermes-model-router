@@ -258,9 +258,12 @@ def new_profile_authority(old: dict[str, Any], new: dict[str, Any]) -> dict[str,
 
 
 def preview(service, body: dict[str, Any]) -> dict[str, Any]:
-    from .service import _digest, _json_bytes, _atomic_write, _FileLock, _now, RevisionConflict
-    if not isinstance(body, dict) or set(body) != {"expected_revision", "updates"}:
+    from .service import _digest, _json_bytes, _atomic_write, _FileLock, _now, _partial_save, RevisionConflict
+    if not isinstance(body, dict) or set(body) - {"partial_save_schema"} != {"expected_revision", "updates"}:
         raise ValueError("native delegation preview has unknown or missing fields")
+    # Partial section saves (literal `partial_save_schema: 1`): `backend` is optional, and the spare
+    # models / allow-list may come as patches merged into each target's stored value.
+    partial = _partial_save(body)
     if type(body["expected_revision"]) is not int or body["expected_revision"] < 0:
         raise ValueError("expected_revision must be a nonnegative integer")
     updates = body["updates"]
@@ -273,17 +276,21 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
             raise RevisionConflict("settings revision changed")
         names = inventory(service)
         records, changes, seen = [], [], set()
-        required = {"profile", "expected_digest", "backend", "allow_profile_access"}
+        required = {"profile", "expected_digest", "allow_profile_access"} | (set() if partial else {"backend"})
+        optional = {"backend", "policy", "slot_policy", "allow_additional_cost", "profile_routes"} | (
+            {"slot_policy_patch", "profile_routes_patch"} if partial else set())
         for update in updates:
             # At most one policy shape: the two roles an older page sends, or one entry per task slot.
             # A part an update leaves out (the spare policy with its cost confirmation, or the
             # profile routes) is kept exactly as stored, including a key that is absent; an update
-            # with neither is an explicit backend-only change.
+            # with neither is an explicit backend-only change. A partial update may also leave out
+            # the backend (the stored one is kept), but must carry something to write.
             keys = set(update) if isinstance(update, dict) else set()
-            policy_keys = keys & {"policy", "slot_policy"}
-            if (not isinstance(update, dict) or not required <= keys or
-                    keys - required - {"policy", "slot_policy", "allow_additional_cost", "profile_routes"} or
-                    len(policy_keys) > 1 or ("allow_additional_cost" in keys) != bool(policy_keys)):
+            policy_keys = keys & {"policy", "slot_policy", "slot_policy_patch"}
+            route_keys = keys & {"profile_routes", "profile_routes_patch"}
+            if (not isinstance(update, dict) or not required <= keys or keys - required - optional or
+                    len(policy_keys) > 1 or len(route_keys) > 1 or ("allow_additional_cost" in keys) != bool(policy_keys) or
+                    not ({"backend"} & keys or policy_keys or route_keys)):
                 raise ValueError("invalid native delegation update fields")
             profile = service._require_profile(update["profile"], names)
             if profile in seen:
@@ -294,9 +301,19 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("native delegation editing is unavailable")
             if dto["digest"] != update["expected_digest"]:
                 raise RevisionConflict("native delegation changed; reload before saving")
-            backend = update["backend"]
-            if not isinstance(backend, str) or backend not in ns.BACKENDS:
+            # Partial update without a backend: the stored one is kept and picks the policy key.
+            backend = update["backend"] if "backend" in update else dto["backend"]
+            if "backend" in update and (not isinstance(backend, str) or backend not in ns.BACKENDS):
                 raise ValueError("unsupported native delegation backend")
+            if "backend" not in update:
+                # The stored method is kept: it must be one this writer knows, and a per-slot spare
+                # model patch needs a method that uses slot models.
+                if not isinstance(backend, str) or backend not in ns.BACKENDS:
+                    raise ValueError(f"{profile}: the stored delegation method is not supported; send the method explicitly")
+                # Any spare-model part (a patch, or a full per-slot or two-role policy) needs a kept
+                # method that uses slot models; an explicit backend keeps the earlier rules unchanged.
+                if policy_keys and backend not in {"model-router", "model-router-auto"}:
+                    raise ValueError(f"{profile}: slot spare models need a slot-model delegation method")
             if backend == 'model-router-auto' and dto['auto_supported'] is not True:
                 raise ValueError('automatic routing is unsupported by this installed profile; update it first')
             # Must be a literal bool; only `True` counts as consent (see new_profile_authority).
@@ -304,8 +321,11 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("profile execution confirmation must be boolean")
             policy_backend = "model-router-auto" if backend == "model-router-auto" else "model-router"
             policy_key = ns.KEY_AUTO_POLICY if backend == "model-router-auto" else ns.KEY_POLICY
-            if not policy_keys:
+            if not policy_keys or "slot_policy_patch" in update:
+                # A per-slot patch is merged into the stored block once the snapshot is read below.
                 policy = None
+                if "slot_policy_patch" in update and dto["slot_policy_supported"] is not True:
+                    raise ValueError("task slots are unsupported by this installed profile; update it first")
             elif "slot_policy" in update:
                 if dto["slot_policy_supported"] is not True:
                     raise ValueError("task slots are unsupported by this installed profile; update it first")
@@ -315,8 +335,12 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError("spare models are stored per task slot; a two-role policy cannot replace them")
                 policy = ns.build_policy_block(profile, update["policy"], update["allow_additional_cost"], backend=policy_backend)
             profiles = None
-            if "profile_routes" in update:
-                profiles = ns.validate_profiles(update["profile_routes"], names)
+            if route_keys:
+                # A patch is merged into this target's stored routes; the result is validated and
+                # consented exactly like a submitted full list.
+                submitted_routes = (update["profile_routes"] if "profile_routes" in update
+                                    else ns.merge_profile_routes(dto["profile_routes"], update["profile_routes_patch"]))
+                profiles = ns.validate_profiles(submitted_routes, names)
                 validate_native_targets(service, profiles)
                 old_profiles = dto["profile_routes"]
                 old_descriptions = {row['name']: row['description'] for row in old_profiles['profiles']}
@@ -343,9 +367,19 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
             if backend == 'model-router-auto' and auto_code is None:
                 raise RevisionConflict('automatic routing support changed during preview')
             before = {key: snapshot.raw(key) for key in ns.KEYS}
-            desired = {**before, ns.KEY_BACKEND: backend}
+            if "slot_policy_patch" in update:
+                policy = ns.patch_slot_policy_block(profile, before[policy_key], update["slot_policy_patch"],
+                                                    update["allow_additional_cost"], backend=policy_backend)
+                # Absent stays absent: an all-off result over nothing stored writes nothing.
+                if before[policy_key] is None and policy == ns.build_slot_policy_block(profile, ns.default_slot_policy(), False, backend=policy_backend):
+                    policy = None
+            # A partial update without a backend never writes the backend key (absent stays absent).
+            desired = {**before, ns.KEY_BACKEND: backend} if "backend" in update else dict(before)
             if policy is not None:
                 desired[policy_key] = policy
+            if profiles is not None and "profile_routes_patch" in update and before[ns.KEY_PROFILES] is None \
+                    and profiles == {"profiles": [], "default": None}:
+                profiles = None  # an empty merged list over an absent block leaves it absent
             if profiles is not None:
                 desired[ns.KEY_PROFILES] = {"schema": 1, **profiles}
             for key in (ns.KEY_POLICY, ns.KEY_AUTO_POLICY, ns.KEY_PROFILES, ns.KEY_BACKEND):

@@ -227,6 +227,90 @@ def validate_slot_policy_block(profile: str, block: Any, *, backend: str = "mode
     return parsed
 
 
+def patch_slot_policy_block(profile: str, stored: Any, patch: Any, allow_additional_cost: bool, *, backend: str = "model-router") -> dict[str, Any]:
+    """Merge the submitted slots of a partial save into the stored per-slot block.
+
+    Every slot the patch leaves out keeps its stored entry exactly, consent included. A submitted
+    custom slot gets fresh slot-bound consent, an off one none. Nothing stored: the base is the
+    all-off block. A stored two-role block is refused: its consent is bound to the roles and is never
+    re-bound to slots silently (the whole block is replaced only by an explicit full slot policy).
+    """
+    if not isinstance(allow_additional_cost, bool):
+        raise ValueError("cost confirmation must be boolean")
+    if not isinstance(patch, dict) or not patch or any(not isinstance(key, str) for key in patch) or set(patch) - set(BUILTIN_SLOTS):
+        raise ValueError("slot policy patch must name one or more known task slots")
+    schema = block_schema(stored)
+    if schema == SCHEMA:
+        raise ValueError("spare models are stored per role on this profile; a per-slot patch cannot replace them")
+    if schema == 0:
+        base = build_slot_policy_block(profile, default_slot_policy(), False, backend=backend)
+    else:
+        validate_slot_policy_block(profile, stored, backend=backend)
+        base = copy.deepcopy(stored)
+    plain = {slot: {"mode": base["fallbacks"][slot]["mode"], "chain": base["fallbacks"][slot]["chain"]} for slot in BUILTIN_SLOTS}
+    plain.update({slot: patch[slot] for slot in patch})
+    parsed = validate_policy(plain, BUILTIN_SLOTS)
+    custom = any(parsed[slot]["mode"] == "custom" for slot in patch)
+    if custom and not allow_additional_cost:
+        raise ValueError("custom continuation requires explicit additional-cost confirmation")
+    if allow_additional_cost and not custom:
+        raise ValueError("cost confirmation applies only to submitted slots that continue on spare models")
+    fallbacks = {}
+    for slot in base["fallbacks"]:
+        if slot not in patch:
+            fallbacks[slot] = copy.deepcopy(base["fallbacks"][slot])
+            continue
+        item = parsed[slot]
+        fallbacks[slot] = {**copy.deepcopy(item), "consent": make_slot_consent(profile, backend, slot, item["chain"]) if item["mode"] == "custom" else None}
+    block = {"schema": SLOT_SCHEMA, "fallbacks": fallbacks}
+    validate_slot_policy_block(profile, block, backend=backend)
+    return block
+
+
+def merge_profile_routes(stored: dict[str, Any], patch: Any) -> dict[str, Any]:
+    """Apply a partial save's allow-list patch to one target's stored routes (unvalidated result).
+
+    Order: remove, then add (a name already present keeps its entry), then descriptions for names
+    present after the merge (others ignored), then `default` when submitted. Without a submitted
+    default the stored one is kept while it stays in the list. Callers validate the result exactly
+    like a submitted full list (validate_profiles) and decide consent on it.
+    """
+    if not isinstance(patch, dict) or not patch or set(patch) - {"add", "remove", "descriptions", "default"}:
+        raise ValueError("invalid profile routes patch")
+    add, remove, descriptions = patch.get("add", []), patch.get("remove", []), patch.get("descriptions", {})
+    if (not isinstance(add, list) or len(add) > 64 or
+            any(not isinstance(item, dict) or set(item) != {"name", "description"} or not isinstance(item["name"], str)
+                or not isinstance(item["description"], str) for item in add)):
+        raise ValueError("invalid profile routes patch")
+    if not isinstance(remove, list) or len(remove) > 64 or any(not isinstance(name, str) for name in remove):
+        raise ValueError("invalid profile routes patch")
+    if (not isinstance(descriptions, dict) or len(descriptions) > 64 or
+            any(not isinstance(name, str) or not isinstance(text, str) for name, text in descriptions.items())):
+        raise ValueError("invalid profile routes patch")
+    added = [item["name"] for item in add]
+    if len(set(added)) != len(added) or len(set(remove)) != len(remove):
+        raise ValueError("profile routes patch names a profile twice")
+    if "default" in patch and patch["default"] is not None and not isinstance(patch["default"], str):
+        raise ValueError("invalid profile routes patch")
+    if not add and not remove and not descriptions and "default" not in patch:
+        raise ValueError("profile routes patch changes nothing")
+    removed = set(remove)
+    rows = [dict(row) for row in stored["profiles"] if row["name"] not in removed]
+    present = {row["name"] for row in rows}
+    for item in add:
+        if item["name"] not in present:
+            rows.append({"name": item["name"], "description": item["description"]})
+            present.add(item["name"])
+    for row in rows:
+        if row["name"] in descriptions:
+            row["description"] = descriptions[row["name"]]
+    if "default" in patch:
+        default = patch["default"]
+    else:
+        default = stored["default"] if stored["default"] in present else None
+    return {"profiles": rows, "default": default}
+
+
 def block_schema(block: Any) -> int:
     """0 when nothing is stored; otherwise the stored block's own schema (unvalidated)."""
     if block is None:

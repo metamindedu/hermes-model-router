@@ -124,6 +124,7 @@ function harness(initial = nativeStatus()) {
     setData(next) { data = next }, setResponder(fn) { responder = fn },
     click(id) { const node = byId(id); assert.ok(!node.props.disabled, `${id} should be enabled`); node.props.onClick(); render() },
     input(id, value) { byId(id).props.onChange({ target: { value } }); render() },
+    check(id, checked) { const node = byId(id); assert.ok(!node.props.disabled, `${id} should be enabled`); node.props.onCheckedChange(checked); render() },
     selectValue(id) { return find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === id)).props.value },
     select(id, value) { find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === id)).props.onValueChange(value); render() } }
 }
@@ -231,7 +232,7 @@ test('explicit copy sends every copyable role with per-target frozen subsets; no
   data.profiles.find(row => row.name === 'claire').model_roles.compression = role('unverified')
   const h = harness(data)
   assert.equal(h.byId('model-section-save').props.disabled, true, 'no-op: nothing to save')
-  h.click('model-target-all')
+  h.click('model-target-all'); h.check('model-copy-all', true)
   h.click('model-section-save'); await h.flush()
   const [body] = previews(h)
   assert.equal(body.model_settings_schema, 1)
@@ -245,7 +246,7 @@ test('explicit copy sends every copyable role with per-target frozen subsets; no
   }
   // During copy intent every copied role stays frozen in every target: a change elsewhere blocks.
   const g = harness(data)
-  g.click('model-target-all')
+  g.click('model-target-all'); g.check('model-copy-all', true)
   changeElsewhere(g, (_, row) => setRole(row('other'), 'main', route('elsewhere', 'other-new-main', 'high')))
   assert.match(text(g.byId('live-drift-alert')), /other 프로필의 대화 모델/)
   assert.equal(g.byId('model-section-save').props.disabled, true)

@@ -489,8 +489,14 @@ export function pageExpectationsFor(operation, body, frozen, liveNames = []) {
   // page found unresolved is expected as absent, null).
   const modelRoles = operation === '/preview' && body?.model_settings_schema === MODEL_SETTINGS_SCHEMA && body?.models && typeof body.models === 'object'
     ? Object.keys(body.models).filter(role => PAGE_MODEL_ROLES.includes(role)) : null
+  // A partial save: the routing expectation is the switch plus only the slots the body writes (each the
+  // stored declaration the page froze, null when not stored); Heavy/Light are not written or compared.
+  const partialSlots = operation === '/preview' && body?.partial_save_schema === PARTIAL_SAVE_SCHEMA
+    ? Object.keys(body?.routing?.slots && typeof body.routing.slots === 'object' ? body.routing.slots : {}) : null
   const fieldValue = (value, field, tasks) => field === 'auxiliary_fallback' && tasks
     ? Object.fromEntries(tasks.map(task => [task, deepClone(value.auxiliary_fallback[task])]))
+    : partialSlots && field === 'routing'
+      ? { enabled: value.routing.enabled, slots: Object.fromEntries(partialSlots.map(id => [id, deepClone(value.routing.slots?.[id] ?? null)])), skill_enabled: value.routing.skill_enabled }
     : modelRoles && (field === 'models' || field === 'actual_models')
       ? Object.fromEntries(modelRoles.map(role => [role, deepClone(value[field]?.[role] ?? null)]))
       : deepClone(value[field])
@@ -533,7 +539,9 @@ export function externalChangeStepMessage(conflict, label) {
 // `modelCheck` ({roles, targets}) is given on a Hermes-native service: then only the roles a pending
 // save holds are compared, for the loaded profile and each model target, and such an item ({models:
 // true}) blocks only the model write. Without it every model role of the loaded profile is compared.
-export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations, modelCheck = null) {
+// `routingCheck` ({slots}) is given for a partial save: Heavy/Light are not written and only the slots
+// the save writes are compared (a sibling slot changed elsewhere never blocks it).
+export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations, modelCheck = null, routingCheck = null) {
   const items = []
   const same = (live, loaded) => sameValue(live ?? null, loaded ?? null)
   const list = Array.isArray(rows) ? rows : []
@@ -543,8 +551,13 @@ export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations
   if (modelCheck) items.push(...modelRoleDrift(list, [selected, ...(modelCheck.targets || [])], modelCheck.roles || [], frozenExpectations))
   if (current && frozen) {
     if (!modelCheck && (!same(current.models, frozen.models) || (expect && !same(current.actual_models || {}, expect.actual_models)))) items.push({ profile: selected, part: '대화·작업 모델' })
-    if (!same(current.routing?.heavy, frozen.routing?.heavy) || !same(current.routing?.light, frozen.routing?.light)) items.push({ profile: selected, part: '작업 라우팅' })
-    if (!same(current.slots?.declarations, frozen.slots)) items.push({ profile: selected, part: '작업 슬롯 모델' })
+    if (routingCheck) {
+      const ids = Array.isArray(routingCheck.slots) ? routingCheck.slots : []
+      if (ids.some(id => !same(current.slots?.declarations?.[id], frozen.slots?.[id]))) items.push({ profile: selected, part: '작업 슬롯 모델' })
+    } else {
+      if (!same(current.routing?.heavy, frozen.routing?.heavy) || !same(current.routing?.light, frozen.routing?.light)) items.push({ profile: selected, part: '작업 라우팅' })
+      if (!same(current.slots?.declarations, frozen.slots)) items.push({ profile: selected, part: '작업 슬롯 모델' })
+    }
   }
   for (const row of list) {
     const base = frozenProfiles?.[row.name]
@@ -642,11 +655,27 @@ function timeoutPayloadValues(timeouts, baseline) {
   return values
 }
 
+const TIMEOUT_SECONDS_KEYS = { delegate_total_minutes: 'delegate_total_seconds', routed_light_total_minutes: 'routed_light_total_seconds', routed_heavy_total_minutes: 'routed_heavy_total_seconds' }
+// The split seconds fields whose drafted minutes differ from the loaded ones (a partial timeout save
+// sends only these; an unreadable value counts as changed and is refused by the payload helpers).
+export function changedTimeoutFields(timeouts, baseline) {
+  if (!timeouts || !baseline) return []
+  return TIMEOUT_MINUTE_KEYS.filter(key => {
+    const value = parseTimeoutMinutes(timeouts[key])
+    const original = timeoutBaselineMinute(baseline, key)
+    return value === null || original === null || value !== original
+  }).map(key => TIMEOUT_SECONDS_KEYS[key])
+}
+const pickTimeoutFields = (values, fields) => Array.isArray(fields) ? Object.fromEntries(fields.filter(key => Object.prototype.hasOwnProperty.call(values, key)).map(key => [key, values[key]])) : values
+const TIMEOUT_FIELD_LABELS = { delegate_total_seconds: '일반 위임', routed_light_total_seconds: '짧은 작업', routed_heavy_total_seconds: '긴 작업' }
+export const timeoutFieldLabels = fields => fields.map(key => TIMEOUT_FIELD_LABELS[key] || key).join('·')
+
 function timeoutUpdateError() {
   return '각 시간 제한을 0 이상의 유한한 분 단위 숫자로 입력하세요. 입력값을 초 단위로 변환할 수 없는 경우 저장할 수 없습니다.'
 }
 
-export function buildTimeoutUpdate(profile, timeouts, baseline, currentTimeouts) {
+// `fields` (a partial save) limits each update to those seconds fields; null sends all three.
+export function buildTimeoutUpdate(profile, timeouts, baseline, currentTimeouts, fields = null) {
   const changed = timeoutDraftChanged(timeouts, baseline)
   if (!changed) return { changed: false, update: null, error: '' }
   if (!baseline || !timeouts || typeof profile !== 'string' || !profile) {
@@ -663,12 +692,12 @@ export function buildTimeoutUpdate(profile, timeouts, baseline, currentTimeouts)
   if (!values) return { changed: true, update: null, error: timeoutUpdateError() }
   return {
     changed: true,
-    update: { profile, expected_revision: baseline.revision, ...values },
+    update: { profile, expected_revision: baseline.revision, ...pickTimeoutFields(values, fields) },
     error: ''
   }
 }
 
-export function buildTimeoutUpdates(sourceProfile, timeouts, targetNames, baselinesByProfile, currentByProfile) {
+export function buildTimeoutUpdates(sourceProfile, timeouts, targetNames, baselinesByProfile, currentByProfile, fields = null) {
   const targets = uniqueProfileNames(targetNames)
   if (!sourceProfile || !timeouts || typeof timeouts !== 'object') {
     return { updates: [], errors: ['시간 제한 편집 상태를 확인할 수 없습니다. 상태를 새로고침하세요.'] }
@@ -696,7 +725,7 @@ export function buildTimeoutUpdates(sourceProfile, timeouts, targetNames, baseli
       errors.push(`${profile} 프로필의 역할별 시간 제한 지원, revision 또는 편집 권한을 확인할 수 없습니다. 상태를 새로고침하세요.`)
       continue
     }
-    updates.push({ profile, expected_revision: baseline.revision, ...values })
+    updates.push({ profile, expected_revision: baseline.revision, ...pickTimeoutFields(values, fields) })
   }
   return { updates: errors.length ? [] : updates, errors }
 }
@@ -720,10 +749,17 @@ export function slotFollowDeclaration(declaration, follow, models) {
   return { follow, custom: deepClone(route || { provider: '', model: '', reasoning: '' }) }
 }
 
-export function slotRoutingForSave(draft, editable) {
+// `slotIds` (a partial save) narrows the slot map to those slots; none leaves the key out.
+export function slotRoutingForSave(draft, editable, slotIds = null) {
   const routing = deepClone(draft.routing)
   delete routing.slots
-  if (editable && draft.slots) routing.slots = deepClone(draft.slots)
+  if (editable && draft.slots) {
+    if (!Array.isArray(slotIds)) routing.slots = deepClone(draft.slots)
+    else {
+      const slots = Object.fromEntries(slotIds.filter(id => draft.slots[id]).map(id => [id, deepClone(draft.slots[id])]))
+      if (Object.keys(slots).length) routing.slots = slots
+    }
+  }
   return routing
 }
 
@@ -787,6 +823,40 @@ export function slotDraftError(slots) {
   return ''
 }
 
+// Section saves that send only changed values. A service whose status root reports
+// `partial_save_schema: 1` takes the partial request forms (each body carries the same marker); the
+// page then sends, per section, only the values that differ from what it loaded, unless the section's
+// ‘현재 설정 전체 복사’ checkbox asks to copy everything. Without the capability the page keeps the
+// earlier request bodies exactly. The checkbox applies either way: a hand-picked target list alone
+// never copies anything.
+export const PARTIAL_SAVE_SCHEMA = 1
+export function partialSaveCapable(status) {
+  return status?.partial_save_schema === PARTIAL_SAVE_SCHEMA
+}
+export const COPY_ALL_LABEL = '현재 설정 전체 복사'
+export const COPY_ALL_HINT = '체크하지 않으면 바꾼 값만 저장합니다. 체크하면 불러온 프로필의 현재 설정 전체를 선택한 프로필에 복사합니다.'
+// The slots whose drafted declaration differs from the frozen one, in slot order.
+export function editedSlotIds(draftSlots, frozenSlots) {
+  return TASK_SLOTS.map(slot => slot.id).filter(id => draftSlots?.[id] && !sameValue(draftSlots[id], frozenSlots?.[id] ?? null))
+}
+// The stored slots a partial save keeps on one target (service.py _merge_partial_slots): on a profile
+// other than the loaded one, a submitted slot stored there as following the delegation model.
+export function partialSlotSkips(row, slotIds, origin) {
+  if (!row || row.name === origin) return []
+  const stored = row.routing?.slots && typeof row.routing.slots === 'object' ? row.routing.slots : {}
+  return (Array.isArray(slotIds) ? slotIds : []).filter(id => stored[id]?.follow === LEGACY_SLOT_FOLLOW)
+}
+// What a target's stored slots become after a partial save (mirror of service.py _merge_partial_slots).
+export function mergePartialSlots(stored, submitted, keepLegacy) {
+  const merged = stored && typeof stored === 'object' ? deepClone(stored) : {}
+  for (const [id, declaration] of Object.entries(submitted || {})) {
+    if (keepLegacy && merged[id]?.follow === LEGACY_SLOT_FOLLOW) continue
+    merged[id] = deepClone(declaration)
+  }
+  return Object.fromEntries(TASK_SLOTS.map(slot => slot.id).filter(id => merged[id]).map(id => [id, merged[id]]))
+}
+const slotLabels = ids => ids.map(id => TASK_SLOTS.find(slot => slot.id === id)?.label || id).join('·')
+
 export function toggleName(names, name, checked) {
   const set = new Set(Array.isArray(names) ? names : [])
   if (checked) set.add(name)
@@ -798,19 +868,26 @@ export function toggleName(names, name, checked) {
 // value when it is absent, and only fallback_preview could change it.
 // `modelRoles` (a Hermes-native service only) narrows a body that writes models to those roles and
 // opts in with `model_settings_schema`. A non-model save carries no incidental roles.
-export function buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets, modelRoles = null) {
+// `partialSave` (a service with `partial_save_schema: 1`) adds the marker and sends the routing as
+// membership plus only the slots it writes: Heavy/Light are not edited on the page and are left out,
+// so each target keeps its own.
+export function buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets, modelRoles = null, partialSave = false) {
   const { fallback: _retiredFallback, ...routing } = deepClone(draft.routing) || {}
   const targets = Array.isArray(modelTargets) ? [...modelTargets] : []
   const partial = Array.isArray(modelRoles)
   const models = pageModels(draft.models)
+  const enabled = routingProfiles.includes(profile)
   return {
+    ...(partialSave ? { partial_save_schema: PARTIAL_SAVE_SCHEMA } : {}),
     ...(partial ? { model_settings_schema: MODEL_SETTINGS_SCHEMA } : {}),
     expected_revision: revision,
     profile,
     // Never the delegation role: each target keeps its own (see PAGE_MODEL_ROLES).
     models: partial ? Object.fromEntries((targets.length ? PAGE_MODEL_ROLES.filter(role => modelRoles.includes(role)) : []).map(role => [role, deepClone(draft.models?.[role] ?? null)])) : models,
     model_targets: targets,
-    routing: { ...routing, enabled: routingProfiles.includes(profile) },
+    routing: partialSave
+      ? { enabled, ...(routing.slots && Object.keys(routing.slots).length ? { slots: routing.slots } : {}) }
+      : { ...routing, enabled },
     routing_profiles: [...routingProfiles],
     ...(routingTargets === undefined ? {} : { routing_targets: [...routingTargets] })
   }
@@ -1198,7 +1275,8 @@ export function primaryRouteForFallback(row, role, projection = null) {
   const isRoutingDraft = projection && (Array.isArray(projection.routing_targets)
     ? projection.routing_targets.includes(row?.name)
     : row?.name === projection.profile)
-  const configured = (isRoutingDraft ? projection.routing : row?.routing)?.[role]
+  // A partial body leaves Heavy/Light out: each target then keeps its stored one (service.py).
+  const configured = (isRoutingDraft ? projection.routing?.[role] : undefined) ?? row?.routing?.[role]
   if (configured?.follow === 'custom' && configured.custom) return configured.custom
   const modelRole = role === 'heavy' ? 'main' : 'delegation'
   // A model copy never changes a target's delegation role, so only the main model is projected.
@@ -1298,8 +1376,10 @@ export function buildFallbackPreviewBody(revision, scope, targetNames, value, pr
 
 // `auxiliaryWrite` ({ [task]: { targets, value } | null }) adds the compression and title-generation
 // spare models to the same fallback updates (see auxiliaryFallbackUpdates).
-export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets, timeoutSettings = null, auxiliaryWrite = null, modelRoles = null) {
-  const body = buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets, modelRoles)
+// `partialSave` uses the partial forms (see buildPreviewBody): the slots in `draft.routing` are the
+// ones to write, and the time limits carry only the changed fields unless `timeoutSettings.copyIntent`.
+export function buildCombinedPreviewBody(revision, profile, draft, modelTargets, routingProfiles, fallbackDrafts, fallbackBaselines, fallbackTargets, profiles, fallbackSupported = true, fallbackTargetEdits = {}, routingTargets, timeoutSettings = null, auxiliaryWrite = null, modelRoles = null, partialSave = false) {
+  const body = buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets, modelRoles, partialSave)
   const rows = Array.isArray(profiles) ? profiles : []
   const byName = new Map(rows.map(row => [row.name, row]))
   const projection = { profile, models: projectedModels(draft.models, modelRoles), routing: deepClone(body.routing), model_targets: [...body.model_targets], routing_targets: body.routing_targets }
@@ -1370,13 +1450,15 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
   }
   if (timeoutSettings) {
     const requested = timeoutSettings.copyIntent === true || timeoutDraftChanged(timeoutSettings.draft, timeoutSettings.baseline)
+    const fields = partialSave && timeoutSettings.copyIntent !== true ? changedTimeoutFields(timeoutSettings.draft, timeoutSettings.baseline) : null
     if (requested && timeoutSettings.baselinesByProfile && timeoutSettings.currentByProfile) {
       const timeoutResult = buildTimeoutUpdates(
         timeoutSettings.profile,
         timeoutSettings.draft,
         timeoutSettings.targets,
         timeoutSettings.baselinesByProfile,
-        timeoutSettings.currentByProfile
+        timeoutSettings.currentByProfile,
+        fields
       )
       if (timeoutResult.updates.length) body.timeout_updates = timeoutResult.updates
       errors.push(...timeoutResult.errors)
@@ -1385,7 +1467,8 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
         timeoutSettings.profile,
         timeoutSettings.draft,
         timeoutSettings.baseline,
-        timeoutSettings.current
+        timeoutSettings.current,
+        fields
       )
       if (timeoutResult.update) body.timeout_updates = [timeoutResult.update]
       if (timeoutResult.error) errors.push(timeoutResult.error)
@@ -1447,7 +1530,7 @@ export function buildModelSectionPreviewBody(snapshot, storeScope, revision = sn
   if (!baseline?.models || !baseline?.routing || !snapshot.draft) return { body: null, errors: ['불러온 기준 설정을 확인할 수 없습니다. 상태를 새로고침하세요.'] }
   const routing = deepClone(snapshot.draft.routing)
   const body = buildPreviewBody(revision, snapshot.profile, { models: deepClone(snapshot.draft.models), routing },
-    snapshot.modelTargets, snapshot.routingProfiles, snapshot.routingTargets, snapshot.modelRoles ?? null)
+    snapshot.modelTargets, snapshot.routingProfiles, snapshot.routingTargets, snapshot.modelRoles ?? null, snapshot.partialSave === true)
   return { body, errors: snapshot.routingTargetError ? [snapshot.routingTargetError] : [] }
 }
 
@@ -1486,20 +1569,34 @@ export function buildModelSectionFallbackBody(snapshot, revision = snapshot?.rev
 
 // What one model-section save writes to each profile, read from the request bodies themselves: the
 // delegation-method batch, the store plan and the conversation spare-model plan (each may be null).
-export function modelSectionWriteSet({ native = null, store = null, fallback = null } = {}) {
+// `slots` is true for a whole slot map (the earlier body), or the slot ids a partial body writes to that
+// target (`keptSlots`: submitted ids that target keeps, see partialSlotSkips; needs `profiles`).
+// `slotSpares` is true for a whole spare-model policy, or the slot ids of a per-slot patch.
+// `timeouts` is the list of seconds fields each time-limit target receives.
+export function modelSectionWriteSet({ native = null, store = null, fallback = null, profiles = null } = {}) {
   const set = new Map()
-  const entry = name => { if (!set.has(name)) set.set(name, { models: false, slots: false, method: null, slotSpares: false, conversationSpares: null, auxiliarySpares: null }); return set.get(name) }
+  const rows = Array.isArray(profiles) ? profiles : []
+  const has = (item, key) => Boolean(item) && Object.prototype.hasOwnProperty.call(item, key)
+  const entry = name => { if (!set.has(name)) set.set(name, { models: false, slots: false, keptSlots: [], method: null, slotSpares: false, conversationSpares: null, auxiliarySpares: null, timeouts: null }); return set.get(name) }
   if (store) {
     const scope = store.save_scope ?? null
+    const partial = store.partial_save_schema === PARTIAL_SAVE_SCHEMA
     if (scope === null || scope === 'models') for (const name of store.model_targets || []) entry(name).models = true
-    if ((scope === null || scope === 'routing') && store.routing && Object.prototype.hasOwnProperty.call(store.routing, 'slots')) {
-      for (const name of Array.isArray(store.routing_targets) ? store.routing_targets : [store.profile]) entry(name).slots = true
+    if ((scope === null || scope === 'routing') && store.routing && has(store.routing, 'slots')) {
+      const ids = Object.keys(store.routing.slots || {})
+      for (const name of Array.isArray(store.routing_targets) ? store.routing_targets : [store.profile]) {
+        const item = entry(name)
+        if (!partial) { item.slots = true; continue }
+        item.keptSlots = partialSlotSkips(rows.find(row => row.name === name), ids, store.profile)
+        item.slots = ids.filter(id => !item.keptSlots.includes(id))
+      }
     }
+    for (const update of store.timeout_updates || []) entry(update.profile).timeouts = Object.keys(update).filter(key => !['profile', 'expected_revision'].includes(key))
   }
   for (const update of native?.updates || []) {
     const item = entry(update.profile)
     item.method = update.backend ?? null
-    item.slotSpares = Object.prototype.hasOwnProperty.call(update, 'slot_policy') || Object.prototype.hasOwnProperty.call(update, 'policy')
+    item.slotSpares = has(update, 'slot_policy_patch') ? Object.keys(update.slot_policy_patch) : has(update, 'slot_policy') || has(update, 'policy')
   }
   for (const update of fallback?.updates || []) {
     if (Object.prototype.hasOwnProperty.call(update, 'native_fallback')) entry(update.profile).conversationSpares = deepClone(update.native_fallback)
@@ -1519,23 +1616,28 @@ export function buildScopedPreviewBody(snapshot, saveScope) {
   const baselineMembership = Object.entries(snapshot.profileBaselines || {})
     .filter(([, row]) => row?.routing?.enabled === true)
     .map(([name]) => name)
+  const partialSave = snapshot.partialSave === true
   const models = saveScope === 'models' ? snapshot.draft.models : baseline.models
-  const routing = saveScope === 'routing' ? snapshot.draft.routing : baseline.routing
+  // A partial save outside the routing scope sends no slots at all (only membership is required).
+  const routing = saveScope === 'routing' ? snapshot.draft.routing : partialSave ? { ...baseline.routing, slots: undefined } : baseline.routing
   const routingProfiles = saveScope === 'routing' ? snapshot.routingProfiles : baselineMembership
   const modelTargets = saveScope === 'models' ? snapshot.modelTargets : []
   const routingTargets = saveScope === 'routing' ? snapshot.routingTargets : []
   const body = buildPreviewBody(snapshot.revision, snapshot.profile, {
     models: deepClone(models),
     routing: deepClone(routing)
-  }, modelTargets, routingProfiles, routingTargets, snapshot.modelRoles ?? null)
+  }, modelTargets, routingProfiles, routingTargets, snapshot.modelRoles ?? null, partialSave)
   body.save_scope = saveScope
   if (saveScope !== 'timeouts') return { body, errors: [] }
+  const fields = partialSave && snapshot.timeoutCopyAll !== true ? changedTimeoutFields(snapshot.draft.timeouts, snapshot.timeoutsBaseline) : null
+  if (Array.isArray(fields) && !fields.length) return { body: null, errors: ['바뀐 시간 제한이 없어 저장할 것이 없습니다. 값을 고치거나 ‘현재 설정 전체 복사’를 선택하세요.'] }
   const timeoutResult = buildTimeoutUpdates(
     snapshot.profile,
     snapshot.draft.timeouts,
     snapshot.timeoutTargets,
     snapshot.timeoutBaselinesByProfile,
-    snapshot.currentTimeoutsByProfile
+    snapshot.currentTimeoutsByProfile,
+    fields
   )
   if (timeoutResult.updates.length) body.timeout_updates = timeoutResult.updates
   return { body, errors: timeoutResult.errors }
@@ -2661,7 +2763,79 @@ export function nativeProfileTargetReason(row) {
 //  'profiles' - allow-list, descriptions and consent from the draft, each target keeps its stored
 //               method and spare models (only profiles already on a profile method can take it);
 //  'all'      - the earlier one-card save, kept for compatibility.
-export function buildNativeDelegationBatchBody(revision, origin, targets, draft, baselines, profiles, part = 'all') {
+// `options.partial` (a service with `partial_save_schema: 1`) sends only what changed against the
+// loaded profile's frozen value, unless `options.copyAll` (the section's ‘현재 설정 전체 복사’):
+//  'native'   - `backend` only when the method was edited; `slot_policy_patch` with only the edited
+//               slots. A target stored on another method, or (other than the loaded profile) with a
+//               two-role block, keeps its spare models and is named in `skipped`.
+//  'profiles' - `profile_routes_patch` (add/remove/descriptions, `default` only when edited and that
+//               target takes it), merged into each target's stored list by the service.
+// A target with nothing to receive gets no update. Copy-all sends the earlier full forms.
+export function buildNativeDelegationBatchBody(revision, origin, targets, draft, baselines, profiles, part = 'all', options = {}) {
+  return planNativeDelegationBatch(revision, origin, targets, draft, baselines, profiles, part, options).body
+}
+
+export const NATIVE_TWO_ROLE_SKIP_REASON = '이 프로필에는 이전 형식(역할별) 예비 모델이 저장되어 있어 바뀐 슬롯만 저장할 수 없습니다. 이 프로필을 불러와 저장하거나 ‘현재 설정 전체 복사’를 사용하세요.'
+export const nativeMethodMismatchReason = backend => `이 프로필은 다른 맡기는 방식(${nativeBackendLabel(backend)})으로 저장되어 있어 바뀐 슬롯 예비 모델은 적용하지 않습니다. 방식까지 맞추려면 ‘현재 설정 전체 복사’를 사용하세요.`
+// The allow-list changes the draft makes against the frozen loaded routes (no `default`; see below).
+export function profileRoutesPatch(draftRoutes, frozenRoutes, descriptionEdits = {}) {
+  const draftRows = Array.isArray(draftRoutes?.profiles) ? draftRoutes.profiles : []
+  const frozenRows = Array.isArray(frozenRoutes?.profiles) ? frozenRoutes.profiles : []
+  const frozenByName = new Map(frozenRows.map(entry => [entry.name, entry]))
+  const draftNames = new Set(draftRows.map(entry => entry.name))
+  const edited = name => descriptionEdits?.[name] === true
+  const add = draftRows.filter(entry => !frozenByName.has(entry.name)).map(entry => ({ name: entry.name, description: edited(entry.name) ? entry.description : '' }))
+  const remove = frozenRows.filter(entry => !draftNames.has(entry.name)).map(entry => entry.name)
+  // Only names the loaded profile already listed: a target that already lists an added name keeps its entry.
+  const descriptions = Object.fromEntries(draftRows.filter(entry => frozenByName.has(entry.name) && edited(entry.name) && frozenByName.get(entry.name).description !== entry.description)
+    .map(entry => [entry.name, entry.description]))
+  return { ...(add.length ? { add } : {}), ...(remove.length ? { remove } : {}), ...(Object.keys(descriptions).length ? { descriptions } : {}) }
+}
+export const profileDefaultAutoReason = '모델 / 프로필 통합 선택 방식이라 기본 전문 프로필을 쓰지 않아 기본값은 그대로 둡니다.'
+export const profileDefaultMissingReason = name => `기본 전문 프로필(${name})이 이 프로필의 허용 목록에 없어 기본값은 그대로 둡니다. 기본값까지 맞추려면 ‘현재 설정 전체 복사’를 사용하세요.`
+// What a patch actually changes on one target's stored routes (for its summary line): added names it
+// does not list yet, removed names it lists, descriptions that differ for names it lists after the
+// merge, and the default only when it differs from its stored one.
+export function effectiveRoutesPatch(stored, patch) {
+  const before = stored?.profiles || []
+  const has = name => before.some(entry => entry.name === name)
+  const merged = mergeProfileRoutes(stored, patch)
+  const removed = (patch?.remove || []).filter(has)
+  const add = (patch?.add || []).filter(item => !has(item.name) || removed.includes(item.name))
+  const remove = removed.filter(name => !add.some(item => item.name === name))
+  const descriptions = Object.fromEntries(Object.entries(patch?.descriptions || {}).filter(([name, text]) => {
+    const now = merged.profiles.find(entry => entry.name === name)
+    const was = before.find(entry => entry.name === name)
+    return now && was && was.description !== text
+  }))
+  const result = { ...(add.length ? { add } : {}), ...(remove.length ? { remove } : {}), ...(Object.keys(descriptions).length ? { descriptions } : {}) }
+  if ((merged.default ?? null) !== (stored?.default ?? null)) result.default = merged.default ?? null
+  return result
+}
+// One allow-list patch in words, for the per-target summary.
+export function profileRoutesPatchText(patch) {
+  return [
+    patch?.add?.length ? `추가 ${patch.add.map(entry => entry.name).join(', ')}` : '',
+    patch?.remove?.length ? `제외 ${patch.remove.join(', ')}` : '',
+    patch?.descriptions && Object.keys(patch.descriptions).length ? `설명 ${Object.keys(patch.descriptions).join(', ')}` : '',
+    patch && Object.prototype.hasOwnProperty.call(patch, 'default') ? `기본 ${patch.default || '현재 대화의 모델'}` : ''
+  ].filter(Boolean).join(' · ')
+}
+// One target's routes after a patch (mirror of native_settings.merge_profile_routes).
+export function mergeProfileRoutes(stored, patch) {
+  const removed = new Set(patch?.remove || [])
+  const rows = (stored?.profiles || []).filter(entry => !removed.has(entry.name)).map(entry => ({ ...entry }))
+  for (const item of patch?.add || []) if (!rows.some(entry => entry.name === item.name)) rows.push({ name: item.name, description: item.description })
+  for (const entry of rows) if (Object.prototype.hasOwnProperty.call(patch?.descriptions || {}, entry.name)) entry.description = patch.descriptions[entry.name]
+  const present = new Set(rows.map(entry => entry.name))
+  const fallbackDefault = stored?.default ?? null
+  const value = Object.prototype.hasOwnProperty.call(patch || {}, 'default') ? patch.default : present.has(fallbackDefault) ? fallbackDefault : null
+  return { profiles: rows, default: value }
+}
+const addsProfileAuthority = (before, after) => after.profiles.some(entry => !before.profiles.some(old => old.name === entry.name)) ||
+  (after.default !== null && after.default !== before.default)
+
+export function planNativeDelegationBatch(revision, origin, targets, draft, baselines, profiles, part = 'all', options = {}) {
   const rows = Array.isArray(profiles) ? profiles : []
   const names = rows.map(row => row.name)
   if (!['native', 'profiles', 'all'].includes(part)) throw new Error('저장 범위를 확인할 수 없습니다.')
@@ -2671,9 +2845,45 @@ export function buildNativeDelegationBatchBody(revision, origin, targets, draft,
   if (source?.supported !== true || source.editable !== true || !baselines?.[origin] ||
       source.digest !== baselines[origin].digest || draft.expectedDigest !== baselines[origin].digest) throw new Error('불러온 프로필의 설정이 바뀌었습니다. 입력한 내용을 확인하고 상태를 다시 불러오세요.')
   if (part === 'profiles' && !nativeProfileMode(source.backend)) throw new Error('불러온 프로필은 전문 프로필에 맡기는 방식이 아닙니다. 먼저 ‘모델’ 섹션에서 맡기는 방식을 저장하세요.')
-  return { expected_revision: revision, updates: targets.map(name => {
+  const partial = options?.partial === true && part !== 'all'
+  const delta = partial && options?.copyAll !== true
+  const skipped = {}
+  const frozen = copyNativeDelegationDraft(baselines[origin])
+  const backendEdited = Boolean(frozen && draft.backend !== frozen.backend)
+  const policyKey = nativeSlotPolicyKey(draft.backend)
+  const copySlots = part === 'native' && nativeModelMode(draft.backend) && nativeSlotDraftReady(draft, source)
+  const editedSpares = delta && copySlots ? TASK_SLOTS.map(slot => slot.id).filter(id => !sameValue(draft[policyKey]?.[id] ?? null, frozen?.[policyKey]?.[id] ?? null)) : []
+  const routesPatch = delta && part === 'profiles' ? profileRoutesPatch(draft.profile_routes, frozen?.profile_routes, draft.descriptionEdits) : null
+  const defaultChanged = (draft.profile_routes?.default ?? null) !== (frozen?.profile_routes?.default ?? null)
+  const updates = targets.map(name => {
     const row = rows.find(item => item.name === name)
     const baseline = baselines[name]
+    if (delta && part === 'profiles') {
+      const issue = nativeProfileTargetReason(row)
+      if (issue) throw new Error(`${name}: ${issue}`)
+      if (!baseline || baseline.supported !== true || baseline.editable !== true || baseline.digest !== row.native_delegation.digest) throw new Error(`${name}의 설정이 바뀌었습니다. 상태를 다시 불러온 뒤 저장하세요.`)
+      const draftIssue = nativeDelegationValidation(draft, names, 'profiles')
+      if (draftIssue) throw new Error(draftIssue)
+      // The default is edited only on a profile-only source, and only a profile-only target takes it.
+      const takesDefault = source.backend === 'model-router-profiles' && baseline.backend !== 'model-router-auto' && defaultChanged
+      // An automatic-selection target does not use the default: it keeps its own and is named.
+      if (defaultChanged && source.backend === 'model-router-profiles' && baseline.backend === 'model-router-auto') skipped[name] = profileDefaultAutoReason
+      const patch = { ...routesPatch, ...(takesDefault ? { default: draft.profile_routes.default } : {}) }
+      // A default this target's merged list does not hold would be refused by the service: the target
+      // keeps its own default and is named instead.
+      if (takesDefault && patch.default !== null && !mergeProfileRoutes(baseline.profile_routes, routesPatch).profiles.some(entry => entry.name === patch.default)) {
+        delete patch.default
+        skipped[name] = profileDefaultMissingReason(draft.profile_routes.default)
+      }
+      if (!Object.keys(patch).length) return null
+      const merged = mergeProfileRoutes(baseline.profile_routes, patch)
+      const gone = merged.profiles.filter(entry => !names.includes(entry.name)).map(entry => entry.name)
+      if (gone.length) throw new Error(`${name}: 허용 목록에 더 이상 없는 프로필(${gone.join(', ')})이 있어 저장할 수 없습니다. 그 프로필을 불러와 목록에서 제거한 뒤 저장하세요.`)
+      const inheritanceIssue = profileRoleInheritanceIssue(merged, baseline.profile_routes, row.native_delegation)
+      if (inheritanceIssue) throw new Error(`${name}: ${inheritanceIssue}`)
+      if (addsProfileAuthority(baseline.profile_routes, merged) && draft.allowProfileAccess !== true) throw new Error('허용할 프로필의 계정과 기능을 확인한 뒤, 아래 사용 허용에 체크하세요.')
+      return { profile: name, expected_digest: baseline.digest, allow_profile_access: draft.allowProfileAccess === true, profile_routes_patch: deepClone(patch) }
+    }
     const backend = part === 'profiles' ? baseline?.backend : draft.backend
     // Spare models are visible only as slot entries in a model mode on a slot-capable loaded
     // profile; in every other case each target keeps its own stored policy in its stored shape.
@@ -2717,15 +2927,40 @@ export function buildNativeDelegationBatchBody(revision, origin, targets, draft,
         (next.profile_routes.default !== null && next.profile_routes.default !== baseline.profile_routes.default)
       if (addsAccess && !next.allowProfileAccess) throw new Error('허용할 프로필의 계정과 기능을 확인한 뒤, 아래 사용 허용에 체크하세요.')
     }
-    return buildNativeDelegationPreviewBody(revision, name, next, row.native_delegation, names, part).updates[0]
-  }) }
+    const full = buildNativeDelegationPreviewBody(revision, name, next, row.native_delegation, names, part).updates[0]
+    if (!delta) return full
+    // Partial 'native': the method only when edited, and only the edited slots' spare models.
+    const update = { profile: full.profile, expected_digest: full.expected_digest, allow_profile_access: false }
+    if (backendEdited) update.backend = draft.backend
+    if (editedSpares.length) {
+      const storedSchema = draft.backend === 'model-router-auto' ? baseline.auto_policy_schema : baseline.policy_schema
+      if (!backendEdited && baseline.backend !== draft.backend) skipped[name] = nativeMethodMismatchReason(baseline.backend)
+      else if (storedSchema === 1 && name !== origin) skipped[name] = NATIVE_TWO_ROLE_SKIP_REASON
+      else if (storedSchema === 1) {
+        // The loaded profile's own two-role block: replaced by its whole per-slot view, as before.
+        update.slot_policy = deepClone(draft[policyKey])
+        update.allow_additional_cost = Object.values(update.slot_policy).some(entry => entry.mode === 'custom')
+      } else {
+        update.slot_policy_patch = Object.fromEntries(editedSpares.map(id => [id, deepClone(draft[policyKey][id])]))
+        update.allow_additional_cost = Object.values(update.slot_policy_patch).some(entry => entry.mode === 'custom')
+      }
+    }
+    return update.backend || update.slot_policy || update.slot_policy_patch ? update : null
+  }).filter(Boolean)
+  // Nothing visible was edited: an empty plan, not an error (the caller sends nothing).
+  if (delta && !updates.length && part === 'native' && !backendEdited && !editedSpares.length) return { body: { partial_save_schema: PARTIAL_SAVE_SCHEMA, expected_revision: revision, updates: [] }, skipped }
+  const skippedText = Object.entries(skipped).map(([name, reason]) => `${name}: ${reason}`).join(' ')
+  if (delta && !updates.length) throw new Error(part === 'profiles'
+    ? (skippedText ? `바뀐 전문 프로필 설정을 받을 수 있는 프로필이 적용 대상에 없습니다. ${skippedText}` : '바뀐 전문 프로필 설정이 없어 저장할 것이 없습니다.')
+    : `바꾼 슬롯 예비 모델을 받을 수 있는 프로필이 적용 대상에 없습니다. ${Object.entries(skipped).map(([name, reason]) => `${name}: ${reason}`).join(' ')}`.trim())
+  return { body: { ...(partial ? { partial_save_schema: PARTIAL_SAVE_SCHEMA } : {}), expected_revision: revision, updates }, skipped }
 }
 
 export function nativeDelegationSnapshotCurrent(snapshot, status) {
   if (status?.revision !== snapshot.revision) return false
   try {
     buildNativeDelegationBatchBody(snapshot.revision, snapshot.profile, snapshot.nativeTargets,
-      snapshot.nativeDraft, snapshot.nativeBaselines, status.profiles, snapshot.nativePart || 'all')
+      snapshot.nativeDraft, snapshot.nativeBaselines, status.profiles, snapshot.nativePart || 'all', snapshot.nativeOptions || {})
     return true
   } catch { return false }
 }
@@ -2770,23 +3005,57 @@ export function submittedEditCoverage(view, sent) {
         if (routingTargets.length) {
           if (sameValue(body.routing.heavy, view.routing?.heavy) && sameValue(body.routing.light, view.routing?.light)) covered.add('routing.roles')
           if (Object.prototype.hasOwnProperty.call(body.routing, 'slots')) {
-            covered.add('copy.slots')
-            if (sameValue(body.routing.slots ?? null, view.slots ?? null)) covered.add('routing.slots')
+            const sent = body.routing.slots && typeof body.routing.slots === 'object' ? body.routing.slots : {}
+            if (body.partial_save_schema === PARTIAL_SAVE_SCHEMA) {
+              // A partial body covers the slot edit when it carries every edited slot as drafted.
+              if (TASK_SLOTS.every(slot => has(sent, slot.id))) covered.add('copy.slots')
+              const edited = Array.isArray(view.editedSlots) ? view.editedSlots : []
+              if (edited.every(id => has(sent, id)) && Object.keys(sent).every(id => sameValue(sent[id], view.slots?.[id] ?? null))) covered.add('routing.slots')
+            } else {
+              covered.add('copy.slots')
+              if (sameValue(body.routing.slots ?? null, view.slots ?? null)) covered.add('routing.slots')
+            }
           }
         }
         // Saved only by a request that names it as an explicit re-enable (membership alone is not).
         if ((view.reenable || []).every(name => Array.isArray(body.reenable_profiles) && body.reenable_profiles.includes(name))) covered.add('reenable')
       }
-      if (Array.isArray(body.timeout_updates) && body.timeout_updates.length) covered.add('timeouts')
+      if (Array.isArray(body.timeout_updates) && body.timeout_updates.length) {
+        // A partial body covers the time-limit edit when every update carries every changed field.
+        const fields = Array.isArray(view.timeoutFields) ? view.timeoutFields : []
+        if (body.partial_save_schema !== PARTIAL_SAVE_SCHEMA || body.timeout_updates.every(update => fields.every(key => has(update, key)))) covered.add('timeouts')
+      }
       coverFallbacks(body.fallback_updates)
     } else if (operation === '/fallback-preview') {
       coverFallbacks(body.updates)
     } else if (operation === '/delegation-preview' && view.native) {
       const updates = body.updates
-      if (part === 'native') {
+      if (part === 'native' && body.partial_save_schema === PARTIAL_SAVE_SCHEMA) {
+        // Partial updates: a method sent at all is the drafted one; a spare-model part (patch, or the
+        // whole view for a two-role block) carries every edited slot as drafted for the drafted method.
+        const withBackend = (updates || []).filter(update => has(update, 'backend'))
+        if (every(withBackend, update => update.backend === view.native.backend)) covered.add('native.backend')
+        if (every(updates, update => update.backend === view.native.backend)) covered.add('native.copy')
+        const spares = (updates || []).filter(update => has(update, 'slot_policy_patch') || has(update, 'slot_policy'))
+        const key = view.native.backend === 'model-router-auto' ? 'autoSlotPolicy' : 'slotPolicy'
+        const edited = Array.isArray(view.native.editedSpares) ? view.native.editedSpares : []
+        const carries = update => {
+          const sent = update.slot_policy_patch || update.slot_policy
+          return edited.every(id => has(sent, id)) && Object.keys(sent).every(id => sameValue(sent[id], view.native[key]?.[id] ?? null))
+        }
+        if (every(spares, carries)) covered.add(`native.${key}`)
+      } else if (part === 'native') {
         if (every(updates, update => update.backend === view.native.backend)) { covered.add('native.backend'); covered.add('native.copy') }
         if (every(updates, update => update.backend === 'model-router' && sameValue(update.slot_policy, view.native.slotPolicy))) covered.add('native.slotPolicy')
         if (every(updates, update => update.backend === 'model-router-auto' && sameValue(update.slot_policy, view.native.autoSlotPolicy))) covered.add('native.autoSlotPolicy')
+      } else if (part === 'profiles' && body.partial_save_schema === PARTIAL_SAVE_SCHEMA && (updates || []).some(update => has(update, 'profile_routes_patch'))) {
+        // Partial updates: the same list patch (as derived from the draft) went to every target.
+        const drafted = view.native.profile_routes || { profiles: [], default: null }
+        const expected = profileRoutesPatch(drafted, view.native.frozenRoutes, view.native.descriptionEdits)
+        const strip = patch => { const { default: _default, ...rest } = patch || {}; return rest }
+        if (every(updates, update => has(update, 'profile_routes_patch') && sameValue(strip(update.profile_routes_patch), expected))) covered.add('profiles.list')
+        const takesDefault = update => has(update.profile_routes_patch, 'default') && update.profile_routes_patch.default === (drafted.default ?? null)
+        if ((updates || []).some(update => update.profile === view.profile && takesDefault(update)) || every(updates, takesDefault)) covered.add('profiles.default')
       } else if (part === 'profiles') {
         const drafted = view.native.profile_routes || { profiles: [], default: null }
         if (every(updates, update => update.profile_routes)) covered.add('profiles.targets')
@@ -3303,6 +3572,14 @@ function RouterPage({ ctx: pluginContext }) {
   const [routingTargets, setRoutingTargets] = useState(null)
   const [routingBaseline, setRoutingBaseline] = useState(null)
   const [routingTargetEdited, setRoutingTargetEdited] = useState(false)
+  // Each section's explicit ‘현재 설정 전체 복사’ intent. A hand-picked target list alone copies nothing:
+  // without it a save sends only the values that differ from what was loaded. Reset by a reload, a
+  // profile switch and any change of that section's target list.
+  const [modelCopyAll, setModelCopyAll] = useState(false)
+  const [profileCopyAll, setProfileCopyAll] = useState(false)
+  const [timeoutCopyAll, setTimeoutCopyAll] = useState(false)
+  // Whether the whole-page save has anything to write (set each render; read by its handler).
+  const pageWriteNeededRef = useRef(false)
   // The conversation spare models (native fallback) as drafted and as loaded; they are saved by the
   // model section to its own targets. The routing/delegation values are read only, never written.
   const [fallbackDrafts, setFallbackDrafts] = useState({ native: null, routing: null, delegation: null })
@@ -3366,9 +3643,12 @@ function RouterPage({ ctx: pluginContext }) {
   const statusDataRef = useRef(statusQuery.data)
   statusDataRef.current = statusQuery.data
   const revisionChanged = draftRevision !== null && statusQuery.data?.revision !== draftRevision
+  // The service takes the partial forms: each section sends only its changed values.
+  const partialSave = partialSaveCapable(statusQuery.data)
   const loadedTimeoutRow = profiles.find(item => item.name === selectedProfile) || null
   const timeoutChanged = timeoutDraftChanged(draft?.timeouts, timeoutBaseline)
-  const timeoutWriteRequested = timeoutChanged || timeoutTargetEdited
+  const timeoutWriteRequested = timeoutChanged || timeoutCopyAll
+  const timeoutFields = partialSave && !timeoutCopyAll ? changedTimeoutFields(draft?.timeouts, timeoutBaseline) : null
   const timeoutBaselineMap = timeoutBaselinesFromProfiles(profileBaselines)
   const selectedTimeoutTargets = reconcileTimeoutTargets(timeoutTargets, profiles)
   // Ticked names a same-revision refresh no longer lists. A list the operator chose is never narrowed
@@ -3401,6 +3681,9 @@ function RouterPage({ ctx: pluginContext }) {
     if (revisionChanged) {
       generationRef.current += 1
       setRoutingTargetEdited(false)
+      setModelCopyAll(false)
+      setProfileCopyAll(false)
+      setTimeoutCopyAll(false)
     }
     setPreview(null)
   }, [revisionChanged, timeoutRevisionChanged, draftRevision, timeoutBaseline?.revision, statusQuery.data?.revision, applyPending])
@@ -3437,6 +3720,9 @@ function RouterPage({ ctx: pluginContext }) {
     setRoutingTargets(null)
     setRoutingBaseline(null)
     setRoutingTargetEdited(false)
+    setModelCopyAll(false)
+    setProfileCopyAll(false)
+    setTimeoutCopyAll(false)
     setFallbackDrafts({ native: null, routing: null, delegation: null })
     setFallbackBaselines({ native: null, routing: null, delegation: null })
     setAuxiliaryDrafts({ compression: null, title: null })
@@ -3487,6 +3773,9 @@ function RouterPage({ ctx: pluginContext }) {
     setTimeoutTargetEdited(false)
     setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
     setRoutingTargetEdited(false)
+    setModelCopyAll(false)
+    setProfileCopyAll(false)
+    setTimeoutCopyAll(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
     const routingFallback = copyRoutingFallbackDraft(row.fallbacks?.routing)
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
@@ -3548,9 +3837,13 @@ function RouterPage({ ctx: pluginContext }) {
   const slotDraftChanged = Boolean(slotInfo.editable && draft?.slots && frozenProfile && !sameValue(draft.slots, frozenProfile.slots ?? null))
   const modelDraftChanged = Boolean(draft && frozenProfile && !sameValue(draft.models, frozenProfile.models))
   const slotDraftIssue = slotInfo.editable && draft?.slots ? slotDraftError(draft.slots) : ''
-  // `routingTargetEdited` is the section's copy intent: the operator picked targets by hand.
-  // Slot models are copied on fresh intent only while their cards are on screen (a model mode).
+  // `modelCopyAll` (the ‘현재 설정 전체 복사’ checkbox) is the section's copy intent; a hand-picked
+  // target list alone copies nothing. Slot models are copied only while their cards are on screen.
   const slotCardsVisible = Boolean(nativeDelegationDraft && nativeModelMode(nativeDelegationDraft.backend))
+  const slotCopyAll = modelCopyAll && slotCardsVisible
+  // A partial save sends only the slots whose declaration changed (all six on copy-all).
+  const editedSlots = slotInfo.editable && draft?.slots && frozenProfile ? editedSlotIds(draft.slots, frozenProfile.slots) : []
+  const slotSendIds = !draft?.slots ? [] : partialSave && !slotCopyAll ? editedSlots : TASK_SLOTS.map(slot => slot.id)
   // A slot still following the delegation model (an earlier setting) is never copied to another
   // profile: the slot models then go to the loaded profile only, and every other target is named as
   // keeping its own slot models. No copy intent is pending for them.
@@ -3564,19 +3857,26 @@ function RouterPage({ ctx: pluginContext }) {
     const row = profiles.find(item => item.name === name)
     return (Array.isArray(row?.slots?.stored) ? row.slots.stored : []).some(id => row?.slots?.declarations?.[id]?.follow === LEGACY_SLOT_FOLLOW)
   }
-  const slotTargetsAllowed = slotsCopyOk ? selectedTargets.filter(name => !legacySlotTarget(name)) : selectedTargets.filter(name => name === selectedProfile)
+  // A partial save merges the slots it sends over each target's own (service.py _merge_partial_slots):
+  // a target keeps only those submitted slots it stores as following the delegation model, and takes
+  // the save unless it keeps every one of them. Edited slots never follow the delegation model, so the
+  // loaded profile's own earlier slots restrict only a whole-map copy.
+  const partialSlotMerge = partialSave && (slotsCopyOk || !slotCopyAll)
+  const keptSlotsFor = name => partialSlotMerge ? partialSlotSkips(profiles.find(item => item.name === name), slotSendIds, selectedProfile) : []
+  const slotTargetsAllowed = partialSlotMerge ? selectedTargets.filter(name => slotSendIds.some(id => !keptSlotsFor(name).includes(id)))
+    : slotsCopyOk ? selectedTargets.filter(name => !legacySlotTarget(name)) : selectedTargets.filter(name => name === selectedProfile)
   // Copy intent alone sends slot models only while some chosen target can take them; otherwise the
   // rest is saved and every chosen target is named as keeping its own slot models.
-  const routingCopyPending = !revisionChanged && slotInfo.editable && Boolean(draft?.slots) &&
-    (slotDraftChanged || (routingTargetEdited && slotCardsVisible && slotsCopyOk && slotTargetsAllowed.length > 0))
+  const routingCopyPending = !revisionChanged && slotInfo.editable && Boolean(draft?.slots) && slotSendIds.length > 0 &&
+    (slotDraftChanged || (slotCopyAll && slotsCopyOk && slotTargetsAllowed.length > 0))
   const routingWriteTargets = routingCopyPending ? slotTargetsAllowed : []
-  const slotSkippedTargets = slotInfo.editable && Boolean(draft?.slots) && (slotDraftChanged || (routingTargetEdited && slotCardsVisible))
+  const slotSkippedTargets = slotInfo.editable && Boolean(draft?.slots) && (slotDraftChanged || slotCopyAll)
     ? selectedTargets.filter(name => !slotTargetsAllowed.includes(name)) : []
   const slotSkipReason = '이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 다른 프로필에는 복사하지 않음'
   const targetSlotSkipReason = '이 프로필에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않음'
-  const slotSkipReasonFor = name => slotsCopyOk ? targetSlotSkipReason : slotSkipReason
+  const slotSkipReasonFor = name => slotsCopyOk || partialSlotMerge ? targetSlotSkipReason : slotSkipReason
   const routingTargetError = routingCopyPending ? slotDraftIssue || (!selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.'
-    : !slotTargetsAllowed.length ? (slotsCopyOk
+    : !slotTargetsAllowed.length ? (slotsCopyOk || partialSlotMerge
       ? `작업 슬롯 모델: 선택한 프로필(${selectedTargets.join(', ')})에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않습니다. 불러온 프로필(${selectedProfile})을 적용 대상에 넣거나 다른 프로필을 고르세요.`
       : `작업 슬롯 모델: ${slotSkipReason}입니다. 불러온 프로필(${selectedProfile})을 적용 대상에 넣거나, 그 슬롯의 모델 기준을 다시 고르세요.`) : '') : ''
   // A Hermes-native service (status `model_settings_schema: 1`) takes only the roles a save writes:
@@ -3584,14 +3884,15 @@ function RouterPage({ ctx: pluginContext }) {
   // Those roles are 'held': their frozen values stay, everything else follows the newest status.
   const modelSettings = modelSettingsCapable(statusQuery.data)
   const editedRoles = modelSettings && draft && frozenProfile ? editedModelRoles(draft.models, frozenProfile.models) : []
-  const requestedRoles = modelSettings ? (draft && frozenProfile ? requestedModelRoles(currentRow, draft.models, frozenProfile.models, routingTargetEdited) : []) : null
+  const requestedRoles = modelSettings ? (draft && frozenProfile ? requestedModelRoles(currentRow, draft.models, frozenProfile.models, modelCopyAll) : []) : null
   const requestedRolesKey = modelSettings ? requestedRoles.join(',') : null
-  const modelWriteNeeded = modelSettings ? requestedRoles.length > 0 : (modelDraftChanged || routingTargetEdited)
-  // Role models go to the target list only while there is an edit or fresh copy intent; a list that
-  // merely persisted across a reload or profile change copies nothing.
+  const modelWriteNeeded = modelSettings ? requestedRoles.length > 0 : (modelDraftChanged || modelCopyAll)
+  // Role models go to the target list only while there is an edit or explicit copy intent; a list
+  // that was merely picked, or persisted across a reload or profile change, copies nothing.
   const modelWriteTargets = modelWriteNeeded ? selectedTargets : []
-  // Bodies are built from this view so every store save carries the same slot declarations.
-  const saveDraft = draft ? { ...draft, routing: slotRoutingForSave(draft, slotInfo.editable) } : draft
+  // Bodies are built from this view so every store save carries the same slot declarations (on a
+  // partial save only the slots it writes).
+  const saveDraft = draft ? { ...draft, routing: slotRoutingForSave(draft, slotInfo.editable, partialSave ? slotSendIds : null) } : draft
   const loadedRoutingProfiles = profiles.filter(item => item.routing?.enabled === true).map(item => item.name)
   // Turning routing back on is intent only for a profile that was off when loaded.
   // Effectively off when the page loaded it: the canonical flag is off, or the routing skill is
@@ -3619,7 +3920,9 @@ function RouterPage({ ctx: pluginContext }) {
   const serverDrift = serverConflict ? [conflictDrift(serverConflict)] : []
   // On a Hermes-native service only the held roles of the loaded profile and the model targets count.
   const modelCheck = modelSettings ? { roles: [...requestedRoles], targets: [...modelWriteTargets] } : null
-  const driftItems = [...pageLiveDrift(profiles, selectedProfile, profileBaselines, expectationBaselines, modelCheck), ...serverDrift]
+  // A partial save compares only the slots it writes (and no Heavy/Light) of the loaded profile.
+  const routingCheck = partialSave ? { slots: routingCopyPending ? [...slotSendIds] : [] } : null
+  const driftItems = [...pageLiveDrift(profiles, selectedProfile, profileBaselines, expectationBaselines, modelCheck, routingCheck), ...serverDrift]
   const storeDrift = driftItems.filter(item => driftKind(item) === 'store')
   const modelDrift = driftItems.filter(item => driftKind(item) === 'models')
   const fallbackDrift = driftItems.some(item => item.fallback)
@@ -3628,7 +3931,7 @@ function RouterPage({ ctx: pluginContext }) {
   // Re-checked when a save is dispatched, against the newest status, so a callback kept from an
   // earlier render never sends while the current state is blocked.
   const driftNow = (kind, tasks = null) => {
-    const items = [...pageLiveDrift(statusDataRef.current?.profiles || [], selectedProfile, profileBaselines, expectationBaselines, modelCheck),
+    const items = [...pageLiveDrift(statusDataRef.current?.profiles || [], selectedProfile, profileBaselines, expectationBaselines, modelCheck, routingCheck),
       ...(serverConflictRef.current ? [conflictDrift(serverConflictRef.current)] : [])]
     return items.some(item => kind === 'all' || (driftKind(item) === kind && (kind !== 'auxiliary' || !tasks || item.auxiliary === 'all' || tasks.includes(item.auxiliary))))
   }
@@ -3654,7 +3957,7 @@ function RouterPage({ ctx: pluginContext }) {
   // A same-revision status on a Hermes-native service: whatever no pending save holds follows it in the
   // draft and every frozen baseline (see refreshCleanModelState). The conversation spare models are
   // held while they are edited or the section has copy intent. Nothing is written or consented here.
-  const holdNativeFallback = Boolean(nativeFallbackDraftChanged || routingTargetEdited)
+  const holdNativeFallback = Boolean(nativeFallbackDraftChanged || modelCopyAll)
   useEffect(() => {
     if (!modelSettings || revisionChanged || !statusQuery.data || !selectedProfile || !draft || !profileBaselines || !expectationBaselines ||
       applyPendingRef.current || needsReloadRef.current || refreshPendingRef.current || setupPendingRef.current) return
@@ -3679,15 +3982,33 @@ function RouterPage({ ctx: pluginContext }) {
   const nativeDraftChanged = nativeSectionEditable && nativeDelegationDraftChanged(nativeDelegationDraft, frozenNativeDto, 'native')
   // A stored method the page no longer offers (Hermes 'default' or an advanced value) is never copied.
   const nativeBackendCopyable = Boolean(nativeDelegationDraft && nativeBackendSelectable(nativeDelegationDraft.backend))
-  const nativeWriteNeeded = nativeSectionEditable && nativeBackendCopyable && !revisionChanged && nativeWriteTargets.length > 0 && (nativeDraftChanged || routingTargetEdited)
+  // A partial save (no copy-all) has something to send only when the method was edited or a spare model
+  // of the visible method's slot cards differs from the loaded value. A spare edited under another
+  // method and switched away from stays a dirty draft (it blocks only the automatic reload), as before.
+  const frozenNativeDraft = frozenNativeDto ? copyNativeDelegationDraft(frozenNativeDto) : null
+  const nativeVisibleSpareKey = nativeDelegationDraft ? nativeSlotPolicyKey(nativeDelegationDraft.backend) : null
+  const nativeDeltaSendable = Boolean(nativeDelegationDraft && frozenNativeDraft && (nativeDelegationDraft.backend !== frozenNativeDraft.backend ||
+    (nativeSlotCopy && TASK_SLOTS.some(slot => !sameValue(nativeDelegationDraft[nativeVisibleSpareKey]?.[slot.id] ?? null, frozenNativeDraft[nativeVisibleSpareKey]?.[slot.id] ?? null)))))
+  // What counts as a pending method/spare change: in a partial save only what it can send.
+  // Only while the section is editable, like nativeDraftChanged: a read-only section never blocks the save.
+  const nativeChangePending = partialSave && !modelCopyAll ? nativeSectionEditable && nativeDeltaSendable : nativeDraftChanged
+  const nativeWriteNeeded = nativeSectionEditable && nativeBackendCopyable && !revisionChanged && nativeWriteTargets.length > 0 &&
+    (modelCopyAll || nativeChangePending)
   let nativeDelegationError = ''
   let nativeBatchBody = null
-  if (nativeDraftChanged && selectedTargets.includes(selectedProfile) && nativeTargetReasons[selectedProfile]) {
+  // Per target, why a partial save leaves its slot spare models as stored (another method, two-role block).
+  let nativeSpareSkips = {}
+  const nativeOptions = { partial: partialSave, copyAll: modelCopyAll }
+  if (nativeChangePending && selectedTargets.includes(selectedProfile) && nativeTargetReasons[selectedProfile]) {
     // The loaded profile's own change must never be dropped silently.
     nativeDelegationError = `${selectedProfile}: ${nativeTargetReasons[selectedProfile]}`
   } else if (nativeWriteNeeded) {
-    try { nativeBatchBody = buildNativeDelegationBatchBody(draftRevision, selectedProfile, nativeWriteTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles, 'native') }
-    catch (error) { nativeDelegationError = error.message }
+    try {
+      const plan = planNativeDelegationBatch(draftRevision, selectedProfile, nativeWriteTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles, 'native', nativeOptions)
+      // An empty partial plan (nothing visible was edited) sends nothing for the method part.
+      nativeBatchBody = plan.body.updates.length ? plan.body : null
+      nativeSpareSkips = plan.skipped
+    } catch (error) { nativeDelegationError = error.message }
   }
   // The conversation spare models belong to the model section: they are written to the section's
   // targets that can take them when the draft differs from the loaded value, or on the section's copy
@@ -3695,7 +4016,7 @@ function RouterPage({ ctx: pluginContext }) {
   // is named as skipped; it never fails the save.
   const nativeFallbackEditable = fallbackSupported && currentRow?.fallbacks?.native?.editable === true && Boolean(nativeFallbackDraft)
   const nativeFallbackTargetReasons = Object.fromEntries(profiles.map(row => [row.name, nativeFallbackTargetReason(row, fallbackSupported)]))
-  const nativeFallbackCopy = Boolean(routingTargetEdited && nativeFallbackEditable)
+  const nativeFallbackCopy = Boolean(modelCopyAll && nativeFallbackEditable)
   // Like the former card: nothing is written while the loaded profile's own spare models cannot be
   // edited here (read-only, unreadable or unconfirmed capabilities), whatever the targets are.
   const nativeFallbackWriteRequested = nativeFallbackEditable && (nativeFallbackDraftChanged || nativeFallbackCopy)
@@ -3704,7 +4025,7 @@ function RouterPage({ ctx: pluginContext }) {
   // Named before the copy intent is narrowed to the targets that can take them: with an edit or a
   // hand-picked list, every selected target that will not receive the spare models is listed, also
   // when the loaded profile's own spare models cannot be copied (for example unconfirmed capabilities).
-  const nativeFallbackIntent = nativeFallbackDraftChanged || routingTargetEdited
+  const nativeFallbackIntent = nativeFallbackDraftChanged || modelCopyAll
   const nativeFallbackSkipReasons = Object.fromEntries(selectedTargets.map(name => [name, !nativeFallbackIntent ? ''
     : nativeFallbackWriteRequested ? nativeFallbackTargetReasons[name]
       : nativeFallbackTargetReasons[name] || `불러온 프로필(${selectedProfile})의 대화 예비 모델은 이 화면에서 바꿀 수 없어 복사하지 않습니다.`]))
@@ -3737,11 +4058,11 @@ function RouterPage({ ctx: pluginContext }) {
     const editable = auxiliaryState?.[task.id]?.editable === true && Boolean(taskDraft)
     const reasons = Object.fromEntries(profiles.map(row => [row.name, auxiliaryTargetReason(row, task)]))
     const value = auxiliaryFallbackValue(taskDraft)
-    const copy = Boolean(routingTargetEdited && editable && value.length > 0)
+    const copy = Boolean(modelCopyAll && editable && value.length > 0)
     const requested = editable && (changed || copy)
     const targets = requested ? selectedTargets.filter(name => !reasons[name]) : []
     const writeNeeded = !revisionChanged && targets.length > 0
-    const intent = changed || (routingTargetEdited && value.length > 0)
+    const intent = changed || (modelCopyAll && value.length > 0)
     const skipReasons = Object.fromEntries(selectedTargets.map(name => [name, !intent ? ''
       : requested ? reasons[name] : reasons[name] || `불러온 프로필(${selectedProfile})의 ${task.label} 예비 모델은 이 화면에서 바꿀 수 없어 복사하지 않습니다.`]))
     let targetError = ''
@@ -3785,10 +4106,13 @@ function RouterPage({ ctx: pluginContext }) {
   const profileTargetReasons = Object.fromEntries(profiles.map(row => [row.name, freshMissingProfileTargets.includes(row.name)
     ? '저장 직전에 확인한 최신 상태에서 이 프로필을 찾을 수 없습니다. 체크를 해제하세요.' : nativeProfileTargetReason(row)]))
   const profilesDraftChanged = profileSectionEditable && nativeDelegationDraftChanged(nativeDelegationDraft, frozenNativeDto, 'profiles')
-  const profilesWriteRequested = profileSectionEditable && (profilesDraftChanged || profileTargetEdited)
+  const profilesWriteRequested = profileSectionEditable && (profilesDraftChanged || profileCopyAll)
   const profilesWriteNeeded = profilesWriteRequested && !revisionChanged && selectedProfileTargets.length > 0
   const profileBlockedTargets = selectedProfileTargets.filter(name => profileTargetReasons[name])
   let profileSaveError = ''
+  let profileBatchBody = null
+  let profileSkips = {}
+  const profileOptions = { partial: partialSave, copyAll: profileCopyAll }
   if (missingProfileTargets.length) {
     profileSaveError = `다음 프로필을 더 이상 찾을 수 없어 전문 프로필 설정을 저장할 수 없습니다. 적용 대상에서 빼 주세요. ${missingProfileTargets.join(', ')}`
   } else if (profilesWriteRequested && !selectedProfileTargets.length) {
@@ -3797,7 +4121,11 @@ function RouterPage({ ctx: pluginContext }) {
     // Nothing is skipped quietly here: a target that cannot take the allow-list must be unticked.
     profileSaveError = `다음 프로필에는 전문 프로필 설정을 저장할 수 없습니다. 적용 대상에서 빼 주세요. ${profileBlockedTargets.map(name => `${name}: ${profileTargetReasons[name]}`).join(' ')}`
   } else if (profilesWriteNeeded) {
-    try { buildNativeDelegationBatchBody(draftRevision, selectedProfile, selectedProfileTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles, 'profiles') }
+    try {
+      const plan = planNativeDelegationBatch(draftRevision, selectedProfile, selectedProfileTargets, nativeDelegationDraft, nativeDelegationBaselines, profiles, 'profiles', profileOptions)
+      profileBatchBody = plan.body
+      profileSkips = plan.skipped
+    }
     catch (error) { profileSaveError = error.message }
   }
   if (!profileSaveError && profilesWriteNeeded && !nativeStorageAvailable) profileSaveError = '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.'
@@ -3816,34 +4144,40 @@ function RouterPage({ ctx: pluginContext }) {
     models: Boolean(draft && (!frozenProfile || differs(draft.models, frozenProfile.models))),
     'routing.roles': Boolean(draft && frozenProfile && (differs(draft.routing?.heavy, frozenProfile.routing?.heavy) || differs(draft.routing?.light, frozenProfile.routing?.light))),
     'routing.slots': Boolean(draft && frozenProfile && differs(draft.slots, frozenProfile.slots)),
-    // A hand-picked model target list is a pending copy of the role models, of the slot models while
-    // their cards are on screen, and of the delegation method to profiles stored on a plugin method.
-    'copy.models': Boolean(routingTargetEdited && (!modelSettings || requestedRoles.length > 0)),
+    // The section's ‘현재 설정 전체 복사’ checkbox is a pending copy of the role models, of the slot
+    // models while their cards are on screen, and of the delegation method to profiles stored on a
+    // plugin method (a hand-picked target list alone is not).
+    'copy.models': Boolean(modelCopyAll && (!modelSettings || requestedRoles.length > 0)),
     // (never while a slot still follows the delegation model: such slot models are not copied)
-    'copy.slots': Boolean(routingTargetEdited && slotCardsVisible && draft?.slots && slotsCopyOk && slotTargetsAllowed.length > 0),
-    'native.copy': Boolean(routingTargetEdited && nativeBackendCopyable && selectedTargets.some(name => nativeBackendSelectable(nativeDelegationBaselines[name]?.backend))),
+    'copy.slots': Boolean(slotCopyAll && draft?.slots && slotsCopyOk && slotTargetsAllowed.length > 0),
+    'native.copy': Boolean(modelCopyAll && nativeBackendCopyable && selectedTargets.some(name => nativeBackendSelectable(nativeDelegationBaselines[name]?.backend))),
     // ...and of the conversation spare models to the targets that can take them.
     'copy.fallback': Boolean(nativeFallbackCopy && nativeFallbackWriteTargets.length),
     'native.backend': nativeFieldDirty('backend'), 'native.slotPolicy': nativeFieldDirty('slotPolicy'), 'native.autoSlotPolicy': nativeFieldDirty('autoSlotPolicy'),
     'profiles.list': Boolean(draftRoutes && frozenRoutes && differs(draftRoutes.profiles, frozenRoutes.profiles)),
     'profiles.default': Boolean(draftRoutes && frozenRoutes && differs(draftRoutes.default, frozenRoutes.default)),
-    'profiles.targets': Boolean(profileTargetEdited),
+    // The profile delegation section's own ‘현재 설정 전체 복사’.
+    'profiles.targets': Boolean(profileCopyAll),
     timeouts: Boolean(timeoutWriteRequested), 'fallback:native': nativeFallbackDraftChanged,
     // ...and of each auxiliary task's spare models while that chain is on.
     ...Object.fromEntries(AUXILIARY_TASKS.flatMap(task => [[`fallback:aux.${task.id}`, auxiliary[task.id].changed],
       [`copy.aux.${task.id}`, Boolean(auxiliary[task.id].copy && auxiliary[task.id].targets.length)]])),
     reenable: frozenReenable.length > 0 }
   // The drafted value of each edit, for checking what a save actually sent.
+  const nativeSpareKey = nativeDelegationDraft ? nativeSlotPolicyKey(nativeDelegationDraft.backend) : null
   editViewRef.current = { profile: selectedProfile, models: draft?.models ?? null, editedRoles: modelSettings ? [...editedRoles] : null,
     routing: draft ? { heavy: draft.routing?.heavy, light: draft.routing?.light } : null, slots: draft?.slots ?? null,
+    // What a partial save must carry to count as saved: the edited slots and the changed time limits.
+    editedSlots: [...editedSlots], timeoutFields: changedTimeoutFields(draft?.timeouts, timeoutBaseline),
     native: nativeDelegationDraft ? { backend: nativeDelegationDraft.backend, slotPolicy: nativeDelegationDraft.slotPolicy ?? null,
       autoSlotPolicy: nativeDelegationDraft.autoSlotPolicy ?? null, profile_routes: nativeDelegationDraft.profile_routes,
-      descriptionEdits: nativeDelegationDraft.descriptionEdits || {} } : null,
+      descriptionEdits: nativeDelegationDraft.descriptionEdits || {}, frozenRoutes: frozenRoutes,
+      editedSpares: nativeSpareKey && frozenNative ? TASK_SLOTS.map(slot => slot.id).filter(id => differs(nativeDelegationDraft[nativeSpareKey]?.[id], frozenNative[nativeSpareKey]?.[id])) : [] } : null,
     nativeFallback: fallbackValueForScope('native', nativeFallbackDraft),
     auxiliary: Object.fromEntries(AUXILIARY_TASKS.map(task => [task.id, auxiliaryFallbackValue(auxiliaryDrafts[task.id])])), reenable: frozenReenable }
-  const noTargetError = (modelDraftChanged || slotDraftChanged || nativeDraftChanged || nativeFallbackDraftChanged || auxiliaryChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
+  const noTargetError = (modelDraftChanged || slotDraftChanged || nativeChangePending || nativeFallbackDraftChanged || auxiliaryChanged) && !selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : ''
   // A changed delegation method or spare model that no selected profile can take is never dropped silently.
-  const noNativeTargetError = nativeDraftChanged && selectedTargets.length && !nativeWriteTargets.length
+  const noNativeTargetError = nativeChangePending && selectedTargets.length && !nativeWriteTargets.length
     ? '바꾼 ‘맡기는 방식·예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다. 받을 수 있는 프로필을 선택하거나 그 변경을 되돌리세요.' : ''
   const sectionSaveError = (missingModelTargets.length && (sectionWriteNeeded || routingTargetEdited) ? vanishedMessage(missingModelTargets) : '') ||
     ((modelWriteNeeded || routingCopyPending) ? storeDriftError : '') || (modelWriteNeeded ? modelDriftError || modelRoleError : '') || nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
@@ -3851,47 +4185,72 @@ function RouterPage({ ctx: pluginContext }) {
     (nativeWriteNeeded && !nativeStorageAvailable ? '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.' : '')
   const customSlotCount = draft?.slots ? TASK_SLOTS.filter(slot => draft.slots[slot.id]?.follow === 'custom').length : 0
   const spareSlotCount = nativeSlotCopy ? TASK_SLOTS.filter(slot => nativeDraftSlotPolicy(nativeDelegationDraft)[slot.id].mode === 'custom').length : 0
+  // What the method part of a partial save sends: the method only when edited, the edited slots' spares.
+  const nativeDelta = partialSave && !modelCopyAll
+  const nativeMethodSent = !nativeDelta || nativeFieldDirty('backend')
+  const nativeEditedSpares = editViewRef.current?.native?.editedSpares || []
   const sectionSaveSummary = [
     modelWriteNeeded ? (modelSettings ? `대화 모델(${requestedRoles.map(role => ROLES.find(item => item.id === role)?.label || role).join('·')})` : '대화 모델') : null,
-    routingCopyPending ? `작업 슬롯 모델(직접 지정 ${customSlotCount}개)` : null,
+    routingCopyPending ? (partialSave && !slotCopyAll ? `작업 슬롯 모델(바뀐 슬롯만: ${slotLabels(slotSendIds)})` : `작업 슬롯 모델(직접 지정 ${customSlotCount}개)`) : null,
     nativeFallbackWriteNeeded ? `대화 예비 모델: ${nativeFallbackDraft.enabled ? `${nativeFallbackDraft.chain.length}개 사용` : '사용 안 함'}` : null,
     ...AUXILIARY_TASKS.map(task => auxiliary[task.id].writeNeeded ? `${task.label} 예비 모델: ${auxiliary[task.id].value.length ? `${auxiliary[task.id].value.length}개 사용` : '사용 안 함'}` : null),
-    nativeWriteNeeded ? `맡기는 방식: ${nativeBackendLabel(nativeDelegationDraft.backend)}${nativeSlotCopy ? ` · 예비 모델을 둔 슬롯 ${spareSlotCount}개` : ''}` : null
-  ].filter(Boolean).join(' · ') || '바뀐 내용이 없어 저장할 것이 없습니다. 값을 고치면 그 내용을, 적용 대상을 직접 고르면 현재 값을 그 프로필에 저장합니다.'
-  const nativeSkippedTargets = nativeDraftChanged || (nativeSectionEditable && nativeBackendCopyable && routingTargetEdited) ? selectedTargets.filter(name => nativeTargetReasons[name]) : []
+    nativeWriteNeeded && !nativeDelta ? `맡기는 방식: ${nativeBackendLabel(nativeDelegationDraft.backend)}${nativeSlotCopy ? ` · 예비 모델을 둔 슬롯 ${spareSlotCount}개` : ''}` : null,
+    nativeWriteNeeded && nativeDelta && nativeMethodSent ? `맡기는 방식: ${nativeBackendLabel(nativeDelegationDraft.backend)}` : null,
+    nativeWriteNeeded && nativeDelta && nativeSlotCopy && nativeEditedSpares.length ? `슬롯 예비 모델(바뀐 슬롯만: ${slotLabels(nativeEditedSpares)})` : null
+  ].filter(Boolean).join(' · ') || '바뀐 내용이 없어 저장할 것이 없습니다. 값을 고치면 바뀐 값만 저장합니다. 불러온 프로필의 현재 설정 전체를 다른 프로필에 복사하려면 ‘현재 설정 전체 복사’를 선택하세요.'
+  const nativeSkippedTargets = nativeChangePending || (nativeSectionEditable && nativeBackendCopyable && modelCopyAll) ? selectedTargets.filter(name => nativeTargetReasons[name]) : []
   // What this save writes to each target, read from the very bodies the save sends (built with the
   // same builders from the current draft), so the per-target summary can never say otherwise.
   const sectionStoreBody = (modelWriteNeeded || routingCopyPending) && draft && profileBaselines
     ? buildModelSectionPreviewBody({ revision: draftRevision, profile: selectedProfile, draft: saveDraft, modelTargets: modelWriteTargets,
-      routingProfiles: loadedRoutingProfiles, routingTargets: routingWriteTargets, profileBaselines, routingTargetError },
+      routingProfiles: loadedRoutingProfiles, routingTargets: routingWriteTargets, profileBaselines, routingTargetError, partialSave },
     modelWriteNeeded && routingCopyPending ? null : routingCopyPending ? 'routing' : 'models').body : null
   const sectionFallbackBody = nativeFallbackWriteNeeded || auxiliaryWriteNeeded ? buildModelSectionFallbackBody({ profiles, profile: selectedProfile, draft: saveDraft, modelTargets: modelWriteTargets,
     fallbackWrite: nativeFallbackWriteNeeded ? { targets: nativeFallbackWriteTargets, value: fallbackValueForScope('native', nativeFallbackDraft) } : null,
     auxiliaryWrite: auxiliaryWriteNeeded ? auxiliaryWrite : null }, draftRevision).body : null
-  const sectionWriteSet = modelSectionWriteSet({ native: nativeWriteNeeded ? nativeBatchBody : null, store: sectionStoreBody, fallback: sectionFallbackBody })
+  const sectionWriteSet = modelSectionWriteSet({ native: nativeWriteNeeded ? nativeBatchBody : null, store: sectionStoreBody, fallback: sectionFallbackBody, profiles })
   const targetWriteLine = name => {
     const item = sectionWriteSet.get(name)
     const parts = item ? [
       item.models ? '대화 모델' : '',
-      item.slots ? '작업 슬롯 모델' : '',
+      Array.isArray(item.slots) ? (item.slots.length ? `작업 슬롯 모델(${slotLabels(item.slots)})` : '') : item.slots ? '작업 슬롯 모델' : '',
       item.method ? `맡기는 방식(${nativeBackendLabel(item.method)})` : '',
-      item.slotSpares ? '슬롯 예비 모델' : '',
+      Array.isArray(item.slotSpares) ? `슬롯 예비 모델(${slotLabels(item.slotSpares)})` : item.slotSpares ? '슬롯 예비 모델' : '',
       item.conversationSpares ? `대화 예비 모델(${item.conversationSpares.enabled ? `${item.conversationSpares.chain.length}개 사용` : '사용 안 함'})` : '',
       ...AUXILIARY_TASKS.map(task => Array.isArray(item.auxiliarySpares?.[task.id])
         ? `${task.label} 예비 모델(${item.auxiliarySpares[task.id].length ? `${item.auxiliarySpares[task.id].length}개 사용` : '사용 안 함'})` : '')
     ].filter(Boolean) : []
     const kept = [
       slotSkippedTargets.includes(name) ? `작업 슬롯 모델은 그대로 둠(${slotSkipReasonFor(name)})` : '',
+      // A partial save that leaves some of the submitted slots as that target stores them.
+      !slotSkippedTargets.includes(name) && item?.keptSlots?.length ? `${slotLabels(item.keptSlots)} 슬롯 모델은 그대로 둠(${targetSlotSkipReason})` : '',
       nativeSkippedTargets.includes(name) ? `맡기는 방식·슬롯 예비 모델은 그대로 둠(${nativeTargetReasons[name]})` : '',
+      !nativeSkippedTargets.includes(name) && nativeSpareSkips[name] ? `슬롯 예비 모델은 그대로 둠(${nativeSpareSkips[name]})` : '',
       nativeFallbackSkipReasons[name] ? `대화 예비 모델은 그대로 둠(${nativeFallbackSkipReasons[name]})` : '',
       ...AUXILIARY_TASKS.map(task => auxiliary[task.id].skipReasons[name] ? `${task.label} 예비 모델은 그대로 둠(${auxiliary[task.id].skipReasons[name]})` : '')
     ].filter(Boolean)
     return `${name}: ${parts.length ? `${parts.join(', ')} 저장` : '저장하는 값 없음'}${kept.length ? ` · ${kept.join(' · ')}` : ''}`
   }
   const profileRoutesSummary = nativeDelegationDraft?.profile_routes
-  const profileSaveSummary = profilesWriteNeeded
+  const profileDelta = partialSave && !profileCopyAll
+  const profileSaveSummary = profilesWriteNeeded && !profileDelta
     ? `허용할 전문 프로필: ${profileRoutesSummary.profiles.map(entry => entry.name).join(', ') || '없음'}${currentRow?.native_delegation?.backend === 'model-router-profiles' ? ` · 기본: ${profileRoutesSummary.default || '없음'}` : ''}`
-    : '바뀐 내용이 없어 저장할 것이 없습니다. 허용 목록이나 설명을 고치면 그 내용을, 적용 대상을 직접 고르면 현재 허용 목록을 그 프로필에 저장합니다.'
+    : profilesWriteNeeded
+      ? `바뀐 내용만 저장: ${profileRoutesPatchText({ ...profileRoutesPatch(profileRoutesSummary, frozenRoutes, nativeDelegationDraft?.descriptionEdits),
+        ...(currentRow?.native_delegation?.backend === 'model-router-profiles' && differs(profileRoutesSummary?.default, frozenRoutes?.default) ? { default: profileRoutesSummary.default ?? null } : {}) }) || '없음'}`
+      : '바뀐 내용이 없어 저장할 것이 없습니다. 허용 목록이나 설명을 고치면 바뀐 내용만 저장합니다. 불러온 프로필의 현재 허용 목록 전체를 다른 프로필에 복사하려면 ‘현재 설정 전체 복사’를 선택하세요.'
+  // What each profile-section target receives, read from the body the save sends.
+  const profileWriteLine = name => {
+    const update = (profileBatchBody?.updates || []).find(item => item.profile === name)
+    const kept = profileSkips[name] ? ` · ${profileSkips[name]}` : ''
+    if (!update) return `${name}: 저장하는 값 없음${kept}`
+    if (update.profile_routes_patch) {
+      // What actually changes on this target, not the patch as sent.
+      const text = profileRoutesPatchText(effectiveRoutesPatch(nativeDelegationBaselines[name]?.profile_routes, update.profile_routes_patch))
+      return `${name}: ${text ? `허용 목록 변경(${text})` : '이 프로필의 허용 목록에는 바뀌는 값 없음'}${kept}`
+    }
+    return `${name}: 허용 목록 전체(${(update.profile_routes?.profiles || []).map(entry => entry.name).join(', ') || '없음'}) 저장`
+  }
   const allTargetsSelected = allModelTargetsSelected(selectedTargets, profileNames)
   const targetSummary = allTargetsSelected ? `전체 ${profileNames.length}개 프로필` : `${selectedTargets.length}/${profileNames.length}개 프로필`
   const timeoutDraftResult = buildTimeoutUpdate(selectedProfile, draft?.timeouts, timeoutBaseline, currentRow?.timeouts)
@@ -3901,7 +4260,9 @@ function RouterPage({ ctx: pluginContext }) {
   const disabled = setupPending || profilePreparationLocked() || Boolean(nativeFence) || applyPending || needsReload || revisionChanged || statusQuery.isFetching || !selectedProfile || !draft
   const timeoutSaveValuesValid = Boolean(timeoutPayloadValues(draft?.timeouts, timeoutBaseline))
   const timeoutSaveDisabled = disabled || !timeoutSettingsEditable || !selectedTimeoutTargets.length || missingTimeoutTargets.length > 0 ||
-    timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged || !timeoutSaveValuesValid
+    timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged || !timeoutSaveValuesValid ||
+    // Nothing changed and no explicit copy: there is nothing to save.
+    !timeoutWriteRequested
   const validPreview = previewMatchesScope(preview, scopeKey, generationRef.current, selectedProfile)
   const renderGeneration = generationRef.current
 
@@ -3942,6 +4303,9 @@ function RouterPage({ ctx: pluginContext }) {
     setTimeoutTargetEdited(false)
     setRoutingBaseline(deepClone({ heavy: loadedBaseline.routing.heavy, light: loadedBaseline.routing.light }))
     setRoutingTargetEdited(false)
+    setModelCopyAll(false)
+    setProfileCopyAll(false)
+    setTimeoutCopyAll(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
     const routingFallback = copyRoutingFallbackDraft(row.fallbacks?.routing)
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
@@ -3960,7 +4324,9 @@ function RouterPage({ ctx: pluginContext }) {
     invalidatePlan()
     nativeTargetsManualRef.current = true
     setModelTargets(next)
+    // Hand-picked (kept for vanished-target blocking); copying needs the explicit checkbox again.
     setRoutingTargetEdited(next.length > 0)
+    setModelCopyAll(false)
   }
   // Toggle on the list as ticked, so unticking one name never drops a vanished one quietly.
   const toggleModelTarget = (name, checked) => setSectionTargets(toggleName([...selectedTargets, ...missingModelTargets], name, checked))
@@ -3974,6 +4340,7 @@ function RouterPage({ ctx: pluginContext }) {
     profileTargetsManualRef.current = true
     setProfileDelegationTargets(next)
     setProfileTargetEdited(next.length > 0)
+    setProfileCopyAll(false)
     // Access consent was given for a specific target list.
     setNativeDelegationDraft(current => current ? { ...current, allowProfileAccess: false } : current)
   }
@@ -3997,6 +4364,18 @@ function RouterPage({ ctx: pluginContext }) {
     timeoutTargetsManualRef.current = true
     setTimeoutTargets([...next])
     setTimeoutTargetEdited(true)
+    setTimeoutCopyAll(false)
+  }
+  // The sections' ‘현재 설정 전체 복사’ checkboxes: explicit, one save's worth of copy intent.
+  const chooseCopyAll = (section, checked) => {
+    if (setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current || renderGeneration !== generationRef.current) return
+    invalidatePlan()
+    if (section === 'models') setModelCopyAll(checked === true)
+    else if (section === 'profiles') {
+      setProfileCopyAll(checked === true)
+      // Access consent was given for what a save copies.
+      setNativeDelegationDraft(current => current?.allowProfileAccess ? { ...current, allowProfileAccess: false } : current)
+    } else if (section === 'timeouts') setTimeoutCopyAll(checked === true)
   }
 
   const toggleRoutingProfile = (name, checked) => {
@@ -4060,6 +4439,9 @@ function RouterPage({ ctx: pluginContext }) {
     routingTargets: [...routingWriteTargets],
     timeoutTargets: [...selectedTimeoutTargets],
     timeoutTargetEdited,
+    // The service takes the partial forms, and the time-limit section's explicit copy-all intent.
+    partialSave,
+    timeoutCopyAll,
     timeoutBaselinesByProfile: timeoutBaselinesFromProfiles(profileBaselines),
     currentTimeoutsByProfile: currentTimeoutsFromProfiles(profiles),
     profileBaselines: deepClone(profileBaselines || {}),
@@ -4359,7 +4741,7 @@ function RouterPage({ ctx: pluginContext }) {
     const nativeSnapshot = freezeDeep({ ...base, nativePart: 'native',
       nativeDraft: nativeDelegationDraft ? deepClone(nativeDelegationDraft) : null,
       nativeTargets: [...nativeWriteTargets], nativeBaselines: deepClone(nativeDelegationBaselines),
-      nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
+      nativeOptions: { ...nativeOptions }, nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
     const storeSnapshot = base
     const fallbackSnapshot = freezeDeep({ ...base,
       fallbackWrite: nativeFallbackWriteNeeded ? { targets: [...nativeFallbackWriteTargets], value: fallbackValueForScope('native', nativeFallbackDraft) } : null,
@@ -4399,7 +4781,7 @@ function RouterPage({ ctx: pluginContext }) {
     return runSave({ operation: '/delegation-preview', scope: 'models', snapshot: nativeSnapshot, nativeWrite: true, firstLabel: '맡기는 방식과 예비 모델',
       beforeApply: () => nativeDelegationSnapshotCurrent(nativeSnapshot, statusDataRef.current),
       prepare: () => ({ body: buildNativeDelegationBatchBody(nativeSnapshot.revision, nativeSnapshot.profile, nativeSnapshot.nativeTargets,
-        nativeSnapshot.nativeDraft, nativeSnapshot.nativeBaselines, nativeSnapshot.profiles, 'native'), errors: [] }),
+        nativeSnapshot.nativeDraft, nativeSnapshot.nativeBaselines, nativeSnapshot.profiles, 'native', nativeSnapshot.nativeOptions), errors: [] }),
       followUps: steps })
   }
 
@@ -4412,12 +4794,12 @@ function RouterPage({ ctx: pluginContext }) {
     if (!profilesWriteNeeded || profileSaveError || !nativeStorageAvailable || readNativeSaveFence(pluginContext.storage, scopeKey, statusDataRef.current?.readiness_context?.base_identity)) return
     const snapshot = freezeDeep({ ...captureSaveSnapshot(), nativePart: 'profiles',
       nativeDraft: deepClone(nativeDelegationDraft), nativeTargets: [...selectedProfileTargets],
-      nativeBaselines: deepClone(nativeDelegationBaselines), nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
+      nativeBaselines: deepClone(nativeDelegationBaselines), nativeOptions: { ...profileOptions }, nativeBaseIdentity: statusQuery.data?.readiness_context?.base_identity })
     if (!nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current)) return
     return runSave({ operation: '/delegation-preview', scope: 'profiles', snapshot, nativeWrite: true,
       beforeApply: () => nativeDelegationSnapshotCurrent(snapshot, statusDataRef.current),
       prepare: () => ({ body: buildNativeDelegationBatchBody(snapshot.revision, snapshot.profile, snapshot.nativeTargets,
-        snapshot.nativeDraft, snapshot.nativeBaselines, snapshot.profiles, 'profiles'), errors: [] }) })
+        snapshot.nativeDraft, snapshot.nativeBaselines, snapshot.profiles, 'profiles', snapshot.nativeOptions), errors: [] }) })
   }
 
   // Turning task routing back on for a profile that had it off: membership only, nothing copied.
@@ -4455,6 +4837,7 @@ function RouterPage({ ctx: pluginContext }) {
   }
 
   const saveAll = () => {
+    if (!pageWriteNeededRef.current) return
     if (renderGeneration !== generationRef.current || revisionChanged || timeoutRevisionChanged || liveDrift.length || pageVanished.length || driftNow('all') || !currentRow || !draft || !statusQuery.data || setupPendingRef.current || profilePreparationLocked() || applyPendingRef.current || needsReloadRef.current) return
     if (!modelSettingsStillCurrent()) return
     // The whole-page save carries the conversation and auxiliary spare models too: same dispatch-time source checks.
@@ -4485,10 +4868,11 @@ function RouterPage({ ctx: pluginContext }) {
             targets: snapshot.timeoutTargets,
             baselinesByProfile: snapshot.timeoutBaselinesByProfile,
             currentByProfile: snapshot.currentTimeoutsByProfile,
-            copyIntent: snapshot.timeoutTargetEdited
+            copyIntent: snapshot.timeoutCopyAll
           },
           snapshot.auxiliaryWrite,
-          snapshot.modelRoles
+          snapshot.modelRoles,
+          snapshot.partialSave
         )
         const routingUpdates = (combined.body.fallback_updates || [])
           .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
@@ -4555,6 +4939,9 @@ function RouterPage({ ctx: pluginContext }) {
     setFreshMissingProfileTargets([])
     setTimeoutTargets(current => timeoutTargetsManualRef.current ? uniqueProfileNames(current || []) : null)
     setTimeoutTargetEdited(false)
+    setModelCopyAll(false)
+    setProfileCopyAll(false)
+    setTimeoutCopyAll(false)
     setSectionErrors({ models: '', routing: '', timeouts: '', profiles: '' })
     setModelTargets(current => nativeTargetsManualRef.current ? uniqueProfileNames(current || []) : [row?.name].filter(Boolean))
     setRoutingProfiles(rows.filter(item => item.routing?.enabled === true).map(item => item.name))
@@ -4716,7 +5103,8 @@ function RouterPage({ ctx: pluginContext }) {
     id: 'model-section-targets', style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '적용 대상' }),
-      jsx('p', { style: styles.hint, children: '위 카드의 모델과 예비 모델, 맡기는 방식을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 값을 고치거나 대상을 직접 고른 뒤 저장하면 선택한 프로필에 같은 설정을 복사합니다.' }),
+      jsx('p', { style: styles.hint, children: '위 카드의 모델과 예비 모델, 맡기는 방식을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 저장하면 바꾼 값만 선택한 프로필에 저장하고, 바꾸지 않은 값은 각 프로필의 기존 설정을 그대로 둡니다.' }),
+      jsx(CheckRow, { id: 'model-copy-all', label: COPY_ALL_LABEL, detail: COPY_ALL_HINT, checked: modelCopyAll, disabled, onChange: checked => chooseCopyAll('models', checked) }),
       jsxs('div', { style: styles.selectionToolbar, children: [
         jsxs('div', { style: styles.statusLine, children: [jsx(Badge, { variant: allTargetsSelected && profileNames.length > 1 ? 'warn' : 'muted', children: targetSummary }), jsx('span', { style: styles.hint, children: `${selectedTargets.length}개 선택` })] }),
         jsxs('div', { style: styles.actions, children: [
@@ -4805,9 +5193,10 @@ function RouterPage({ ctx: pluginContext }) {
       ] }),
       jsx('fieldset', { id: 'timeout-targets', style: styles.fieldset, children: [
         jsx('legend', { style: styles.fieldName, children: '시간 제한 적용 대상' }),
-        jsx('p', { style: styles.hint, children: '처음 열면 역할별 지원이 확인되고 편집 가능한 모든 프로필을 선택합니다. 수동 부분 선택이나 모두 해제는 프로필 전환과 새로고침 후에도 유지됩니다. 대상 선택만으로 저장되지는 않으며, 전체 저장에선 변경한 값 또는 직접 지정한 복사 의도만 적용합니다.' }),
+        jsx('p', { style: styles.hint, children: '처음 열면 역할별 지원이 확인되고 편집 가능한 모든 프로필을 선택합니다. 수동 부분 선택이나 모두 해제는 프로필 전환과 새로고침 후에도 유지됩니다. 대상 선택만으로는 아무것도 복사하지 않으며, 저장하면 바꾼 시간 제한만 선택한 프로필에 저장합니다.' }),
+        jsx(CheckRow, { id: 'timeout-copy-all', label: COPY_ALL_LABEL, detail: COPY_ALL_HINT, checked: timeoutCopyAll, disabled: disabled || !timeoutSettingsEditable, onChange: checked => chooseCopyAll('timeouts', checked) }),
         jsxs('div', { style: styles.selectionToolbar, children: [
-          jsx('span', { style: styles.hint, children: `${selectedTimeoutTargets.length}/${eligibleTimeoutTargets(profiles).length}개 편집 가능 프로필 선택${timeoutTargetEdited ? ' · 전체 저장에 복사 의도 포함' : ''}` }),
+          jsx('span', { style: styles.hint, children: `${selectedTimeoutTargets.length}/${eligibleTimeoutTargets(profiles).length}개 편집 가능 프로필 선택${timeoutCopyAll ? ' · 현재 설정 전체 복사' : ''}` }),
           jsxs('div', { style: styles.actions, children: [
             jsx(Button, { id: 'timeout-target-source', size: 'sm', variant: 'secondary', disabled, onClick: () => chooseTimeoutTargets('source'), children: '불러온 프로필만' }),
             jsx(Button, { id: 'timeout-target-all', size: 'sm', variant: 'secondary', disabled, onClick: () => chooseTimeoutTargets('all'), children: '전체 선택' }),
@@ -4836,6 +5225,9 @@ function RouterPage({ ctx: pluginContext }) {
           onChange: checked => chooseTimeoutTargets('toggle', name, checked) }) }, `missing:${name}`))) }),
         missingTimeoutTargets.length ? jsx('p', { id: 'timeout-targets-missing', role: 'alert', style: styles.warning, children: vanishedMessage(missingTimeoutTargets) }) : null
       ] }),
+      jsx('p', { id: 'timeout-section-summary', role: 'note', style: styles.hint, children: !timeoutWriteRequested
+        ? '바뀐 시간 제한이 없어 저장할 것이 없습니다. 값을 고치면 바뀐 값만 저장합니다. 불러온 프로필의 시간 제한 세 가지를 모두 복사하려면 ‘현재 설정 전체 복사’를 선택하세요.'
+        : `저장할 내용: ${Array.isArray(timeoutFields) ? `바뀐 값만(${timeoutFieldLabels(timeoutFields)})` : '일반 위임·짧은 작업·긴 작업 세 값 모두'} → ${selectedTimeoutTargets.join(', ') || '선택 안 됨'}` }),
       sectionErrors.timeouts ? jsx('p', { role: 'alert', style: styles.warning, children: sectionErrors.timeouts }) : null,
       jsx(Button, { id: 'timeouts-save', size: 'sm', variant: 'secondary', disabled: timeoutSaveDisabled, onClick: () => void saveSection('timeouts'), children: applyPending ? '저장 중…' : '시간 제한 저장' })
     ]
@@ -4846,7 +5238,8 @@ function RouterPage({ ctx: pluginContext }) {
     id: 'profile-section-targets', style: styles.fieldset,
     children: [
       jsx('legend', { style: styles.fieldName, children: '전문 프로필 위임 적용 대상' }),
-      jsx('p', { style: styles.hint, children: '위의 허용 목록·설명·사용 허용을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 전문 프로필에 맡기는 방식으로 저장된 프로필만 고를 수 있으며, 각 프로필의 맡기는 방식과 예비 모델은 바꾸지 않습니다. ‘모델’ 섹션의 적용 대상과는 별개입니다.' }),
+      jsx('p', { style: styles.hint, children: '위의 허용 목록·설명·사용 허용을 저장할 프로필입니다. 처음에는 불러온 프로필 하나만 선택됩니다. 전문 프로필에 맡기는 방식으로 저장된 프로필만 고를 수 있으며, 각 프로필의 맡기는 방식과 예비 모델은 바꾸지 않습니다. 저장하면 추가·제외하거나 설명을 고친 프로필만 각 프로필의 허용 목록에 반영합니다. ‘모델’ 섹션의 적용 대상과는 별개입니다.' }),
+      jsx(CheckRow, { id: 'profile-copy-all', label: COPY_ALL_LABEL, detail: COPY_ALL_HINT, checked: profileCopyAll, disabled: profileSectionDisabled, onChange: checked => chooseCopyAll('profiles', checked) }),
       jsxs('div', { style: styles.selectionToolbar, children: [
         jsx('span', { style: styles.hint, children: `${selectedProfileTargets.length}개 선택` }),
         jsxs('div', { style: styles.actions, children: [
@@ -4866,7 +5259,9 @@ function RouterPage({ ctx: pluginContext }) {
       jsxs('div', { id: 'profile-section-summary', role: 'note', style: { ...styles.cardSection, display: 'flex', flexDirection: 'column', gap: '0.45rem', overflowWrap: 'anywhere' }, children: [
         jsx('strong', { children: '저장할 내용' }),
         jsx('p', { style: styles.hint, children: `적용 대상: ${selectedProfileTargets.join(', ') || '선택 안 됨'}` }),
-        jsx('p', { style: styles.hint, children: profileSaveSummary })
+        jsx('p', { style: styles.hint, children: profileSaveSummary }),
+        profilesWriteNeeded && profileBatchBody ? jsx('ul', { id: 'profile-section-target-writes', style: { ...styles.hint, margin: 0, paddingLeft: '1.1rem' },
+          children: selectedProfileTargets.map(name => jsx('li', { id: `profile-section-write-${name}`, children: profileWriteLine(name) }, name)) }) : null
       ] }),
       profileSaveError ? jsx('p', { role: 'alert', style: styles.warning, children: profileSaveError }) : null,
       sectionErrors.profiles ? jsx('p', { role: 'alert', style: styles.warning, children: sectionErrors.profiles }) : null,
@@ -4891,8 +5286,8 @@ function RouterPage({ ctx: pluginContext }) {
         targets: selectedTimeoutTargets,
         baselinesByProfile: timeoutBaselineMap,
         currentByProfile: currentTimeoutsFromProfiles(profiles),
-        copyIntent: timeoutTargetEdited
-      }, auxiliaryWrite)
+        copyIntent: timeoutCopyAll
+      }, auxiliaryWrite, null, partialSave)
     : null
   const summaryRoutingUpdates = (localCombinedSummary?.body.fallback_updates || [])
     .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
@@ -4909,7 +5304,7 @@ function RouterPage({ ctx: pluginContext }) {
     : !timeoutRoleSupported
       ? '역할별 시간 제한 지원 미확인 · 표시만 가능'
       : localCombinedSummary?.body.timeout_updates?.length
-        ? `전체 실행 시간 변경: ${localCombinedSummary.body.timeout_updates.length}개 대상 · 일반 ${draft?.timeouts?.delegate_total_minutes}분 / 짧은 작업 ${draft?.timeouts?.routed_light_total_minutes}분 / 긴 작업 ${draft?.timeouts?.routed_heavy_total_minutes}분`
+        ? `전체 실행 시간 변경: ${localCombinedSummary.body.timeout_updates.length}개 대상${Array.isArray(timeoutFields) ? ` · 바뀐 값만(${timeoutFieldLabels(timeoutFields)})` : ''} · 일반 ${draft?.timeouts?.delegate_total_minutes}분 / 짧은 작업 ${draft?.timeouts?.routed_light_total_minutes}분 / 긴 작업 ${draft?.timeouts?.routed_heavy_total_minutes}분`
         : timeoutWriteRequested
           ? '시간 제한의 입력값과 대상 프로필 상태를 다시 확인하세요.'
           : `전체 실행 시간 변경 없음 · 시간 제한 대상 ${selectedTimeoutTargets.length}개 선택 · 불러온 ${selectedProfile} 프로필 값 일반 ${draft?.timeouts?.delegate_total_minutes}분 / 짧은 작업 ${draft?.timeouts?.routed_light_total_minutes}분 / 긴 작업 ${draft?.timeouts?.routed_heavy_total_minutes}분`
@@ -4924,7 +5319,13 @@ function RouterPage({ ctx: pluginContext }) {
   const pageVanished = [...new Set([
     ...((modelWriteNeeded || routingCopyPending || nativeFallbackWriteRequested || AUXILIARY_TASKS.some(task => auxiliary[task.id].requested)) ? missingModelTargets : []),
     ...(timeoutWriteRequested ? missingTimeoutTargets : [])])]
-  const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled && !timeoutRevisionChanged && !liveDrift.length && !pageVanished.length)
+  // The whole-page save writes something only for a model, slot, spare-model or time-limit change (or
+  // an explicit copy); with nothing to write it stays disabled and sends no request.
+  // A pending edit with no target still enables it, so the save reports why it cannot be written.
+  const pageWriteNeeded = Boolean(modelWriteNeeded || routingCopyPending || nativeFallbackWriteRequested || timeoutWriteRequested ||
+    AUXILIARY_TASKS.some(task => auxiliary[task.id].requested) || localCombinedSummary?.body.fallback_updates?.length || localCombinedSummary?.body.timeout_updates?.length)
+  pageWriteNeededRef.current = pageWriteNeeded
+  const canSaveAll = Boolean(currentRow && draft && statusQuery.data && !disabled && !timeoutRevisionChanged && !liveDrift.length && !pageVanished.length && pageWriteNeeded)
 
   return jsxs('main', {
     style: styles.page,
@@ -6100,7 +6501,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.14.0',
+  version: '0.15.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

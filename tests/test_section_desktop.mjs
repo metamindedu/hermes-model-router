@@ -282,6 +282,7 @@ test('an explicit timeout target action gives whole-page save one-time permissio
   h.click('timeout-target-none')
   h.check('timeout-target-default', true)
   h.check('timeout-target-other', true)
+  h.check('timeout-copy-all', true)
   await h.click('global-save')
   await h.flush()
   assert.deepEqual(lastPreview(h).body.timeout_updates, [
@@ -296,7 +297,7 @@ test('timeout-only save copies unchanged values to a frozen manual subset and om
   const sourceModels = structuredClone(profileRow(h, 'claire').models)
   const sourceRouting = structuredClone(profileRow(h, 'claire').routing)
   h.click('timeout-target-none')
-  h.check('timeout-target-other', true)
+  h.check('timeout-target-other', true); h.check('timeout-copy-all', true)
   h.input('model-main-model', 'dirty-model')
   h.check('routing-reenable-other', true)
   draftConversationSpare(h)
@@ -335,7 +336,7 @@ test('non-source timeout revision drift blocks preview before request using the 
 test('non-source timeout revision drift during preview cancels apply for the entire captured target set', async () => {
   const h = harness()
   h.click('timeout-target-none')
-  h.check('timeout-target-other', true)
+  h.check('timeout-target-other', true); h.check('timeout-copy-all', true)
   let resolvePreview
   h.setResponder(operation => operation === 'preview'
     ? new Promise(resolve => { resolvePreview = resolve })
@@ -392,6 +393,8 @@ for (const action of ['individual-save', 'new-edit', 'new-target-action']) {
     h.selectProfile('other')
     if (action === 'new-edit') h.input('delegate-total-minutes', '21')
     if (action === 'new-target-action') h.check('timeout-target-claire', true)
+    // v0.15.0: unchanged values are copied only with the explicit checkbox.
+    if (action !== 'new-edit') h.check('timeout-copy-all', true)
     await h.click(action === 'individual-save' ? 'timeouts-save' : 'global-save')
     await h.flush()
     assert.deepEqual(lastPreview(h).body.timeout_updates, [expectedTimeout('claire', 8, action === 'new-edit' ? 1260 : 12, 7200)])
@@ -429,6 +432,7 @@ test('a chosen time-limit target that disappears stays ticked and blocks that sa
   assert.equal(h.byId('timeouts-save').props.disabled, true)
   h.check('timeout-target-other', false)
   assert.throws(() => h.byId('timeout-target-other'))
+  h.check('timeout-copy-all', true)
   assert.equal(h.byId('timeouts-save').props.disabled, false)
 })
 
@@ -444,4 +448,46 @@ test('the page-made time-limit default follows a newly eligible profile until th
   const more = structuredClone(h.data()); more.profiles.push(later)
   h.setData(more); h.render()
   assert.equal(h.byId('timeout-target-later').props.checked, false, 'a hand-edited list is not widened')
+})
+
+// v0.15.0: with the service capability the time-limit save sends only the changed fields.
+test('partial: a time-limit save sends only the changed field to each target; copy-all sends all three', async () => {
+  const data = statusFixture(); data.partial_save_schema = 1
+  const h = harness(data)
+  h.click('timeout-target-none'); h.check('timeout-target-claire', true); h.check('timeout-target-other', true)
+  assert.equal(h.byId('timeouts-save').props.disabled, true, 'nothing changed, no copy-all')
+  h.input('delegate-total-minutes', '21')
+  assert.match(text(h.byId('timeout-section-summary')), /바뀐 값만\(일반 위임\)/)
+  await h.click('timeouts-save')
+  await h.flush()
+  const body = lastPreview(h).body
+  assert.equal(body.partial_save_schema, 1)
+  assert.equal(body.save_scope, 'timeouts')
+  assert.deepEqual(Object.keys(body.routing), ['enabled'])
+  assert.deepEqual(body.timeout_updates.map(update => [update.profile, Object.keys(update).sort()]), [
+    ['claire', ['delegate_total_seconds', 'expected_revision', 'profile']],
+    ['other', ['delegate_total_seconds', 'expected_revision', 'profile']]])
+  assert.ok(body.timeout_updates.every(update => update.delegate_total_seconds === 1260))
+  const g = harness(data)
+  g.click('timeout-target-none'); g.check('timeout-target-other', true); g.check('timeout-copy-all', true)
+  await g.click('timeouts-save')
+  await g.flush()
+  assert.deepEqual(Object.keys(lastPreview(g).body.timeout_updates[0]).sort(),
+    ['delegate_total_seconds', 'expected_revision', 'profile', 'routed_heavy_total_seconds', 'routed_light_total_seconds'])
+})
+
+test('partial: the whole-page save uses the same partial forms', async () => {
+  const data = statusFixture(); data.partial_save_schema = 1
+  const h = harness(data)
+  h.click('timeout-target-none'); h.check('timeout-target-other', true)
+  h.input('routed-heavy-total-minutes', '30')
+  h.input('model-main-model', 'page-wide-main')
+  await h.click('global-save')
+  await h.flush()
+  const body = lastPreview(h).body
+  assert.equal(body.partial_save_schema, 1)
+  assert.equal(Object.hasOwn(body.routing, 'heavy'), false)
+  assert.equal(Object.hasOwn(body.routing, 'light'), false)
+  assert.deepEqual(body.timeout_updates.map(update => Object.keys(update).sort()), [['expected_revision', 'profile', 'routed_heavy_total_seconds']])
+  assert.equal(body.models.main.model, 'page-wide-main')
 })

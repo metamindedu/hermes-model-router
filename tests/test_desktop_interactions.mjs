@@ -331,6 +331,7 @@ test('single save validates then applies once without a preview or confirmation 
 test('save locks editing and duplicate clicks even while validation is pending', async () => {
   const h = harness(); let finish
   h.setResponder(op => op === 'preview' ? new Promise(r => { finish = r }) : { status: 'applied' })
+  h.input('model-main-model', 'edited-main')
   const click = h.byId('global-save').props.onClick
   click(); h.render(); click(); h.render()
   assert.equal(h.calls.length, 1)
@@ -343,6 +344,7 @@ test('save locks editing and duplicate clicks even while validation is pending',
 test('validation rejection unlocks safely and never applies', async () => {
   const h = harness()
   h.setResponder(() => { throw new Error('validation timeout') })
+  h.input('model-main-model', 'edited-main')
   h.click('global-save'); await h.flush()
   assert.equal(h.calls.filter(c => c.operation === 'apply').length, 0)
   assert.equal(h.byId('model-main-model').props.disabled, false)
@@ -352,8 +354,10 @@ test('validation rejection unlocks safely and never applies', async () => {
 test('scope change during validation cancels before writes and old failure cannot lock a new save', async () => {
   const h = harness(); let oldReject
   h.setResponder(() => new Promise((r, reject) => { oldReject = reject }))
+  h.input('model-main-model', 'edited-main')
   h.click('global-save')
   h.state.connectionId.value = 'new-connection'; h.render()
+  h.input('model-main-model', 'edited-in-new-scope')
   let newResolve
   h.setResponder(op => op === 'preview' ? { plan_id: 'new-plan', changes: [] } : new Promise(r => { newResolve = r }))
   h.click('global-save'); await h.flush()
@@ -367,10 +371,14 @@ test('scope change during validation cancels before writes and old failure canno
 test('late validation success after scope change cannot apply its token', async () => {
   const h = harness(); let finish
   h.setResponder(() => new Promise(r => { finish = r }))
+  h.input('model-main-model', 'edited-main')
   h.click('global-save')
   h.state.connectionId.value = 'other-source'; h.render()
   finish({ plan_id: 'obsolete', changes: [] }); await h.flush()
   assert.equal(h.calls.filter(c => c.operation === 'apply').length, 0)
+  // Not locked: the new scope can be edited and saved.
+  assert.equal(h.byId('model-main-model').props.disabled, false)
+  h.input('model-main-model', 'new-scope-edit')
   assert.equal(h.byId('global-save').props.disabled, false)
 })
 
@@ -385,6 +393,7 @@ test('a stale save callback is invalidated by refresh before making any request'
 test('scope change during apply locks until original scope is reloaded', async () => {
   const h = harness(); let finish
   h.setResponder(op => op === 'preview' ? { plan_id: 'pending-apply', changes: [] } : new Promise(r => { finish = r }))
+  h.input('model-main-model', 'edited-main')
   h.click('global-save'); await h.flush()
   assert.equal(h.calls.filter(c => c.operation === 'apply').length, 1)
   h.state.connectionId.value = 'other-connection'; h.render()
@@ -403,6 +412,7 @@ test('refresh failure with cached data does not unlock an ambiguous apply', asyn
     if (operation === 'apply') throw new Error('unknown transport outcome')
     return { plan_id: 'test-plan', changes: [{ profile: 'claire', field: 'models' }], warnings: [] }
   })
+  h.input('model-main-model', 'edited-main')
   h.click('global-save'); await h.flush()
   h.setRefetcher(async () => ({ data: h.data(), error: new Error('refresh failed') }))
   h.clickLabel('실제 상태 확인 후 편집 재개'); await h.flush()
@@ -563,6 +573,8 @@ test('profile execution grants start empty and do not follow model-copy targets'
 test('the whole-page save never carries the delegation method; the model section save does', async () => {
   const h = harness()
   h.select('native-delegation-backend', 'model-router-profiles')
+  assert.equal(h.byId('global-save').props.disabled, true, 'a method-only edit is nothing the whole-page save writes')
+  h.input('model-main-model', 'edited-main')
   h.click('global-save'); await h.flush()
   assert.equal(h.calls[0].operation, 'preview')
   assert.equal(JSON.stringify(h.calls[0].body).includes('model-router-profiles'), false)
@@ -663,7 +675,7 @@ test('one target list starts with the loaded profile and widens only by an expli
 test('native bulk save carries every target own frozen digest and no unrelated model/time payload', async () => {
   const h = harness({ data: nativeBatchFixture() })
   h.select('native-delegation-backend', 'model-router')
-  h.click('model-target-all')
+  h.click('model-target-all'); h.check('model-copy-all', true)
   h.select('slot-design-fallback-mode', 'custom')
   h.input('slot-design-spare-provider-0', 'spare-service')
   h.input('slot-design-spare-model-0', 'spare/model')
@@ -749,7 +761,7 @@ test('profile roles inherit native intro without making an input or copying it o
 test('untouched descriptions retain each save origin and explicit edit propagates only its row', async () => {
   const data = profileFixture()
   for (const [index, row] of data.profiles.entries()) row.native_delegation.profile_routes = { profiles: [{ name: 'other', description: `Own description ${index}` }], default: null }
-  const h = harness({ data }); h.click('profile-target-all')
+  const h = harness({ data }); h.click('profile-target-all'); h.check('profile-copy-all', true)
   h.setResponder(nativeReply); h.click('profile-section-save'); await h.flush()
   assert.equal(h.calls[0].body.updates.length, 3)
   for (const update of h.calls[0].body.updates) assert.equal(update.profile_routes.profiles[0].description, data.profiles.find(row => row.name === update.profile).native_delegation.profile_routes.profiles[0].description)
@@ -765,7 +777,7 @@ test('legacy origin refuses new inheritance but permits old blank, removal or ex
   h.click('native-profile-role-custom-other'); h.input('native-profile-description-other', 'Manual role'); assert.equal(h.byId('profile-section-save').props.disabled, false)
   const existing = profileFixture(); delete existing.profiles[1].native_delegation.role_intro_inheritance
   existing.profiles[1].native_delegation.profile_routes = { profiles: [{ name: 'other', description: '' }], default: null }
-  const g = harness({ data: existing }); g.click('profile-target-source'); assert.equal(g.byId('profile-section-save').props.disabled, false)
+  const g = harness({ data: existing }); g.click('profile-target-source'); g.check('profile-copy-all', true); assert.equal(g.byId('profile-section-save').props.disabled, false)
   g.check('native-profile-other', false); assert.equal(g.byId('profile-section-save').props.disabled, false)
 })
 
@@ -877,7 +889,7 @@ test('a selected target that disappears stays ticked and blocks by name; one tha
   assert.deepEqual(gone.selected('model-target-'), ['claire', 'default'])
   assert.equal(gone.byId('model-section-save').props.disabled, false)
   const h = harness({ data: nativeBatchFixture() })
-  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all'); h.check('model-copy-all', true)
   const next = structuredClone(h.data()); next.profiles[2].native_delegation.editable = false
   h.setData(next); h.render()
   assert.match(text(h.byId('model-section-skipped')), /other/)
@@ -890,7 +902,7 @@ test('a selected target that disappears stays ticked and blocks by name; one tha
 test('native all-selected never enables a profile saved with role routing disabled', async () => {
   const data = nativeBatchFixture(); data.profiles[2].routing.enabled = false
   const h = harness({ data })
-  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all'); h.check('model-copy-all', true)
   assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
   assert.match(text(h.byId('model-section-targets')), /적용하지 않습니다\. 이 프로필의 작업 분담이 꺼져 있습니다/)
   h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
@@ -1058,7 +1070,7 @@ for (const changed of ['excluded-source', 'selected-target', 'root']) {
   test(`native preview rechecks uncached server ${changed} state before apply`, async () => {
     const h = harness({ data: nativeBatchFixture() })
     h.select('native-delegation-backend', 'model-router')
-    h.click('model-target-none'); h.check('model-target-other', true)
+    h.click('model-target-none'); h.check('model-target-other', true); h.check('model-copy-all', true)
     const fresh = structuredClone(h.data())
     if (changed === 'root') fresh.readiness_context.base_identity = 'e'.repeat(64)
     else fresh.profiles.find(row => row.name === (changed === 'excluded-source' ? 'claire' : 'other')).native_delegation.digest = 'f'.repeat(64)
@@ -1305,7 +1317,7 @@ test('each target summary line matches what the bodies write to that target', as
   other.routing.enabled = false
   other.fallbacks.native = nativeSpares({ enabled: true, chain: [{ provider: 'own', model: 'own-spare' }], actual_chain: [{ provider: 'own', model: 'own-spare' }] })
   const h = harness({ data })
-  h.check('model-target-other', true)
+  h.check('model-target-other', true); h.check('model-copy-all', true)
   const lines = Object.fromEntries(['claire', 'other'].map(name => [name, text(h.byId(`model-section-write-${name}`))]))
   assert.doesNotMatch(text(h.byId('model-section-summary')), /모델 값만 저장합니다/)
   assert.match(lines.other, /^other: 대화 모델, 작업 슬롯 모델, 대화 예비 모델\(사용 안 함\) 저장 · 맡기는 방식·슬롯 예비 모델은 그대로 둠\(이 프로필의 작업 분담이 꺼져 있습니다/)
@@ -1451,7 +1463,7 @@ test('a hand-picked target list persists, but its copy intent ends with a profil
   h.input('model-main-model', 'new-main')
   h.click('global-save'); await h.flush()
   assert.deepEqual(h.calls.find(c => c.operation === 'preview').body.routing_targets, [], 'slot models are not copied without an edit or a fresh choice')
-  h.click('model-target-all')
+  h.click('model-target-all'); h.check('model-copy-all', true)
   h.click('global-save'); await h.flush()
   assert.deepEqual(h.calls.filter(c => c.operation === 'preview').at(-1).body.routing_targets, ['default', 'claire', 'other'])
   // The whole-page save does not carry the delegation method the hand-picked list would also copy,
@@ -1492,11 +1504,10 @@ test('a background revision change locks the save, keeps the draft and never pro
   assert.match(text(h.byId('model-section-summary')), /바뀐 내용이 없어 저장할 것이 없습니다/)
   h.byId('model-section-save').props.onClick?.(); await h.flush()
   assert.equal(h.calls.length, 0)
-  h.click('global-save'); await h.flush()
-  const body = h.calls.find(call => call.operation === 'preview').body
-  assert.equal(body.expected_revision, 8)
-  assert.deepEqual(body.model_targets, [], 'a list that merely persisted copies no role models')
-  assert.deepEqual(body.routing_targets, [])
+  // The whole-page save has nothing to write either: disabled, and its handler sends nothing.
+  assert.equal(h.byId('global-save').props.disabled, true)
+  h.byId('global-save').props.onClick?.(); await h.flush()
+  assert.equal(h.calls.length, 0)
 })
 
 test('a status refresh during pending validation changes neither the captured targets nor the revision, and applies once', async () => {
@@ -1535,14 +1546,22 @@ test('with nothing changed the model save is disabled; a persisted wide list cop
   assert.deepEqual(fresh.calls, [])
   const h = harness({ data: slotFixture() })
   h.click('model-target-all')
-  assert.equal(h.byId('model-section-save').props.disabled, false, 'a fresh choice is copy intent')
+  assert.equal(h.byId('model-section-save').props.disabled, true, 'v0.15.0: a hand-picked list alone copies nothing')
+  assert.equal(h.byId('model-copy-all').props.checked, false)
+  h.check('model-copy-all', true)
+  assert.equal(h.byId('model-section-save').props.disabled, false, 'the explicit checkbox is copy intent')
   h.selectProfile('other')
   assert.deepEqual(h.selected('model-target-'), ['claire', 'default', 'other'])
+  assert.equal(h.byId('model-copy-all').props.checked, false, 'a profile switch resets the checkbox')
   assert.equal(h.byId('model-section-save').props.disabled, true)
   h.byId('model-section-save').props.onClick?.(); await h.flush()
   assert.deepEqual(h.calls, [], 'the other profile models are never copied under a no-change summary')
-  // Picking the list again is a new, visible decision.
+  // Ticking the checkbox again is a new, visible decision; a target change resets it.
+  h.check('model-copy-all', true)
   h.click('model-target-source')
+  assert.equal(h.byId('model-copy-all').props.checked, false, 'a target change resets the checkbox')
+  assert.equal(h.byId('model-section-save').props.disabled, true)
+  h.check('model-copy-all', true)
   assert.match(text(h.byId('model-section-summary')), /적용 대상: other/)
   assert.equal(h.byId('model-section-save').props.disabled, false)
 })
@@ -1569,10 +1588,10 @@ test('the whole-page save follows the same rules: no silent model copy, no membe
   const h = harness({ data })
   h.check('routing-reenable-other', true)
   assert.doesNotMatch(text(h.byId('draft-reference-summary')), /다시 켜기/)
-  h.click('global-save'); await h.flush()
-  const untouched = h.calls.find(call => call.operation === 'preview').body
-  assert.deepEqual(untouched.model_targets, [])
-  assert.deepEqual(untouched.routing_profiles, ['claire'], 'a ticked re-enable box is saved only by its own button')
+  // A ticked re-enable box is saved only by its own button: the whole-page save has nothing to write.
+  assert.equal(h.byId('global-save').props.disabled, true)
+  h.byId('global-save').props.onClick?.(); await h.flush()
+  assert.deepEqual(h.calls, [])
   const g = harness({ data })
   g.input('model-main-model', 'edited-main'); g.click('model-target-none')
   assert.match(text(g.render()), /‘모델’ 섹션의 적용 대상이 0개입니다/)
@@ -1592,12 +1611,12 @@ test('slot models are not copied by a hand-picked list while their cards are hid
   data.profiles[1].native_delegation.profile_routes = { profiles: [{ name: 'default', description: '' }], default: 'default' }
   const h = harness({ data })
   assert.throws(() => h.byId('slot-design-follow'))
-  h.click('model-target-none'); h.check('model-target-claire', true)
+  h.click('model-target-none'); h.check('model-target-claire', true); h.check('model-copy-all', true)
   const summary = text(h.byId('model-section-summary'))
   assert.doesNotMatch(summary, /작업 슬롯 모델/)
   assert.match(summary, /맡기는 방식: 전문 프로필에 맡기기/)
   assert.doesNotMatch(summary, /허용할 전문 프로필/, 'the allow-list belongs to its own section')
-  h.click('profile-target-source')
+  h.click('profile-target-source'); h.check('profile-copy-all', true)
   assert.match(text(h.byId('profile-section-summary')), /허용할 전문 프로필: default · 기본: default/)
   h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   assert.equal(Object.hasOwn(h.calls[0].body.updates[0], 'profile_routes'), false)
@@ -1624,7 +1643,7 @@ test('a profile without slot support in a model mode keeps every target stored p
   data.profiles[0].native_delegation.slot_policy.design = { mode: 'custom', chain: [{ provider: 'own', model: 'own-slot-spare' }] }
   const h = harness({ data })
   assert.match(text(h.byId('slot-update-note')), /업데이트/)
-  h.click('model-target-all')
+  h.click('model-target-all'); h.check('model-copy-all', true)
   h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   // The loaded profile cannot show per-slot spare models, so no target's stored policy is sent.
   for (const update of h.calls[0].body.updates) {
@@ -1752,8 +1771,8 @@ test('a model copy never rewrites another profile stored on default or an unlist
   data.profiles[0].native_delegation.backend = 'default'
   data.profiles[2].native_delegation.backend = 'advanced-custom'
   const h = harness({ data })
-  // The method is left untouched; the hand-picked list is the copy intent.
-  h.input('model-main-model', 'copied-main'); h.click('model-target-all')
+  // The method is left untouched; the explicit copy-all checkbox is the copy intent.
+  h.input('model-main-model', 'copied-main'); h.click('model-target-all'); h.check('model-copy-all', true)
   assert.match(text(h.byId('model-section-skipped')), /default, other/)
   assert.match(text(h.byId('model-section-targets')), /‘기본 위임 모델 사용 \(이전 방식\)’ 방식으로 저장되어 있어 그대로 둡니다/)
   assert.match(text(h.byId('model-section-targets')), /‘별도 고급 설정’ 방식으로 저장되어 있어 그대로 둡니다/)
@@ -1834,7 +1853,7 @@ test('a profile target that cannot take the allow-list is disabled, skipped by s
   const h = harness({ data })
   assert.equal(h.byId('profile-target-other').props.disabled, true)
   assert.match(text(h.byId('profile-section-targets')), /전문 프로필에 맡기는 방식이 아닙니다\(현재: 작업 종류에 맞는 슬롯 모델 사용\)/)
-  h.click('profile-target-all')
+  h.click('profile-target-all'); h.check('profile-copy-all', true)
   assert.deepEqual(h.selected('profile-target-'), ['claire', 'default'])
   assert.equal(h.byId('profile-section-save').props.disabled, false)
   const next = structuredClone(h.data()); next.profiles[0].native_delegation.backend = 'model-router'
@@ -2211,7 +2230,7 @@ test('a profile whose routing skill is off takes the model copy but not the nati
   const data = nativeBatchFixture()
   data.profiles.find(row => row.name === 'other').drift = ['skills.disabled']  // canonical on, skill off
   const h = harness({ data })
-  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
+  h.select('native-delegation-backend', 'model-router'); h.click('model-target-all'); h.check('model-copy-all', true)
   assert.match(text(h.byId('model-section-targets')), /이 프로필의 작업 분담이 꺼져 있습니다/)
   h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls[0].body.updates.map(row => row.profile), ['default', 'claire'], 'never sent to the native method batch')
@@ -2250,7 +2269,7 @@ for (const [canonical, skill] of [[true, true], [true, false], [false, true], [f
     // The status reports a skills.disabled drift when the skill's switch differs from the canonical flag.
     other.drift = canonical === skill ? [] : ['skills.disabled']
     const h = harness({ data })
-    h.select('native-delegation-backend', 'model-router'); h.click('model-target-all')
+    h.select('native-delegation-backend', 'model-router'); h.click('model-target-all'); h.check('model-copy-all', true)
     h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
     const batch = h.calls.find(call => call.operation === 'delegation-preview').body.updates.map(row => row.profile)
     assert.equal(batch.includes('other'), canonical && skill)
@@ -2472,7 +2491,7 @@ test('a hand-picked target list copies an auxiliary chain to the targets that ca
   }) })
   h.select('aux-title-fallback-mode', 'custom')
   h.input('aux-title-chain-0-provider', FLASH.provider); h.input('aux-title-chain-0-model', FLASH.model)
-  h.click('model-target-all')
+  h.click('model-target-all'); h.check('model-copy-all', true)
   assert.match(text(h.byId('model-section-aux-title-skipped')), /제목 생성 예비 모델을 적용하지 않는 프로필: other/)
   assert.match(text(h.byId('model-section-write-other')), /제목 생성 예비 모델은 그대로 둠\(이 프로필의 제목 생성 예비 모델은 읽기 전용입니다\.\)/)
   h.setResponder(spareReply)
@@ -2529,7 +2548,7 @@ test('a copy never overwrites another profile own slot that still follows the de
   const h = harness({ data })
   h.select('slot-computer-use-follow', 'custom')
   h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
-  h.click('model-target-all')
+  h.click('model-target-all'); h.check('model-copy-all', true)
   assert.match(text(h.byId('model-section-slot-skipped')), /작업 슬롯 모델을 적용하지 않는 프로필: other\. 그 프로필에 이전 설정/)
   assert.match(text(h.byId('model-section-write-other')), /작업 슬롯 모델은 그대로 둠\(이 프로필에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않음\)/)
   h.setResponder(spareReply)
@@ -2636,7 +2655,7 @@ test('copy intent to targets that all keep their stored legacy slot saves the re
     if (row.name === 'other') { row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }; row.slots.stored = ['code-simple'] }
   })
   const h = harness({ data })
-  h.click('model-target-none'); h.check('model-target-other', true)
+  h.click('model-target-none'); h.check('model-target-other', true); h.check('model-copy-all', true)
   h.input('model-main-model', 'copied-main')
   assert.equal(h.byId('model-section-save').props.disabled, false, 'copy intent alone does not block')
   assert.match(text(h.byId('model-section-write-other')), /작업 슬롯 모델은 그대로 둠\(이 프로필에 이전 설정/)
@@ -2673,4 +2692,255 @@ test('each task card names its own read-only cause; a sibling env chain does not
   }) })
   assert.match(text(g.byId('aux-title-fallback-readonly')), /^관리자 고정 설정이 있어/)
   assert.match(text(g.byId('aux-compression-fallback-readonly')), /base_url 같은 고급 항목/)
+})
+
+// ---- v0.15.0: section saves send only changed values (service status `partial_save_schema: 1`) ----
+const partialOn = data => { data.partial_save_schema = 1; return data }
+
+test('partial: a slot-only change sends that slot only, without Heavy/Light, with expectations narrowed to it', async () => {
+  const h = harness({ data: partialOn(slotFixture()) })
+  h.click('model-target-all')
+  assert.equal(h.byId('model-copy-all').props.checked, false)
+  h.select('slot-computer-use-follow', 'custom')
+  h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
+  assert.match(text(h.byId('model-section-summary')), /작업 슬롯 모델\(바뀐 슬롯만: 컴퓨터 유즈\)/)
+  assert.match(text(h.byId('model-section-write-other')), /^other: 작업 슬롯 모델\(컴퓨터 유즈\) 저장/)
+  h.click('model-section-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'preview').body
+  assert.equal(body.partial_save_schema, 1)
+  assert.equal(body.save_scope, 'routing')
+  assert.deepEqual(Object.keys(body.routing).sort(), ['enabled', 'slots'])
+  assert.deepEqual(Object.keys(body.routing.slots), ['computer-use'])
+  assert.deepEqual(body.routing.slots['computer-use'], { follow: 'custom', custom: route('screen-service', 'screen-model', models.main.reasoning) })
+  assert.deepEqual([...body.routing_targets].sort(), ['claire', 'default', 'other'])
+  assert.deepEqual(body.model_targets, [])
+  for (const item of body.expected) {
+    assert.deepEqual(Object.keys(item.routing).sort(), ['enabled', 'skill_enabled', 'slots'])
+    assert.deepEqual(Object.keys(item.routing.slots), ['computer-use'])
+  }
+  assert.equal(h.calls.some(call => call.operation === 'delegation-preview'), false, 'the method and spare models are not sent')
+  // The slot edit counts as saved: the page reloads by itself.
+  assert.doesNotMatch(text(h.render()), /자동으로 다시 불러오지 않았습니다/)
+})
+
+test('partial: copy-all sends every slot and the models; the checkbox resets after a successful save', async () => {
+  const h = harness({ data: partialOn(slotFixture()) })
+  h.click('model-target-all'); h.check('model-copy-all', true)
+  h.setResponder(spareReply)
+  h.click('model-section-save'); await h.flush()
+  const stores = h.calls.filter(call => call.operation === 'preview').map(call => call.body)
+  const routingBody = stores.find(body => body.routing?.slots)
+  assert.equal(routingBody.partial_save_schema, 1)
+  assert.deepEqual(Object.keys(routingBody.routing.slots), slotIds)
+  assert.equal(Object.hasOwn(routingBody.routing, 'heavy'), false)
+  assert.ok(stores.some(body => body.model_targets?.length === 3), 'the models are copied')
+  assert.equal(h.byId('model-copy-all').props.checked, false)
+})
+
+test('partial: an edited slot spare model goes as a one-slot patch without the method', async () => {
+  const h = harness({ data: partialOn(slotFixture()) })
+  h.click('model-target-all')
+  h.select('slot-design-fallback-mode', 'custom')
+  h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+  h.setResponder(nativeReply)
+  h.click('model-section-save'); await h.flush()
+  const native = h.calls.find(call => call.operation === 'delegation-preview').body
+  assert.equal(native.partial_save_schema, 1)
+  assert.ok(native.updates.length > 0)
+  for (const update of native.updates) {
+    assert.equal(Object.hasOwn(update, 'backend'), false, `${update.profile}: the method was not edited`)
+    assert.equal(Object.hasOwn(update, 'slot_policy'), update.profile === 'claire' && Object.hasOwn(update, 'slot_policy'))
+    const sent = update.slot_policy_patch || update.slot_policy
+    assert.deepEqual(sent.design, { mode: 'custom', chain: [{ provider: 'spare-service', model: 'spare/model' }] })
+    if (update.slot_policy_patch) assert.deepEqual(Object.keys(update.slot_policy_patch), ['design'])
+    assert.equal(update.allow_additional_cost, true)
+  }
+  assert.equal(h.calls.some(call => call.operation === 'preview' && call.body.routing?.slots), false, 'no slot models are sent')
+})
+
+test('partial: a method edit sends the method only', async () => {
+  const h = harness({ data: partialOn(nativeBatchFixture()) })
+  h.select('native-delegation-backend', 'model-router')
+  h.click('model-target-all')
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  const native = h.calls.find(call => call.operation === 'delegation-preview').body
+  assert.equal(native.partial_save_schema, 1)
+  for (const update of native.updates) assert.deepEqual(Object.keys(update).sort(), ['allow_profile_access', 'backend', 'expected_digest', 'profile'])
+  assert.equal(h.calls.some(call => call.operation === 'preview' && (call.body.model_targets || []).length), false, 'the models are not copied')
+})
+
+test('partial: the profile section sends an allow-list patch and names what each target receives', async () => {
+  const h = harness({ data: partialOn(profileFixture()) })
+  h.click('profile-target-all')
+  h.check('native-profile-other', true)
+  h.check('native-profile-access-consent', true)
+  assert.match(text(h.byId('profile-section-summary')), /바뀐 내용만 저장: 추가 other/)
+  assert.match(text(h.byId('profile-section-target-writes')), /허용 목록 변경\(추가 other\)/)
+  h.setResponder(nativeReply); h.click('profile-section-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'delegation-preview').body
+  assert.equal(body.partial_save_schema, 1)
+  assert.ok(body.updates.length > 0)
+  for (const update of body.updates) {
+    assert.equal(Object.hasOwn(update, 'profile_routes'), false)
+    assert.equal(Object.hasOwn(update, 'backend'), false)
+    assert.deepEqual(update.profile_routes_patch.add.map(entry => entry.name), ['other'])
+    assert.equal(update.allow_profile_access, true)
+  }
+})
+
+test('partial: copy-all in the profile section sends the earlier full allow-list', async () => {
+  const h = harness({ data: partialOn(profileFixture()) })
+  h.click('profile-target-all'); h.check('profile-copy-all', true)
+  h.setResponder(nativeReply); h.click('profile-section-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'delegation-preview').body
+  assert.ok(body.updates.every(update => update.profile_routes && !update.profile_routes_patch))
+  assert.equal(h.byId('profile-copy-all').props.checked, false)
+})
+
+test('partial: a spare model edited under another method and switched away from never blocks the save (B1)', async () => {
+  for (const [fixtureOf, loaded, other] of [[() => slotFixture(), 'model-router', 'model-router-auto'], [() => profileFixture(), 'model-router-profiles', 'model-router']]) {
+    const h = harness({ data: partialOn(fixtureOf()) })
+    h.select('native-delegation-backend', other)
+    h.select('slot-design-fallback-mode', 'custom')
+    h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+    h.select('native-delegation-backend', loaded)
+    assert.equal(h.byId('model-section-save').props.disabled, true, `${loaded}: nothing visible to save`)
+    assert.doesNotMatch(text(h.byId('model-section-targets')), /받을 수 있는 프로필이 적용 대상에 없습니다/)
+    h.input('model-main-model', 'b1-main')
+    assert.equal(h.byId('model-section-save').props.disabled, false, `${loaded}: the model edit is saved`)
+    h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+    assert.equal(h.calls.some(call => call.operation === 'delegation-preview'), false, `${loaded}: the hidden spare edit is not sent`)
+    assert.equal(h.calls.find(call => call.operation === 'preview').body.models.main.model, 'b1-main')
+    // The hidden edit stays an unsaved draft: the page does not reload over it by itself.
+    assert.match(text(h.render()), /자동으로 다시 불러오지 않았습니다/)
+  }
+})
+
+test('the whole-page save is disabled with nothing changed and its handler sends nothing (M6)', async () => {
+  const h = harness()
+  assert.equal(h.byId('global-save').props.disabled, true)
+  h.byId('global-save').props.onClick?.(); await h.flush()
+  assert.deepEqual(h.calls, [])
+  h.input('model-main-model', 'edited-main')
+  assert.equal(h.byId('global-save').props.disabled, false)
+  h.input('model-main-model', h.data().profiles.find(row => row.name === 'claire').models.main.model)
+  assert.equal(h.byId('global-save').props.disabled, true, 'an edit undone is nothing to save')
+})
+
+test('partial: a new default a target cannot hold is kept there and named; summary lines show what really changes (M1, M4)', async () => {
+  const data = partialOn(profileFixture())
+  const claire = data.profiles.find(row => row.name === 'claire')
+  claire.native_delegation.profile_routes = { profiles: [{ name: 'other', description: 'Other role' }], default: null }
+  data.profiles.find(row => row.name === 'other').native_delegation.profile_routes = { profiles: [{ name: 'default', description: 'Default role' }], default: null }
+  const h = harness({ data })
+  h.click('profile-target-all')
+  h.select('native-profile-default', 'other')
+  h.check('native-profile-access-consent', true)
+  const writes = text(h.byId('profile-section-target-writes'))
+  assert.match(writes, /claire: 허용 목록 변경\(기본 other\)/)
+  assert.match(writes, /default: 저장하는 값 없음 · 기본 전문 프로필\(other\)이 이 프로필의 허용 목록에 없어 기본값은 그대로 둡니다/)
+  assert.match(writes, /other: 저장하는 값 없음 · 기본 전문 프로필\(other\)/)
+  h.setResponder(nativeReply); h.click('profile-section-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'delegation-preview').body
+  assert.deepEqual(body.updates.map(update => [update.profile, update.profile_routes_patch]), [['claire', { default: 'other' }]])
+  // A description edit is listed only for a target that lists that profile.
+  const g = harness({ data })
+  g.click('profile-target-all')
+  g.input('native-profile-description-other', 'Edited role')
+  const lines = text(g.byId('profile-section-target-writes'))
+  assert.match(lines, /claire: 허용 목록 변경\(설명 other\)/)
+  assert.match(lines, /default: 이 프로필의 허용 목록에는 바뀌는 값 없음/)
+  assert.match(lines, /other: 이 프로필의 허용 목록에는 바뀌는 값 없음/)
+})
+
+test('partial: a stored custom Heavy is kept for the retired routing spare check, so the whole-page save is not falsely blocked (R1)', async () => {
+  const data = partialOn(slotFixture())
+  const claire = data.profiles.find(row => row.name === 'claire')
+  claire.routing.heavy = { follow: 'custom', custom: route('custom-heavy-prov', 'custom-heavy-model', 'high') }
+  claire.fallbacks = claire.fallbacks || {}
+  // Valid as stored: the retired routing spare equals the main model, not the custom Heavy.
+  claire.fallbacks.routing = { enabled: true, editable: true, readonly: false, heavy: { ...claire.models.main },
+    light: route('fb-light-prov', 'fb-light-model', 'low'),
+    consent: { policy_version: 1, selection_digest: 'abc', allow_additional_cost: true, allow_task_rerun: true } }
+  const h = harness({ data })
+  h.select('slot-design-follow', 'custom')
+  h.input('slot-design-provider', 'slot-prov'); h.input('slot-design-model', 'slot-model')
+  assert.doesNotMatch(text(h.render()), /보관된 이전 작업 방식의 예비 모델과 겹칩니다/)
+  assert.equal(h.byId('global-save').props.disabled, false)
+  h.click('global-save'); await h.flush()
+  const body = h.calls.find(call => call.operation === 'preview').body
+  assert.equal(body.partial_save_schema, 1)
+  assert.equal(Object.hasOwn(body.routing, 'heavy'), false)
+  assert.deepEqual(Object.keys(body.routing.slots), ['design'])
+})
+
+test('partial: a hidden spare edit never blocks or annotates a model save to a routing-disabled target (B1 residual)', async () => {
+  const data = partialOn(slotFixture())
+  data.profiles.find(row => row.name === 'other').routing.enabled = false
+  const hide = h => {
+    h.select('native-delegation-backend', 'model-router-auto')
+    h.select('slot-design-fallback-mode', 'custom')
+    h.input('slot-design-spare-provider-0', 'spare-service'); h.input('slot-design-spare-model-0', 'spare/model')
+    h.select('native-delegation-backend', 'model-router')
+  }
+  const h = harness({ data })
+  hide(h)
+  h.click('model-target-none'); h.check('model-target-other', true)
+  h.input('model-main-model', 'main-for-other')
+  assert.doesNotMatch(text(h.render()), /받을 수 있는 프로필이 적용 대상에 없습니다/)
+  assert.equal(h.byId('model-section-save').props.disabled, false)
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  assert.equal(h.calls.some(call => call.operation === 'delegation-preview'), false)
+  assert.deepEqual(h.calls.find(call => call.operation === 'preview').body.model_targets, ['other'])
+  const g = harness({ data })
+  hide(g)
+  g.check('model-target-other', true)
+  g.input('model-main-model', 'main-for-both')
+  assert.doesNotMatch(text(g.byId('model-section-write-other')), /맡기는 방식·슬롯 예비 모델은 그대로 둠/, 'nothing of the method is sent, so nothing is named as kept')
+})
+
+test('partial: when every profile target skips a default-only edit, the refusal names each target and why (PROBE 3)', () => {
+  const data = partialOn(profileFixture())
+  data.profiles.find(row => row.name === 'claire').native_delegation.profile_routes = { profiles: [{ name: 'other', description: 'Other role' }], default: null }
+  data.profiles.find(row => row.name === 'default').native_delegation.profile_routes = { profiles: [], default: null }
+  const h = harness({ data })
+  h.click('profile-target-none'); h.check('profile-target-default', true)
+  h.select('native-profile-default', 'other')
+  h.check('native-profile-access-consent', true)
+  assert.equal(h.byId('profile-section-save').props.disabled, true)
+  const page = text(h.render())
+  assert.match(page, /바뀐 전문 프로필 설정을 받을 수 있는 프로필이 적용 대상에 없습니다\. default: 기본 전문 프로필\(other\)이 이 프로필의 허용 목록에 없어/)
+  assert.doesNotMatch(page, /바뀐 전문 프로필 설정이 없어 저장할 것이 없습니다/)
+})
+
+test('partial: a method edit pending while the section turns read-only never blocks the model save (review 3 F1)', async () => {
+  const data = partialOn(slotFixture())
+  for (const row of data.profiles) row.native_delegation.auto_supported = true
+  const h = harness({ data })
+  h.select('native-delegation-backend', 'model-router-auto')
+  h.input('model-main-model', 'edited-main')
+  const next = structuredClone(h.data())
+  Object.assign(next.profiles.find(row => row.name === 'claire').native_delegation, { editable: false, backend: 'unavailable', digest: '', warnings: ['native_delegation_readonly'] })
+  h.setData(next); h.render()
+  assert.doesNotMatch(text(h.render()), /바꾼 ‘맡기는 방식·예비 모델’을 받을 수 있는 프로필이 적용 대상에 없습니다/)
+  assert.equal(h.byId('model-section-save').props.disabled, false)
+  h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
+  assert.equal(h.calls.some(call => call.operation === 'delegation-preview'), false)
+  assert.equal(h.calls.find(call => call.operation === 'preview').body.models.main.model, 'edited-main')
+})
+
+test('partial: a default-only edit whose only target uses automatic selection names it instead of "nothing to save" (review 3 m1)', () => {
+  const data = partialOn(profileFixture())
+  data.profiles.find(row => row.name === 'claire').native_delegation.profile_routes = { profiles: [{ name: 'other', description: 'Other role' }], default: null }
+  const target = data.profiles.find(row => row.name === 'default').native_delegation
+  target.backend = 'model-router-auto'; target.auto_supported = true
+  target.profile_routes = { profiles: [{ name: 'other', description: '' }], default: null }
+  const h = harness({ data })
+  h.click('profile-target-none'); h.check('profile-target-default', true)
+  h.select('native-profile-default', 'other')
+  h.check('native-profile-access-consent', true)
+  const page = text(h.render())
+  assert.equal(h.byId('profile-section-save').props.disabled, true)
+  assert.match(page, /바뀐 전문 프로필 설정을 받을 수 있는 프로필이 적용 대상에 없습니다\. default: 모델 \/ 프로필 통합 선택 방식이라 기본 전문 프로필을 쓰지 않아/)
+  assert.doesNotMatch(page, /바뀐 전문 프로필 설정이 없어 저장할 것이 없습니다/)
 })

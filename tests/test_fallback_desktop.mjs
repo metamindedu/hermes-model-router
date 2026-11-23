@@ -476,6 +476,8 @@ test('a hand-picked target list copies the current spare models; unchanged loade
   const h = harness()
   assert.equal(h.byId('model-section-save').props.disabled, true)
   h.check('model-target-other', true)
+  assert.equal(h.byId('model-section-save').props.disabled, true, 'v0.15.0: a hand-picked list alone copies nothing')
+  h.check('model-copy-all', true)
   assert.match(text(h.byId('model-section-summary')), /대화 예비 모델: 사용 안 함/)
   await h.click('model-section-save'); await h.flush()
   // Copying the models changes other's main model, which the spare models are checked against: they
@@ -510,7 +512,7 @@ test('the whole-page save carries the spare models once, to the model targets', 
     ? { plan_id: 'combined-plan', changes: [{ profile: 'claire', field: 'native_fallback', before: 'off', after: 'on' }], warnings: [] }
     : { status: 'applied', revision: 13 })
   draftSpares(h)
-  h.check('model-target-other', true)
+  h.check('model-target-other', true); h.check('model-copy-all', true)
   assert.match(text(h.byId('draft-reference-summary')), /대화 예비 모델 적용 2개 \(claire, other\)/)
   globalButton(h, '저장')
   await h.flush()
@@ -571,7 +573,7 @@ test('a spare-model save cannot apply after the source changes; unsupported or r
   assert.equal(selectNode(readonly, 'native-fallback-mode').props.disabled, true)
   assert.equal(readonly.byId('native-chain-0-model').props.disabled, true)
   assert.equal(readonly.byId('native-chain-0-up').props.disabled, true)
-  readonly.click('model-target-all')
+  readonly.click('model-target-all'); readonly.check('model-copy-all', true)
   assert.match(text(readonly.byId('model-section-fallback-skipped')), /default, claire, other/)
   readonly.click('model-section-save')
   await readonly.flush()
@@ -584,7 +586,7 @@ test('without confirmed fallback capabilities a hand-picked copy sends only the 
   delete data.fallback_capabilities
   const h = harness(data)
   assert.throws(() => h.byId('model-section-fallback-skipped'), 'nothing is copied yet')
-  h.click('model-target-all')
+  h.click('model-target-all'); h.check('model-copy-all', true)
   assert.match(text(h.byId('model-section-fallback-skipped')), /대화 예비 모델을 적용하지 않는 프로필: default, claire, other/)
   assert.match(text(h.byId('model-section-write-other')), /other: 대화 모델 저장 · 대화 예비 모델은 그대로 둠\(이 연결에서는 대화 예비 모델을 안전하게 바꿀 수 있는지 확인되지 않았습니다\.\)/)
   await h.click('model-section-save'); await h.flush()
@@ -658,7 +660,7 @@ test('a spare that differs from the new main model only in case is blocked befor
   // checked against that projected model, not its stored one.
   const g = harness()
   draftSpares(g, [{ provider: 'PRIMARY', model: 'Other-Main' }])
-  g.check('model-target-other', true)
+  g.check('model-target-other', true); g.check('model-copy-all', true)
   assert.equal(g.byId('model-section-save').props.disabled, false, 'other will have claire-main, not other-main')
   assert.match(text(g.byId('model-section-write-other')), /other: 대화 모델, 대화 예비 모델\(1개 사용\) 저장/)
   edit(g, 'model-main-model', 'other-main')
@@ -904,7 +906,7 @@ test('a saved spare-model copy is not repeated on a later model-only save', asyn
   h.setResponder(operation => ['preview', 'fallback-preview'].includes(operation)
     ? { plan_id: 'copy-plan', changes: [{ profile: 'other', field: 'native_fallback', before: null, after: { enabled: false, chain: [] } }], warnings: [] }
     : { status: 'applied', revision: 13 })
-  h.check('model-target-other', true)
+  h.check('model-target-other', true); h.check('model-copy-all', true)
   await h.click('model-section-save')
   await h.flush()
   assert.deepEqual(lastFallback(h).body.updates.map(update => update.profile), ['claire', 'other'])
@@ -924,8 +926,8 @@ test('a saved spare-model copy is not repeated on a later model-only save', asyn
   await h.flush()
   assert.equal(lastPreview(h).body.save_scope, 'models')
   assert.equal(h.calls.filter(c => c.operation === 'fallback-preview').length, before, 'no spare-model copy is replayed')
-  // A new explicit target action does create a new one-time copy intent.
-  h.check('model-target-other', false)
+  // A new explicit copy-all choice does create a new one-time copy intent.
+  h.check('model-target-other', false); h.check('model-copy-all', true)
   await h.click('model-section-save')
   await h.flush()
   assert.deepEqual(lastFallback(h).body.updates.map(update => update.profile), ['claire'])

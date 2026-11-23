@@ -141,6 +141,8 @@ test('individual timeout section handler sends all three unchanged schema-2 valu
   ], [2, 15, 120])
   h.click('timeout-target-none')
   h.check('timeout-target-other', true)
+  assert.equal(h.byId('timeouts-save').props.disabled, true, 'v0.15.0: nothing changed and no copy-all')
+  h.check('timeout-copy-all', true)
   await h.click('timeouts-save')
   await h.flush()
   const body = preview(h).body
