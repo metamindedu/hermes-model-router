@@ -2,6 +2,10 @@
 
 Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. Native work uses `delegate_task`; historical routed-process starts remain retired. A separate explicitly opt-in `profile_task` path attaches to Gateway-owned target sessions, not a private agent executor. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
+## Each composer shows its own chat's status line (0.15.1)
+
+In a split view the primary pane's composer can now keep the status line for its own conversation while a split tile holds focus, instead of hiding it. The host publishes no owner for an unfocused primary, and the active socket is not proof of one, so the plugin uses an owner proof. The proof is the owner the host itself reported while that exact conversation was the focused primary, for example after you select it in the sidebar. The proof ends when the primary changes conversation, the host withdraws the owner, or the connection resets. A primary that is still focused records it again. It is used only when the proven owner equals the live connection and profile. Without a proof the primary line stays hidden and nothing is read. The focused tile keeps its own line. An unfocused tile stays hidden unless it shows the primary's own conversation. Job controls on a primary line appear once that conversation is focused.
+
 ## Section saves send only changed values (0.15.0)
 
 Each save on the settings page writes only the values you changed; every selected profile keeps each value you did not change. Picking save targets by hand no longer copies the loaded profile's whole settings. To copy them as before, tick **현재 설정 전체 복사** in that section's target list (model, time limits, profile delegation; the whole-page save follows the same checkboxes). The checkbox starts unticked and resets after a successful save, a reload, a profile switch or any change to that section's target list. Each target's summary line names exactly which slots, spare-model slots, time limits or allow-list changes it receives, and which it keeps.

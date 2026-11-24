@@ -230,3 +230,83 @@ test('actual native canonical client/channel sends only observer reads on its al
     await new Promise(resolve=>server.close(resolve))
   }
 })
+// Split view: primary runtime 'parent' (stored 'parent-stored'); a tile 'tile-runtime' later takes focus.
+function withPrimaryProof(f,{owner={connectionId:'local',profile:'claire'}}={}){
+  f.state.focusedStoredSessionId=f.state.focusedStoredSessionId||atom('parent-stored')
+  f.state.focusedStoredSessionId.set('parent-stored');f.state.focusedSessionOwner.set(owner)
+  const noted=f.observer.notePrimary({runtime:'parent',stored:'parent-stored'})
+  f.state.focusedStoredSessionId.set('tile-stored');f.state.focusedSessionId.set('tile-runtime')
+  f.state.focusedSessionOwner.set({connectionId:'local',profile:'claire'})
+  return noted
+}
+function proofFixture(){const f=fixture();f.state.focusedStoredSessionId=atom('parent-stored');f.close();f.observer=api().createActiveExecutionObserver(f.host,f.sdk);f.close=()=>f.observer.dispose();return f}
+test('primary own-session read needs the host-reported owner proof, never the ambient socket', async()=>{
+  // No proof: a tile holds focus from the start, so the primary is never admitted.
+  const none=proofFixture()
+  try{none.state.focusedStoredSessionId.set('tile-stored');none.state.focusedSessionId.set('tile-runtime')
+    assert.equal(none.observer.primaryScope(),null);assert.equal(none.observer.eligible(scope()),false);await assert.rejects(none.observer.read(scope()));assert.equal(none.calls.length,0)
+  }finally{none.close()}
+  const f=proofFixture()
+  try{
+    assert.equal(withPrimaryProof(f),true)
+    assert.deepEqual(f.observer.primaryScope(),scope())
+    assert.equal(f.observer.eligible(scope()),true)
+    const result=await f.observer.read(scope());assert.equal(result.rows[0].status,'completed');assert.equal(f.observer.accepts(scope(),result),true)
+    assert.ok(f.calls.every(call=>call.params.session_id==='parent' && call.params.profile==='claire'))
+    assert.equal(f.observer.eligible({...scope(),sessionId:'some-other-tile'}),false,'an unfocused non-primary session is never admitted')
+    assert.deepEqual(f.prohibited,[])
+  }finally{f.close()}
+})
+test('primary proof refusals use the proven labels: other owner, unresolved owner, navigation, transport reset', async()=>{
+  // Owner proven as another profile (all-profiles navigation): the active claire socket never reads it.
+  const other=proofFixture()
+  try{assert.equal(withPrimaryProof(other,{owner:{connectionId:'local',profile:'wallace'}}),true)
+    const proven={...scope(),profile:'wallace'};assert.deepEqual(other.observer.primaryScope(),proven)
+    assert.equal(other.observer.eligible(proven),false);assert.equal(other.observer.eligible(scope()),false);await assert.rejects(other.observer.read(proven));assert.equal(other.calls.length,0)
+  }finally{other.close()}
+  const remote=proofFixture()
+  try{assert.equal(withPrimaryProof(remote,{owner:{connectionId:'remote',profile:'claire'}}),true)
+    const proven={...scope(),connectionId:'remote'};assert.equal(remote.observer.eligible(proven),false);assert.equal(remote.observer.eligible(scope()),false);assert.equal(remote.calls.length,0)
+  }finally{remote.close()}
+  const unresolved=proofFixture()
+  try{assert.equal(withPrimaryProof(unresolved,{owner:null}),false);assert.equal(unresolved.observer.primaryScope(),null);assert.equal(unresolved.observer.eligible(scope()),false)}finally{unresolved.close()}
+  for(const change of [f=>{f.state.activeSessionId.set('navigated');f.state.activeSessionId.set('parent')},f=>f.nextEpoch(),
+    f=>{f.transportState('closed');f.transportState('open')},f=>{f.gateway={...f.gateway}}]) {
+    const g=proofFixture()
+    try{withPrimaryProof(g);assert.equal(g.observer.eligible(scope()),true);change(g)
+      assert.equal(g.observer.primaryScope(),null,'proof dropped');assert.equal(g.observer.eligible(scope()),false);await assert.rejects(g.observer.read(scope()))
+    }finally{g.close()}
+  }
+  // A note while ANOTHER chat is focused (tile owner unresolved) never withdraws the primary's proof.
+  const tileUnresolved=proofFixture()
+  try{withPrimaryProof(tileUnresolved);tileUnresolved.state.focusedSessionOwner.set(null)
+    assert.equal(tileUnresolved.observer.notePrimary({runtime:'parent',stored:'parent-stored'}),false)
+    assert.equal(tileUnresolved.observer.notePrimary({runtime:'foreign',stored:'foreign-stored'}),false)
+    tileUnresolved.state.focusedSessionOwner.set({connectionId:'local',profile:'claire'})
+    assert.deepEqual(tileUnresolved.observer.primaryScope(),scope(),'proof kept')
+  }finally{tileUnresolved.close()}
+  // notePrimary settles an unobserved transport change before answering.
+  const silent=proofFixture()
+  try{silent.state.focusedStoredSessionId.set('parent-stored')
+    silent.nextEpoch()
+    assert.equal(silent.observer.notePrimary({runtime:'parent',stored:'parent-stored'}),true)
+    silent.state.focusedStoredSessionId.set('tile-stored');silent.state.focusedSessionId.set('tile-runtime')
+    assert.deepEqual(silent.observer.primaryScope(),scope(),'a true return leaves a usable proof')
+  }finally{silent.close()}
+  const focused=proofFixture()
+  try{withPrimaryProof(focused);focused.state.focusedSessionId.set('parent');focused.state.focusedStoredSessionId.set('parent-stored')
+    focused.state.focusedSessionOwner.set(null);assert.equal(focused.observer.eligible(scope()),false,'primary focused with unresolved owner still fails closed')
+  }finally{focused.close()}
+})
+test('primary A-B-A and focus moves invalidate an in-flight primary read', async()=>{
+  for(const move of [f=>{f.state.activeSessionId.set('other-primary');f.state.activeSessionId.set('parent')},
+    f=>{f.state.focusedSessionId.set('other-tile');f.state.focusedSessionId.set('tile-runtime')}]) {
+    const f=proofFixture(),serve=f.serve;let release
+    f.serve=(method,params,signal)=>method==='plugin.model-router.execution.list'?new Promise(resolve=>{release=()=>resolve(serve(method,params,signal))}):serve(method,params,signal)
+    try{
+      withPrimaryProof(f);const pending=f.observer.read(scope());await tick();assert.ok(release)
+      move(f);assert.ok(f.calls.every(call=>call.signal.aborted));release()
+      await assert.rejects(pending,/scope_changed/)
+    }finally{f.close()}
+  }
+})

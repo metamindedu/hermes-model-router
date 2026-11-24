@@ -16,7 +16,7 @@ function load(overrides = {}) {
     useState: value => [value, () => {}], useRef: value => ({ current: value }), useEffect: effect => effects.push(effect),
     useQuery: options => { queryOptions = options; return query }, useValue: atom => atom.get(), ...overrides })
   const code = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '').replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '').replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-  const api = new Function(...Object.keys(params), code + '\nreturn {executionTokenText,executionTokenTotal,executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,executionSpare,composerStripVisible,pluginDefinition}')( ...Object.values(params))
+  const api = new Function(...Object.keys(params), code + '\nreturn {executionTokenText,executionTokenTotal,executionId,executionScopeKey,executionScopeFromState,selectExecutionRoute,executionIdentity,executionLabel,mergeExecutionRows,projectExecutionReplay,createExecutionReplayStore,createActiveExecutionObserver,overlayExecutionReplay,readExecutionSnapshot,ExecutionRow,ExecutionPanel,ExecutionStrip,ExecutionLine,sortExecutionRows,profileJobExecutionRow,normalizeProfileJobs,executionSpare,composerStripVisible,composerStripMode:typeof composerStripMode==="function"?composerStripMode:undefined,executionPrimaryProof:typeof executionPrimaryProof==="function"?executionPrimaryProof:undefined,executionPrimaryScope:typeof executionPrimaryScope==="function"?executionPrimaryScope:undefined,executionPrimaryBindingLive:typeof executionPrimaryBindingLive==="function"?executionPrimaryBindingLive:undefined,pluginDefinition}')( ...Object.values(params))
   // Leaf rendering/invalidation fixture. Actual observer transport/fences are
   // exercised separately in test_active_execution_observer.mjs.
   const observer = { cacheId: 'leaf-fixture', revisionAtom: { get: () => 1 }, eligible: selected => Boolean(api.executionScopeKey(selected)),
@@ -251,6 +251,48 @@ test('the composer strip gates on the public SDK session identity, not host mark
   // Ids are compared by value, never parsed as markup or put into a selector.
   assert.equal(api.composerStripVisible('x"]\n', 'x"]\n'), true)
   assert.equal(api.composerStripVisible('tile:A', 'A'), false, 'a raw tile target is not a stored session id')
+})
+test('composer strip mode: focused chat, primary own session while a tile is focused, otherwise hidden', () => {
+  const api = load()
+  // Focused chat (any composer whose stored id matches focus).
+  assert.equal(api.composerStripMode({ sessionId: 'rb', storedSessionId: 'B' }, 'B', 'rb', 'rp'), 'focused')
+  // Primary composer while a split tile holds focus: its own session.
+  assert.equal(api.composerStripMode({ sessionId: 'rp', storedSessionId: 'P' }, 'B', 'rb', 'rp'), 'primary')
+  // Unfocused tile, primary focused with a stored mismatch, unknown focus runtime, bare string, draft.
+  assert.equal(api.composerStripMode({ sessionId: 'rc', storedSessionId: 'C' }, 'B', 'rb', 'rp'), null)
+  assert.equal(api.composerStripMode({ sessionId: 'rp', storedSessionId: 'P' }, 'B', 'rp', 'rp'), null)
+  assert.equal(api.composerStripMode({ sessionId: 'rp', storedSessionId: 'P' }, 'B', null, 'rp'), null)
+  assert.equal(api.composerStripMode('rp', 'B', 'rb', 'rp'), null)
+  assert.equal(api.composerStripMode({ sessionId: null, storedSessionId: null }, 'B', 'rb', 'rp'), null)
+  assert.equal(api.composerStripMode(null, 'B', 'rb', 'rp'), null)
+  assert.equal(api.composerStripMode({ sessionId: 'rp', storedSessionId: 'P' }, 'B', 'rb', null), null)
+})
+
+test('primary owner proof comes only from the host focused-owner projection of that exact session', () => {
+  const api = load()
+  const atom = value => ({ get: () => value, listen: () => () => {} })
+  const state = ({ focused = 'rp', focusedStored = 'P', active = 'rp', owner = { connectionId: 'local', profile: 'claire' } } = {}) =>
+    ({ focusedSessionId: atom(focused), focusedStoredSessionId: atom(focusedStored), activeSessionId: atom(active), focusedSessionOwner: atom(owner),
+      profile: atom('ambient-profile'), connectionId: atom('ambient-connection') })
+  const binding = { runtime: 'rp', stored: 'P' }
+  assert.deepEqual(api.executionPrimaryProof(state(), binding), { runtime: 'rp', stored: 'P', connectionId: 'local', profile: 'claire' })
+  // The ambient profile/connection never supply the owner.
+  assert.equal(api.executionPrimaryProof(state({ owner: null }), binding), null, 'unresolved focused owner → no proof')
+  assert.equal(api.executionPrimaryProof(state({ focused: 'rb' }), binding), null, 'primary not focused → no proof')
+  assert.equal(api.executionPrimaryProof(state({ focusedStored: 'B' }), binding), null, 'navigation transient: focus already names another stored chat')
+  assert.equal(api.executionPrimaryProof(state({ active: 'rx', focused: 'rx' }), binding), null, 'binding is not the primary runtime')
+  assert.equal(api.executionPrimaryProof(state({ active: 'rx' }), binding), null, 'focused runtime is the binding but the primary runtime is not')
+  assert.equal(api.executionPrimaryBindingLive(state({ owner: null }), binding), true, 'binding stays live while the owner is unresolved')
+  assert.equal(api.executionPrimaryBindingLive(state({ focusedStored: 'B' }), binding), false)
+  assert.equal(api.executionPrimaryProof(state(), { runtime: 'rp' }), null)
+  assert.equal(api.executionPrimaryProof(state(), null), null)
+  const proof = api.executionPrimaryProof(state(), binding)
+  // The scope exists only while another chat holds focus and the primary runtime is unchanged.
+  assert.deepEqual(api.executionPrimaryScope(state({ focused: 'rb', focusedStored: 'B' }), proof), { connectionId: 'local', profile: 'claire', sessionId: 'rp' })
+  assert.equal(api.executionPrimaryScope(state(), proof), null, 'primary focused → the focused owner governs')
+  assert.equal(api.executionPrimaryScope(state({ focused: null }), proof), null)
+  assert.equal(api.executionPrimaryScope(state({ focused: 'rb', active: 'rn' }), proof), null, 'primary navigated → old proof is void')
+  assert.equal(api.executionPrimaryScope(state({ focused: 'rb' }), null), null, 'no proof → no scope')
 })
 
 test('full-profile job controls and the profile-job guide stay reachable from the composer strip', () => {

@@ -5736,10 +5736,14 @@ export function createActiveExecutionObserver(transport, sdk = {}) {
   const revisionAtom = typeof sdk.atom === 'function' ? sdk.atom(0) : { get: () => 0 }
   const stateKeys = ['focusedSessionOwner', 'focusedSessionId', 'connectionId', 'profile', 'gateway']
   const atoms = stateKeys.map(name => transport?.state?.[name])
+  // Optional: only the primary composer's own-session read needs it; without it that read stays ineligible.
+  const primaryAtom = typeof transport?.state?.activeSessionId?.listen === 'function' ? transport.state.activeSessionId : null
   const supported = typeof transport?.getGateway === 'function' && typeof sdk.gatewayActivationEpoch === 'function' &&
     executionReplayId(cacheId) && typeof queryClient?.cancelQueries === 'function' && typeof queryClient?.removeQueries === 'function' &&
     typeof revisionAtom.set === 'function' && atoms.every(atom => typeof atom?.get === 'function' && typeof atom.listen === 'function')
   let disposed = false, cacheHealthy = true, generation = 0, previous = null, gateway = null, removeGatewayState = null
+  // Owner proof for the primary composer's own chat (see executionPrimaryProof); one at a time.
+  let primaryProof = null
   const retireQueries = all => {
     if (!supported) return
     const predicate = query => {
@@ -5759,19 +5763,22 @@ export function createActiveExecutionObserver(transport, sdk = {}) {
       const scope = executionScopeFromState(transport.state)
       const activeConnection = transport.state.connectionId.get(), activeProfile = transport.state.profile.get()
       const hostState = transport.state.gateway.get(), epoch = sdk.gatewayActivationEpoch(), instance = transport.getGateway()
-      return { scope, activeConnection, activeProfile, hostState, epoch, instance,
-        signature: JSON.stringify([executionScopeKey(scope), activeConnection, activeProfile, hostState, epoch, instance?.connectionState, instance?.sessionWire]) }
+      const primary = primaryAtom && primaryProof && primaryProof.epoch === epoch && primaryProof.instance === instance
+        ? executionPrimaryScope(transport.state, primaryProof) : null
+      return { scope, primary, activeConnection, activeProfile, hostState, epoch, instance,
+        signature: JSON.stringify([executionScopeKey(scope), executionScopeKey(primary), activeConnection, activeProfile, hostState, epoch, instance?.connectionState, instance?.sessionWire]) }
     } catch { return null }
   }
   const invalidate = (reset = false) => {
     generation++
     for (const item of pending.values()) item.abort.abort()
     pending.clear()
-    if (reset) store.clear()
+    if (reset) { store.clear(); primaryProof = null }
     retireQueries(disposed)
     if (typeof revisionAtom.set === 'function') revisionAtom.set(generation)
   }
   const observe = () => {
+    if (primaryProof && primaryAtom?.get?.() !== primaryProof.runtime) primaryProof = null
     const next = readState(), instance = next?.instance || null
     if (next?.signature === previous?.signature && instance === gateway) return
     const transportChanged = gateway !== instance || next?.epoch !== previous?.epoch || next?.hostState !== previous?.hostState ||
@@ -5790,12 +5797,14 @@ export function createActiveExecutionObserver(transport, sdk = {}) {
   }
   if (supported) {
     for (const atom of atoms) subscriptions.push(atom.listen(observe))
+    if (primaryAtom) subscriptions.push(primaryAtom.listen(observe))
     observe()
   }
   const capture = scope => {
     observe()
     const current = readState(), key = executionScopeKey(scope), instance = current?.instance
-    if (!cacheHealthy || !current || !key || key !== executionScopeKey(current.scope) ||
+    // The focused chat, or the primary pane's own session while a tile holds focus; nothing else.
+    if (!cacheHealthy || !current || !key || (key !== executionScopeKey(current.scope) && key !== executionScopeKey(current.primary)) ||
         current.activeConnection !== scope.connectionId || current.activeProfile !== scope.profile || current.hostState !== 'open' ||
         !Number.isSafeInteger(current.epoch) || current.epoch < 0 || instance?.connectionState !== 'open' ||
         instance?.sessionWire !== 'canonical' || typeof instance.request !== 'function' || typeof instance.onState !== 'function') throw new Error('passive_origin_unavailable')
@@ -5888,6 +5897,25 @@ export function createActiveExecutionObserver(transport, sdk = {}) {
       } catch { return false }
     },
     eligible(scope) { try { capture(scope); return true } catch { return false } },
+    // Record the primary composer's owner proof. Only the host's live focused-owner projection
+    // supplies the owner; the composer supplies its own runtime-to-stored binding.
+    notePrimary(binding) {
+      if (!supported || disposed || !primaryAtom) return false
+      // Settle any unobserved transport change first, so the result reflects the proof that remains.
+      observe()
+      const live = readState(), proof = executionPrimaryProof(transport.state, binding)
+      // The host now shows this exact primary focused but no longer resolves its owner: the old proof
+      // is withdrawn with it, so a later tile focus cannot read under a retracted owner.
+      if (!proof && primaryProof && executionPrimaryBindingLive(transport.state, binding)) { primaryProof = null; observe() }
+      if (!live || !proof || live.hostState !== 'open' || live.instance?.connectionState !== 'open') return false
+      const same = primaryProof && primaryProof.runtime === proof.runtime && primaryProof.stored === proof.stored &&
+        primaryProof.connectionId === proof.connectionId && primaryProof.profile === proof.profile &&
+        primaryProof.epoch === live.epoch && primaryProof.instance === live.instance
+      if (!same) { primaryProof = { ...proof, epoch: live.epoch, instance: live.instance }; observe() }
+      return true
+    },
+    // The primary composer's own scope under a live proof, else null.
+    primaryScope() { const live = readState(); return live?.primary ? { ...live.primary } : null },
     generation() { observe(); return generation },
     current(scope, value) { try { return capture(scope).generation === value } catch { return false } },
     read(scope) { return run('snapshot', scope) },
@@ -5935,18 +5963,53 @@ export function executionScopeFromState(state) {
   }
   return { connectionId: state?.connectionId?.get?.(), profile: state?.profile?.get?.(), sessionId: state?.activeSessionId?.get?.() }
 }
+// While a split tile holds focus the host publishes no owner for the primary pane's chat, and the
+// active socket is not proof of one (all-profiles navigation dials the owner without moving the
+// active profile). So the primary composer reads its own chat only with an owner proof: the owner
+// the host's own focused-owner projection reported while this exact runtime and stored session was
+// the focused primary. The observer drops the proof when activeSessionId changes, the transport
+// resets or the host withdraws that owner, and still requires the proven owner to equal the live
+// connection and profile.
+// True while the host shows exactly this runtime and stored session as the focused primary.
+export function executionPrimaryBindingLive(state, binding) {
+  try {
+    const runtime = binding?.runtime, stored = binding?.stored
+    return executionId(runtime) && executionId(stored) && state?.activeSessionId?.get?.() === runtime &&
+      state?.focusedSessionId?.get?.() === runtime && state?.focusedStoredSessionId?.get?.() === stored
+  } catch { return false }
+}
+export function executionPrimaryProof(state, binding) {
+  try {
+    if (!executionPrimaryBindingLive(state, binding)) return null
+    const runtime = binding.runtime, stored = binding.stored
+    const owner = state?.focusedSessionOwner?.get?.()
+    if (!executionId(owner?.connectionId) || !executionId(owner?.profile)) return null
+    return { runtime, stored, connectionId: owner.connectionId, profile: owner.profile }
+  } catch { return null }
+}
+export function executionPrimaryScope(state, proof) {
+  try {
+    const sessionId = state?.activeSessionId?.get?.(), focused = state?.focusedSessionId?.get?.()
+    if (!proof || !executionId(sessionId) || proof.runtime !== sessionId || !executionId(focused) || focused === sessionId) return null
+    const scope = { connectionId: proof.connectionId, profile: proof.profile, sessionId }
+    return executionScopeKey(scope) ? scope : null
+  } catch { return null }
+}
 function currentExecutionScope() { return executionScopeFromState(host.state) }
-function useExecutionSnapshot(observer) {
+function useExecutionSnapshot(observer, scopeMode = 'focused') {
   const owner = useValue(host.state?.focusedSessionOwner || EXECUTION_EMPTY_ATOM)
   const focusedId = useValue(host.state?.focusedSessionId || EXECUTION_EMPTY_ATOM)
   const connectionId = useValue(host.state?.connectionId || EXECUTION_EMPTY_ATOM)
   const profile = useValue(host.state?.profile || EXECUTION_EMPTY_ATOM)
   const sessionId = useValue(host.state?.activeSessionId || EXECUTION_EMPTY_ATOM)
   const gateway = useValue(host.state?.gateway || EXECUTION_EMPTY_ATOM)
-  const scope = host.state?.focusedSessionOwner && host.state?.focusedSessionId
-    ? { connectionId: owner?.connectionId, profile: owner?.profile, sessionId: focusedId } : { connectionId, profile, sessionId }
-  const key = executionScopeKey(scope)
   const observationGeneration = useValue(observer?.revisionAtom || EXECUTION_EMPTY_ATOM)
+  // 'primary': the primary composer's own chat under its owner proof; without one there is no scope
+  // (hidden, no reads). Re-derived on every focus/session/revision change this hook subscribes to.
+  const scope = scopeMode === 'primary' ? (observer?.primaryScope?.() || null)
+    : host.state?.focusedSessionOwner && host.state?.focusedSessionId
+      ? { connectionId: owner?.connectionId, profile: owner?.profile, sessionId: focusedId } : { connectionId, profile, sessionId }
+  const key = executionScopeKey(scope)
   const eligible = Boolean(key && observer?.eligible(scope))
   const query = useQuery({ queryKey: ['model-router', 'execution-active', observer?.cacheId, key, observationGeneration],
     queryFn: () => observer.read(scope),
@@ -6135,7 +6198,7 @@ function LazySection({ label, render }) {
   return jsxs('details', { style: { padding: '0.35rem 0.15rem' }, onToggle: event => setOpen(Boolean(event.currentTarget?.open)), children: [
     jsx('summary', { style: { cursor: 'pointer' }, children: label }), open ? render() : null] })
 }
-export function ExecutionStrip({ rows, unavailable, jobControls = null, jobsPanel = null, defaultOpen = false }) {
+export function ExecutionStrip({ rows, unavailable, jobControls = null, jobsPanel = null, jobNote = null, defaultOpen = false }) {
   const sorted = sortExecutionRows(rows)
   const active = sorted.filter(row => EXECUTION_ACTIVE.has(row.status))
   const count = set => sorted.filter(row => set.has(row.status)).length
@@ -6157,6 +6220,8 @@ export function ExecutionStrip({ rows, unavailable, jobControls = null, jobsPane
     ] }),
     jsxs('div', { style: stripStyles.list, children: [
       ...sorted.map(row => jsx(ExecutionLine, { row, controls: row.execution_mode === 'gateway' && row.job && jobControls ? jobControls(row) : null }, row.id)),
+      // One note for the whole strip when job controls live elsewhere, never one per job line.
+      ...(jobNote && sorted.some(row => row.execution_mode === 'gateway' && row.job) ? [jsx('p', { style: styles.hint, role: 'note', 'data-model-router-job-note': '1', children: jobNote }, 'job-note')] : []),
       // A hidden guide must not keep its policy query alive: mount it only while the strip is open.
       open && jobsPanel ? jsx(LazySection, { label: '전체 프로필 작업 · 허용 범위와 운영자 안내', render: jobsPanel }, 'profile-jobs') : null
     ] })
@@ -6177,18 +6242,50 @@ function composerSessionStoredId(session) {
   const id = session?.storedSessionId
   return typeof id === 'string' && id ? id : null
 }
-function SdkComposerFocusGate({ children }) {
+function composerSessionRuntimeId(session) {
+  // A bare string is a stored id, never a runtime id.
+  const id = typeof session === 'object' && session ? session.sessionId : null
+  return executionId(id) ? id : null
+}
+// Which session this composer's strip reads: 'focused' (the focused chat, as before), 'primary' (the
+// primary pane's composer while a split tile holds focus: its own session, never the tile's), or null
+// (hidden: an unfocused tile, a draft, or an unknown session). Each composer shows only its own chat.
+export function composerStripMode(session, focusedStoredId, focusedRuntimeId, primaryRuntimeId) {
+  if (composerStripVisible(composerSessionStoredId(session), focusedStoredId)) return 'focused'
+  const runtime = composerSessionRuntimeId(session)
+  return runtime && executionId(primaryRuntimeId) && runtime === primaryRuntimeId &&
+    executionId(focusedRuntimeId) && focusedRuntimeId !== primaryRuntimeId ? 'primary' : null
+}
+function SdkComposerFocusGate({ children, observer = null }) {
   const focusedStored = useValue(host.state?.focusedStoredSessionId || EXECUTION_EMPTY_ATOM)
+  const focusedRuntime = useValue(host.state?.focusedSessionId || EXECUTION_EMPTY_ATOM)
+  const primaryRuntime = useValue(host.state?.activeSessionId || EXECUTION_EMPTY_ATOM)
+  const focusedOwner = useValue(host.state?.focusedSessionOwner || EXECUTION_EMPTY_ATOM)
   const session = DesktopSDK.useComposerSession()
-  const visible = composerStripVisible(composerSessionStoredId(session), focusedStored)
-  return jsx('div', { style: { display: 'contents' }, 'data-model-router-focus-gate': visible ? 'shown' : 'hidden', children: visible ? children() : null })
+  const mode = composerStripMode(session, focusedStored, focusedRuntime, primaryRuntime)
+  const runtime = composerSessionRuntimeId(session), stored = composerSessionStoredId(session)
+  const ownerKey = focusedOwner ? JSON.stringify([focusedOwner.connectionId, focusedOwner.profile]) : null
+  // The focused primary composer leaves its owner proof for later, while a tile holds focus. ownerKey and
+  // focusedStored overlap with mode and the revision listener on purpose: re-noting is idempotent,
+  // missing one is not.
+  useEffect(() => {
+    if (!(mode === 'focused' && runtime && runtime === primaryRuntime && runtime === focusedRuntime && typeof observer?.notePrimary === 'function')) return
+    let live = true
+    const note = () => { if (live) observer.notePrimary({ runtime, stored }) }
+    note()
+    // A transport reset or activation change voids the proof without moving any id. Re-note on each
+    // observer revision, deferred so it never runs inside another component's render.
+    const off = typeof observer.revisionAtom?.listen === 'function' ? observer.revisionAtom.listen(() => queueMicrotask(note)) : null
+    return () => { live = false; if (typeof off === 'function') off() }
+  }, [mode, runtime, stored, primaryRuntime, focusedRuntime, focusedStored, ownerKey, observer])
+  return jsx('div', { style: { display: 'contents' }, 'data-model-router-focus-gate': mode ? 'shown' : 'hidden', children: mode ? children(mode) : null })
 }
 function AlwaysShowFocusGate({ children }) {
-  return jsx('div', { style: { display: 'contents' }, 'data-model-router-focus-gate': 'shown', children: children() })
+  return jsx('div', { style: { display: 'contents' }, 'data-model-router-focus-gate': 'shown', children: children('focused') })
 }
 export const ComposerFocusGate = (typeof DesktopSDK !== 'undefined' && typeof DesktopSDK.useComposerSession === 'function') ? SdkComposerFocusGate : AlwaysShowFocusGate
-export function ExecutionPanel({ compact = false, ctx, observer } = {}) {
-  const { scope, key, query, data } = useExecutionSnapshot(observer)
+export function ExecutionPanel({ compact = false, ctx, observer, scopeMode = 'focused' } = {}) {
+  const { scope, key, query, data } = useExecutionSnapshot(observer, scopeMode)
   const fence = useExecutionFence()
   const [filter, setFilter] = useState('all')
   const rows = (data?.rows || []).filter(row => filter === 'all' || (row.observed?.evidence === 'runtime_reported' ? row.observed : row.requested)?.kind === filter)
@@ -6203,8 +6300,12 @@ export function ExecutionPanel({ compact = false, ctx, observer } = {}) {
   if (compact) return !key || data?.reason === 'passive_origin_unavailable' || (query.isPending && !data) ? null :
     jsx(ExecutionStrip, { rows: data?.rows || [], unavailable: query.isError || data?.available === false,
       // Gateway profile-job controls lived in the removed pane; they now open from the job's own line.
-      jobControls: row => jsx(ProfileJobControls, { job: row.job, scope, storage: ctx?.storage, fence, refresh: () => query.refetch() }, `${key}:${row.id}`),
-      jobsPanel: () => jsx(ProfileJobsPanel, { ctx, scope, observer, executionData: data, refreshExecutions: () => query.refetch() }, key) })
+      // Their fence follows the focused chat, so a primary-mode strip (a tile holds focus) explains
+      // where they are instead of showing buttons that would refuse silently.
+      jobControls: scopeMode === 'primary' ? null
+        : row => jsx(ProfileJobControls, { job: row.job, scope, storage: ctx?.storage, fence, refresh: () => query.refetch() }, `${key}:${row.id}`),
+      jobNote: scopeMode === 'primary' ? '작업 제어는 이 대화를 포커스하면 사용할 수 있습니다.' : null,
+      jobsPanel: scopeMode === 'primary' ? null : () => jsx(ProfileJobsPanel, { ctx, scope, observer, executionData: data, refreshExecutions: () => query.refetch() }, key) })
   return jsxs('section', { style: executionStyles.panel, 'data-model-router-execution': 'panel', 'aria-label': '모델 라우터 실행 현황', children: [
     jsxs('header', { style: styles.sectionHeading, children: [jsx('h2', { style: styles.heading, children: '실행 현황' }),
       jsx(Button, { size: 'sm', variant: 'ghost', disabled: !key || query.isFetching, onClick: () => query.refetch(), children: '새로고침' })] }),
@@ -6501,7 +6602,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.15.0',
+  version: '0.15.1',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
@@ -6531,7 +6632,7 @@ export default {
     if (typeof host.state?.activeSessionId?.get === 'function') {
       ctx.registerMany([
         // No layout pane: the host disables a single-pane plugin as a whole when that pane is closed.
-        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ComposerFocusGate, { children: () => jsx(ExecutionPanel, { compact: true, ctx, observer: executionObserver }) }) }
+        { id: 'execution-composer', area: DesktopSDK.COMPOSER_AREAS?.top || 'composer.top', order: 40, render: () => jsx(ComposerFocusGate, { observer: executionObserver, children: scopeMode => jsx(ExecutionPanel, { compact: true, ctx, observer: executionObserver, scopeMode }) }) }
       ])
     }
     ctx.registerMany([
