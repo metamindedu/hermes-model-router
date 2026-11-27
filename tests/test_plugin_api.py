@@ -113,9 +113,13 @@ def plugin(monkeypatch):
     # This fixture isolates legacy root registration; the new adapters' real
     # registration/authority/inertness is exercised by their own native tests.
     for feature, registrar, key in [('execution_roster', 'register_execution_roster', 'roster_homes'),
-                                     ('profile_jobs', 'register_profile_jobs', 'profile_job_homes')]:
+                                     ('profile_jobs', 'register_profile_jobs', 'profile_job_homes'),
+                                     ('advise_guard', 'register_advise_guard', 'advise_homes')]:
         child = ModuleType(package.__name__ + '.' + feature)
-        setattr(child, registrar, lambda ctx, home, _key=key: state.setdefault(_key, []).append(str(home)))
+        def registrar_fn(ctx, home, _key=key, **kwargs):
+            state.setdefault(_key, []).append(str(home))
+            state.setdefault(_key + '_kwargs', []).append(kwargs)
+        setattr(child, registrar, registrar_fn)
         monkeypatch.setitem(sys.modules, child.__name__, child)
 
     tools, skills = [], []
@@ -129,8 +133,13 @@ def test_disabled_profile_keeps_legacy_reads_and_provider_registration(plugin):
     mod.register(ctx)
     assert skills == [] and len(tools) == 1 and tools[0]['check_fn']()
     assert state['provider_homes'] == [str(Path('C:/fake/profiles/claire'))]
-    assert state['roster_homes'] == state['profile_job_homes'] == state['provider_homes']
+    assert state['roster_homes'] == state['profile_job_homes'] == state['provider_homes'] == state['advise_homes']
     assert json.loads(tools[0]['handler']({'action': 'config'}))['enabled'] is False
+    # The advisor tool follows the profile's routing switch at check time, not at registration.
+    [advise_kwargs] = state['advise_homes_kwargs']
+    assert advise_kwargs['routing_enabled']() is False
+    state['enabled'] = True
+    assert advise_kwargs['routing_enabled']() is True
 
 
 def test_active_profile_registers_scoped_legacy_tool_and_policy(plugin):

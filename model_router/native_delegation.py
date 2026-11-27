@@ -23,7 +23,7 @@ _PROVIDER = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*\Z')
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]{1,32}\])?\Z')
 AUTO_ROUTING_SUPPORTED = True
 ROLE_INTRO_INHERITANCE_SCHEMA = 1
-from .slots import BUILTIN_SLOTS, PURPOSE_ROLES, PURPOSE_SLOTS, SLOT_TIERS
+from .slots import ADVISOR_PURPOSES, BUILTIN_SLOTS, PURPOSE_ROLES, PURPOSE_SLOTS, SLOT_TIERS, complete_slot_keys
 
 
 def _profile(value: Any) -> str:
@@ -107,7 +107,13 @@ def validate_native_policy(value: Any, profile: str, *, backend: str = 'model-ro
     by_slot = value['schema'] == 2
     keys = BUILTIN_SLOTS if by_slot else ('heavy', 'light')
     fallbacks = value['fallbacks']
-    if not isinstance(fallbacks, dict) or set(fallbacks) != set(keys):
+    if by_slot:
+        try:
+            # A block saved before a slot existed leaves that slot off.
+            fallbacks = complete_slot_keys(fallbacks, lambda _slot: {'mode': 'off', 'chain': [], 'consent': None})
+        except ValueError:
+            raise ValueError('invalid native continuation policy') from None
+    elif not isinstance(fallbacks, dict) or set(fallbacks) != set(keys):
         raise ValueError('invalid native continuation policy')
     result = {}
     for key in keys:
@@ -197,6 +203,22 @@ def _settings(config: Mapping[str, Any], name: str, default: Any) -> Any:
     return backends.get(name, default)
 
 
+def resolve_slot_route(home: Path, service: Any, slot: str) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """One slot's current route for this origin: (route, route config, origin profile). No writes."""
+    role = SLOT_TIERS[slot]
+    from agent.safe_worker_policy import worker_config_snapshot
+    if worker_config_snapshot() is not None:
+        raise ValueError('managed workers are unsupported')
+    profile = _origin(home, service)
+    route_config = service.native_route_config(profile)
+    if route_config.get('enabled') is not True:
+        raise ValueError('routing is disabled')
+    from .routing import _safe_route
+    # A config without slot routes is the pre-slot shape: the slot runs on its tier.
+    slots = route_config.get('slots')
+    return _safe_route(slots[slot] if isinstance(slots, dict) else route_config.get(role), role), route_config, profile
+
+
 def auto_execution(task: Mapping[str, Any]) -> str:
     """An explicit discriminant; never infer a profile or downgrade a Heavy purpose."""
     execution = task.get('execution')
@@ -212,6 +234,10 @@ def auto_execution(task: Mapping[str, Any]) -> str:
     return execution
 
 
+class _AdvisorOnly(Exception):
+    """advise was requested outside the ask_advisor tool."""
+
+
 if DelegationProvider is not None:
     class ModelRouterProvider(DelegationProvider):
         name = 'model-router'
@@ -223,7 +249,8 @@ if DelegationProvider is not None:
             self.service_factory = service_factory
 
         def task_parameters(self, config):
-            return {'purpose': {'type': 'string', 'enum': list(PURPOSE_ROLES), 'description': 'Required routing purpose.'},
+            return {'purpose': {'type': 'string', 'enum': list(PURPOSE_ROLES), 'description':
+                                'Required routing purpose. advise is reserved for the ask_advisor tool and is refused here.'},
                     'total_timeout_seconds': {'type': 'number', 'minimum': 0, 'description': 'Optional total running-time limit; zero disables.'}}
 
         def description(self, config) -> str:
@@ -231,23 +258,19 @@ if DelegationProvider is not None:
 
         def route_task(self, task, config):
             try:
-                slot = PURPOSE_SLOTS.get(task.get('purpose')) if isinstance(task.get('purpose'), str) else None
+                purpose = task.get('purpose')
+                slot = PURPOSE_SLOTS.get(purpose) if isinstance(purpose, str) else None
                 if slot is None:
                     raise ValueError('purpose is required')
+                if purpose in ADVISOR_PURPOSES:
+                    # Only the ask_advisor tool's own in-flight call may route here, because only
+                    # that call's child is bound to the read-only guard.
+                    from .advise_guard import advisor_call_active
+                    if not advisor_call_active(self.home, task.get('goal')):
+                        raise _AdvisorOnly()
                 # Tier only picks the runtime limit, the watchdog role and the label.
                 role = SLOT_TIERS[slot]
-                from agent.safe_worker_policy import worker_config_snapshot
-                if worker_config_snapshot() is not None:
-                    raise ValueError('managed workers are unsupported')
-                service = self.service_factory()
-                profile = _origin(self.home, service)
-                route_config = service.native_route_config(profile)
-                if route_config.get('enabled') is not True:
-                    raise ValueError('routing is disabled')
-                from .routing import _safe_route
-                # A config without slot routes is the pre-slot shape: the slot runs on its tier.
-                slots = route_config.get('slots')
-                route = _safe_route(slots[slot] if isinstance(slots, dict) else route_config.get(role), role)
+                route, route_config, profile = resolve_slot_route(self.home, self.service_factory(), slot)
                 budget = task.get('total_timeout_seconds', route_config.get(role + '_timeout_seconds'))
                 if not _timeout(budget):
                     raise ValueError('invalid total runtime')
@@ -260,6 +283,8 @@ if DelegationProvider is not None:
                     chain = slot_continuation_chain(validate_native_policy(policy, profile, backend=self.name), slot)
                 return {'provider': route['provider'], 'model': route['model'], 'reasoning_effort': route['reasoning'],
                         'label': role, 'fallback_providers': chain}
+            except _AdvisorOnly as exc:
+                raise DelegationRouteError('Model Router route refused: purpose advise runs only through the ask_advisor tool.') from exc
             except Exception as exc:
                 raise DelegationRouteError('Model Router route refused: verify origin, purpose, settings and watchdog support.') from exc
 

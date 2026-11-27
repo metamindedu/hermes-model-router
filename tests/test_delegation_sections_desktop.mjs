@@ -15,7 +15,7 @@ function api() {
 }
 const a = api()
 const off = () => ({ heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } })
-const slots = () => Object.fromEntries(['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use'].map(id => [id, { mode: 'off', chain: [] }]))
+const slots = () => Object.fromEntries(['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise'].map(id => [id, { mode: 'off', chain: [] }]))
 const dto = (name, backend, overrides = {}) => ({ schema: 1, supported: true, editable: true, backend, digest: name[0].repeat(64), auto_supported: true,
   policy: off(), auto_policy: off(), slot_policy: slots(), auto_slot_policy: slots(), policy_schema: 0, auto_policy_schema: 0, slot_policy_supported: true,
   profile_routes: { profiles: [{ name: 'other', description: `stored by ${name}` }], default: null },

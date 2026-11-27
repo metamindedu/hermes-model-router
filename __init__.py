@@ -146,6 +146,11 @@ def register(ctx):
     from .model_router.native_delegation import register_native_delegation
     register_native_delegation(ctx, home)
 
+    # A read-only advisor the working agent consults and waits for. Its guard hooks are
+    # registered before the tool; without them the tool is never offered.
+    from .model_router.advise_guard import register_advise_guard
+    register_advise_guard(ctx, home, routing_enabled=enabled)
+
     # Passive metadata only: this never dispatches, reroutes or controls a child.
     from .model_router.execution_roster import register_execution_roster
     register_execution_roster(ctx, home)
@@ -189,7 +194,7 @@ def register(ctx):
 
     schema = {
         "name": "coding_route",
-        "description": "Read effective Heavy/Light roles or inspect/join historical process-backed jobs. New work uses native delegate_task with the selected model-router, model-router-profiles or model-router-auto backend, never coding_route start. Main handles small bounded changes directly, including tests. Ordinary delegation needs a concrete benefit: a different-model route the task needs, heavy context, long runtime, or at least two substantive independent workstreams; on Main's own model, design stays with Main unless explicitly requested by the user; required Heavy/independent review remains mandatory. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
+        "description": "Read effective Heavy/Light roles or inspect/join historical process-backed jobs. New work uses native delegate_task with the selected model-router, model-router-profiles or model-router-auto backend, never coding_route start. Main handles small bounded changes directly, including tests. Ordinary delegation needs a concrete benefit: a different-model route the task needs, heavy context, long runtime, or at least two substantive independent workstreams; on Main's own model, design stays with Main unless explicitly requested by the user; required Heavy/independent review remains mandatory. ask_advisor is a read-only same-turn consultation of the advise slot at a decision point, not delegation or a required review. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
         "parameters": {
             "type": "object", "additionalProperties": False,
             "properties": {

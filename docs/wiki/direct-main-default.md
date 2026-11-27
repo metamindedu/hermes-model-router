@@ -6,4 +6,6 @@ Since v0.12.0 the criteria also weigh the model. When a slot runs on Main's own 
 
 A required Heavy/independent review may be a single child; preserve high-risk judgment, project gates and production approval without manufacturing extra implementation jobs. Explicit user delegation is a separate exception. Main retains visual/motion design and small review corrections.
 
+Since v0.16.0 Main can also consult the advisor (`ask_advisor`, the Heavy `advise` slot) at a decision point without handing the work off: one question, a read-only child, and the answer in the same tool call. It is skipped when the slot runs on Main's own model, and it never replaces a required Heavy or independent review. See [[task-slots]].
+
 The rule is agent guidance, not an API two-job minimum or a new router denial. Distribute the reviewed common delta while preserving profile-local handoff additions and manifest differences. Read back installed bytes and unchanged user-state hashes; new Python descriptions may need a new session. Public release, catalog PR/CI, maintainer merge and docs search visibility are distinct states. See [[index]].

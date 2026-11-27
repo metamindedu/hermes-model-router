@@ -192,7 +192,7 @@ test('every partial body carries the literal marker and only the changed parts',
   assert.deepEqual(Object.keys(merge.routing.slots), ['design'])
   assert.deepEqual(merge.expected.map(item => [item.profile, Object.keys(item.routing.slots)]), [['default', ['design']], ['p1', ['design']], ['p2', ['design']]])
   assert.deepEqual(cases['slot-legacy-collision'].skips, { p1: [], p2: ['code-simple'] })
-  assert.equal(Object.keys(cases['slot-copy-all'].body.routing.slots).length, 6)
+  assert.equal(Object.keys(cases['slot-copy-all'].body.routing.slots).length, 7)
   assert.deepEqual(cases['slot-copy-all'].skips, { p1: [], p2: ['code-simple'] })
   assert.deepEqual(cases['timeout-one-field'].body.timeout_updates.map(update => Object.keys(update).sort()),
     Array(2).fill(['delegate_total_seconds', 'expected_revision', 'profile']))
@@ -206,7 +206,7 @@ test('without the capability the same builders keep the earlier full bodies', ()
   draft.slotPolicy.design = spare('design-spare')
   const legacy = a.buildNativeDelegationBatchBody(0, 'default', ['default', 'p1'], draft, a.copyNativeDelegationBaselines(rows), rows, 'native')
   assert.equal('partial_save_schema' in legacy, false)
-  assert.ok(legacy.updates.every(update => update.backend === 'model-router' && Object.keys(update.slot_policy).length === 6))
+  assert.ok(legacy.updates.every(update => update.backend === 'model-router' && Object.keys(update.slot_policy).length === 7))
   const store = NAMES.map(profile => storeRow(profile, null))
   const snapshot = { ...snapshotFor(store, 'p1', { routingTargets: ['p1'] }), partialSave: false }
   snapshot.draft.slots.design = { follow: 'custom', custom: route('operator', 'designer', 'high') }
@@ -214,7 +214,7 @@ test('without the capability the same builders keep the earlier full bodies', ()
   const { body } = a.buildScopedPreviewBody(snapshot, 'routing')
   assert.equal('partial_save_schema' in body, false)
   assert.deepEqual(Object.keys(body.routing).sort(), ['enabled', 'heavy', 'light', 'slots'])
-  assert.equal(Object.keys(body.routing.slots).length, 6)
+  assert.equal(Object.keys(body.routing.slots).length, 7)
 })
 
 test('an edit counts as saved only when the partial body carried it as drafted', () => {

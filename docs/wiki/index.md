@@ -4,7 +4,7 @@
 
 - [[direct-main-default]] — 작은 수정의 Main 직접 처리, 실질적인 병렬 작업 기준과 위임 오버헤드, 단일 필수 검수 예외, 설치별 로컬 지침 보존
 
-- [[task-slots]] — Heavy/Light 대신 슬롯별 직접 지정, 목적→슬롯→모델 해석과 등급의 남은 역할, 선택적 `routing.slots`와 schema 3 조건, 공유 저장소의 설치본 호환 게이트, 슬롯별 예비 모델 블록과 슬롯에 묶인 비용 동의, `computer-use` 목적의 도구 경계
+- [[task-slots]] — Heavy/Light 대신 슬롯별 직접 지정, v0.16.0 조언 슬롯(`ask_advisor`, 읽기 전용 가드), 목적→슬롯→모델 해석과 등급의 남은 역할, 선택적 `routing.slots`와 schema 3 조건, 공유 저장소의 설치본 호환 게이트, 슬롯별 예비 모델 블록과 슬롯에 묶인 비용 동의, `computer-use` 목적의 도구 경계
 
 - [[model-selection]] — 호스트 `ModelCatalogMenu` 재사용과 구형 호스트의 ID 입력 유지, 모델 선택 시 저장된 추론 강도 보존, 불러온 프로필 기준의 읽기 전용 목록 조회와 정확한 경로 제한, 값 기반 key로 인한 재마운트 함정
 

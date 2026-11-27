@@ -24,6 +24,7 @@ PURPOSE_DEFAULTS = {
     "semantic-final": "최종 의미 검토",
     "independent-review": "독립 검수",
     "computer-use": "화면 조작",
+    "advise": "조언",
 }
 PURPOSE_LABELS = {
     "implementation": "기능 구현",
@@ -33,8 +34,9 @@ PURPOSE_LABELS = {
     "semantic-final": "최종 의미 검토",
     "independent-review": "독립 검수",
     "computer-use": "화면 조작",
+    "advise": "조언",
 }
-HEAVY_PURPOSES = frozenset({"plan", "semantic-final", "independent-review"})
+HEAVY_PURPOSES = frozenset({"plan", "semantic-final", "independent-review", "advise"})
 
 
 def _has_disallowed_controls(value: str) -> bool:

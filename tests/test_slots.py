@@ -27,7 +27,7 @@ def setup(tmp_path, monkeypatch):
 
 
 def test_slot_table_is_consistent_everywhere():
-    assert slots.BUILTIN_SLOTS == ('design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use')
+    assert slots.BUILTIN_SLOTS == ('design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise')
     assert set(slots.SLOT_TIERS) == set(slots.BUILTIN_SLOTS) == set(slots.PURPOSE_SLOTS.values())
     # Existing purposes keep their position and tier; the new one is appended.
     assert list(slots.PURPOSE_SLOTS)[:6] == ['implementation', 'mechanical', 'preliminary-review', 'plan', 'semantic-final', 'independent-review']
@@ -35,6 +35,8 @@ def test_slot_table_is_consistent_everywhere():
         'implementation': 'light', 'mechanical': 'light', 'preliminary-review': 'light',
         'plan': 'heavy', 'semantic-final': 'heavy', 'independent-review': 'heavy'}
     assert slots.PURPOSE_SLOTS['computer-use'] == 'computer-use' and slots.PURPOSE_ROLES['computer-use'] == 'light'
+    assert list(slots.PURPOSE_SLOTS)[-1] == 'advise' and slots.PURPOSE_SLOTS['advise'] == 'advise' and slots.PURPOSE_ROLES['advise'] == 'heavy'
+    assert slots.ADVISOR_PURPOSES == {'advise'} and slots.LEGACY_SLOT_SETS == (frozenset(slots.BUILTIN_SLOTS[:6]),)
     assert nd.PURPOSE_ROLES == slots.PURPOSE_ROLES == execution_roster._PURPOSES
     assert set(task_presentation.PURPOSE_LABELS) == set(task_presentation.PURPOSE_DEFAULTS) == set(slots.PURPOSE_SLOTS)
     assert ns.BUILTIN_SLOTS is slots.BUILTIN_SLOTS
@@ -69,6 +71,7 @@ def test_each_slot_saves_its_own_model_and_only_for_selected_targets(tmp_path, m
         'verify-simple': {'follow': 'custom', 'custom': route('other', 'quick-check', 'low')},
         'verify-complex': {'follow': 'custom', 'custom': route('other', 'reviewer', 'xhigh')},
         'computer-use': {'follow': 'custom', 'custom': route('operator', 'screen-model', 'medium')},
+        'advise': {'follow': 'custom', 'custom': route('other', 'advisor', 'high')},
     }
     body['routing']['slots'] = copy.deepcopy(declared)
     preview = service.preview(body)
@@ -82,7 +85,8 @@ def test_each_slot_saves_its_own_model_and_only_for_selected_targets(tmp_path, m
     models = make_models('1')
     assert config['slots'] == {'design': models['main'], 'code-complex': declared['code-complex']['custom'],
                                'code-simple': models['delegation'], 'verify-simple': declared['verify-simple']['custom'],
-                               'verify-complex': declared['verify-complex']['custom'], 'computer-use': declared['computer-use']['custom']}
+                               'verify-complex': declared['verify-complex']['custom'], 'computer-use': declared['computer-use']['custom'],
+                               'advise': declared['advise']['custom']}
     # The tier pair is untouched and other profiles still resolve through it.
     assert config['heavy'] == models['main'] and config['light'] == models['delegation']
     assert Service(service.root, writer=cli.writer).routing_config('p2')['slots']['design'] == make_models('2')['main']
@@ -320,6 +324,8 @@ def env(tmp_path, monkeypatch):
 @pytest.mark.parametrize('purpose,slot', list(slots.PURPOSE_SLOTS.items()))
 def test_purpose_runs_on_its_slot_model_with_its_tier_label_and_limit(env, monkeypatch, purpose, slot):
     home, service = env
+    # advise routes only inside an in-flight ask_advisor call (test_advise_guard covers that gate).
+    monkeypatch.setattr('model_router.advise_guard.advisor_call_active', lambda home, goal: True)
     seen = []
     monkeypatch.setattr('model_router.native_watchdog.verify_routed_binding', lambda home, goal, role, budget: seen.append((role, budget)) or True)
     provider = nd.ModelRouterProvider(home, lambda: service)
@@ -332,8 +338,9 @@ def test_purpose_runs_on_its_slot_model_with_its_tier_label_and_limit(env, monke
     assert auto.route_task({'execution': 'model', 'purpose': purpose, 'goal': 'goal'}, {})['label'] == 'model:' + tier
 
 
-def test_spare_models_apply_per_slot_and_a_two_role_block_applies_by_tier(env):
+def test_spare_models_apply_per_slot_and_a_two_role_block_applies_by_tier(env, monkeypatch):
     home, service = env
+    monkeypatch.setattr('model_router.advise_guard.advisor_call_active', lambda home, goal: True)
     provider = nd.ModelRouterProvider(home, lambda: service)
     chain = [{'provider': 'other', 'model': 'spare/v1'}]
     block = ns.build_slot_policy_block('default', {**ns.default_slot_policy(), 'code-complex': {'mode': 'custom', 'chain': chain}}, True)

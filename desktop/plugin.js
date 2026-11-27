@@ -771,7 +771,8 @@ export const TASK_SLOTS = [
   { id: 'code-simple', tier: 'light', label: '코드 · 간단', description: '정해진 패턴의 수정과 테스트·빌드 같은 반복 작업' },
   { id: 'verify-simple', tier: 'light', label: '검증 · 간단', description: '예비 검토와 가벼운 확인' },
   { id: 'verify-complex', tier: 'heavy', label: '검증 · 복잡', description: '최종 의미 검토와 독립 검수' },
-  { id: 'computer-use', tier: 'light', label: '컴퓨터 유즈', description: '브라우저나 데스크톱 화면을 직접 조작하는 작업' }
+  { id: 'computer-use', tier: 'light', label: '컴퓨터 유즈', description: '브라우저나 데스크톱 화면을 직접 조작하는 작업' },
+  { id: 'advise', tier: 'heavy', label: '조언', description: '작업 중 판단이 막힐 때 읽기 전용으로 조언만 하는 작업 (ask_advisor 도구)', limitLabel: '5분 고정 제한' }
 ].map(slot => Object.freeze(slot))
 // What a slot's model can be set to here. 'delegation' (the slot follows the profile's delegation.model)
 // is no longer offered: a slot stored that way is shown with that value as the disabled current
@@ -3332,7 +3333,7 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
       onAdd: () => updateSparePolicy(slot.id, current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })) })
       : jsx('p', { style: styles.hint, children: '이 슬롯의 예비 모델은 플러그인을 업데이트한 뒤 설정할 수 있습니다.' })
     return jsx(ModelCard, { id: `slot-${slot.id}`, title: slot.label, description: slot.description,
-      badge: jsx(Badge, { variant: 'muted', children: slot.tier === 'heavy' ? '긴 작업 제한' : '짧은 작업 제한' }),
+      badge: jsx(Badge, { variant: 'muted', children: slot.limitLabel || (slot.tier === 'heavy' ? '긴 작업 제한' : '짧은 작업 제한') }),
       model, notes, spare: spareEditor }, slot.id)
   }
   return jsxs('div', { id: 'native-delegation-settings', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem', minWidth: 0 }, children: [
@@ -5154,7 +5155,7 @@ function RouterPage({ ctx: pluginContext }) {
     ]
   }) : null
 
-  const timeoutSettingsSection = section('작업별 실행 시간 제한', '불러온 프로필에서 일반 작업, 짧은 작업 슬롯, 긴 작업 슬롯의 시간 제한을 각각 분 단위로 편집하고, 아래 시간 제한 적용 대상에 복사합니다. 짧은 작업 제한은 코드·검증(간단)·컴퓨터 유즈 슬롯에, 긴 작업 제한은 설계·검증(복잡) 슬롯에 적용됩니다. 모델·라우팅·폴백 적용 대상과는 독립적입니다.', jsxs('div', {
+  const timeoutSettingsSection = section('작업별 실행 시간 제한', '불러온 프로필에서 일반 작업, 짧은 작업 슬롯, 긴 작업 슬롯의 시간 제한을 각각 분 단위로 편집하고, 아래 시간 제한 적용 대상에 복사합니다. 짧은 작업 제한은 코드·검증(간단)·컴퓨터 유즈 슬롯에, 긴 작업 제한은 설계·검증(복잡) 슬롯에 적용됩니다. 조언 슬롯은 호출마다 5분으로 고정됩니다. 모델·라우팅·폴백 적용 대상과는 독립적입니다.', jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' },
     children: [
       jsx('p', { id: 'timeout-policy-explanation', role: 'note', style: styles.hint, children: '작업을 얼마나 오래 실행할지 분 단위로 정합니다. 0은 전체 실행 시간을 제한하지 않습니다. 제한에 도달하면 중단을 요청하지만, 실제로 멈추기까지 시간이 걸릴 수 있습니다. 응답 대기 같은 Hermes의 다른 제한은 그대로 유지됩니다. 이전에 하나로 설정했던 값은 짧은 작업과 긴 작업에 같은 값으로 표시됩니다.' }),
@@ -6602,7 +6603,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.15.1',
+  version: '0.16.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

@@ -49,7 +49,9 @@ Block schema 2 is `{schema: 2, fallbacks: {<slot id>: {mode, chain, consent}}}` 
 
 1. Backend slots, per-slot continuation policy, the `computer-use` purpose, bundled policy wording, Python tests.
 2. Settings page: one model section (conversation roles + six slot cards with primary and spare models), the delegation-method card reduced to method and profile routes, routing on/off removed from the page, legacy Heavy/Light section removed. Node suites and renderer fixture at mobile/tablet/desktop widths.
-3. Operator-added slots (name, one-line description, model, tier), at most four, built-ins not removable; the purpose enum then follows the stored slots and applies from new sessions.
+3. Operator-added slots (name, one-line description, model, tier), at most four, built-ins not removable; the purpose enum then follows the stored slots and applies from new sessions. Planned for v0.17.0.
+
+v0.16.0 adds one built-in Heavy slot, `advise`, before Stage 3: the `ask_advisor` tool consults it synchronously with a read-only child (see `docs/wiki/task-slots.md` → 조언). Per-slot spare blocks saved with the six earlier slots stay valid with `advise` off.
 
 ### Stage 2 design decisions (settings page)
 

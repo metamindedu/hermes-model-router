@@ -18,8 +18,8 @@ const routing = {
   light: { follow: 'delegation', custom: null },
   fallback: { enabled: false, heavy: null, light: null }
 }
-const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use']
-const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex'].includes(id) ? 'heavy' : 'light']))
+const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
+const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex', 'advise'].includes(id) ? 'heavy' : 'light']))
 const offSlots = () => Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }]))
 // Heavy slots are custom here and Light slots follow the main model. A slot still following the
 // delegation model (an earlier setting) has its own fixture, legacySlotFixture, below.
@@ -1129,11 +1129,11 @@ test('slot basis switching edits the draft only: custom is pre-filled from the f
   assert.deepEqual(h.calls, [])
 })
 
-test('a slot-only change is one routing-scoped store save carrying all six slots and the untouched tier pair', async () => {
+test('a slot-only change is one routing-scoped store save carrying every slot and the untouched tier pair', async () => {
   const h = harness({ data: slotFixture() })
   h.select('slot-computer-use-follow', 'custom')
   h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
-  assert.match(text(h.byId('model-section-summary')), /작업 슬롯 모델\(직접 지정 3개\)/)
+  assert.match(text(h.byId('model-section-summary')), /작업 슬롯 모델\(직접 지정 4개\)/)
   h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['preview', 'apply'])
   const body = h.calls[0].body
@@ -2300,13 +2300,13 @@ const ids = h => [...walk(h.render())].map(node => node.props?.id).filter(Boolea
 const FLASH = { provider: 'deepseek', model: 'deepseek-flash' }
 const MIMO = { provider: 'xiaomi', model: 'mimo-v2.6-pro' }
 
-test('the model section is one card grid: 대화 cards, then 작업을 맡기는 방식 and the six slot cards, each with the same parts', () => {
+test('the model section is one card grid: 대화 cards, then 작업을 맡기는 방식 and the slot cards, each with the same parts', () => {
   const h = harness({ data: withAux(withSpares(slotFixture())) })
   const tree = h.render()
   assert.deepEqual(cardIds(h.byId('conversation-model-cards')), ['model-card-main', 'model-card-compression', 'model-card-title'])
   assert.deepEqual(cardIds(h.byId('task-slot-cards')), slotIds.map(id => `slot-${id}`))
   const cards = [...walk(tree)].filter(node => node.props?.['data-model-card'])
-  assert.equal(cards.length, 9)
+  assert.equal(cards.length, 3 + 7)
   for (const card of cards) {
     assert.equal(card.type, 'article')
     assert.deepEqual(cardParts(card), ['header', 'model', 'notes', 'spare'], card.props.id)

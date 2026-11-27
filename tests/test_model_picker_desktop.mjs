@@ -19,8 +19,8 @@ const models = {
 }
 const routing = { enabled: true, heavy: { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') }, light: { follow: 'delegation', custom: null },
   fallback: { enabled: false, heavy: null, light: null } }
-const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use']
-const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex'].includes(id) ? 'heavy' : 'light']))
+const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
+const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex', 'advise'].includes(id) ? 'heavy' : 'light']))
 const offSlots = () => Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }]))
 const declarations = () => Object.fromEntries(slotIds.map(id => [id, slotTiers[id] === 'heavy'
   ? { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') } : { follow: 'delegation', custom: null }]))
@@ -288,7 +288,7 @@ test('a changed connection or profile and an unusable scope refuse before any ca
 
 test('every model route shows the catalog picker with exact IDs kept under manual entry', () => {
   const h = harness()
-  assert.deepEqual(h.pickerIds().sort(), ['model-compression-picker', 'model-main-picker', 'model-title-picker', 'slot-design-picker', 'slot-verify-complex-picker'])
+  assert.deepEqual(h.pickerIds().sort(), ['model-compression-picker', 'model-main-picker', 'model-title-picker', 'slot-advise-picker', 'slot-design-picker', 'slot-verify-complex-picker'])
   assert.match(text(h.byId('model-catalog-note')), /불러온 프로필\(claire\)/)
   const main = h.picker('model-main-picker')
   assert.equal(main.trigger.props.disabled, false)

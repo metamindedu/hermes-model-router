@@ -24,8 +24,8 @@ const models = {
   compression: route('sample-lab', 'sample-mini', 'medium'),
   title: route('', '', '')
 }
-const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use']
-const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex'].includes(id) ? 'heavy' : 'light']))
+const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
+const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex', 'advise'].includes(id) ? 'heavy' : 'light']))
 const declarations = Object.fromEntries(slotIds.map(id => [id, id === 'design'
   ? { follow: 'custom', custom: route('sample-lab', 'sample-pro-reasoner', 'high') }
   : { follow: slotTiers[id] === 'heavy' ? 'main' : 'delegation', custom: null }]))
@@ -42,7 +42,7 @@ const profile = name => ({ name, models: structuredClone(models), actual_models:
     profile_routes: { profiles: [], default: null }, role_intro_inheritance: { schema: 1, supported: true, code_identity: 'e'.repeat(64), activation: 'new_session_or_supported_rebuild' }, warnings: [] },
   role_intro: { schema: 1, state: 'available', default_description: 'Invented role text', default_source: 'profile_metadata', description_auto: false, digest: 'f'.repeat(64) } })
 const status = { revision: 7, current_profile: 'default', recent_apply: null,
-  slot_capabilities: { schema: 1, slots: slotIds, tiers: slotTiers, purposes: { plan: 'design', implementation: 'code-complex', mechanical: 'code-simple', 'preliminary-review': 'verify-simple', 'semantic-final': 'verify-complex', 'independent-review': 'verify-complex', 'computer-use': 'computer-use' }, follows: ['main', 'delegation', 'custom'], blocking_profiles: [] },
+  slot_capabilities: { schema: 1, slots: slotIds, tiers: slotTiers, purposes: { plan: 'design', implementation: 'code-complex', mechanical: 'code-simple', 'preliminary-review': 'verify-simple', 'semantic-final': 'verify-complex', 'independent-review': 'verify-complex', 'computer-use': 'computer-use', advise: 'advise' }, follows: ['main', 'delegation', 'custom'], blocking_profiles: [] },
   readiness_context: { schema: 1, base_identity: 'd'.repeat(64), source_profile: 'default', release: null },
   profiles: ['default', 'writer', LONG].map(profile) }
 const caps = names => Object.fromEntries(names.map(name => [name, { fast: false, reasoning: !name.includes('mini') }]))

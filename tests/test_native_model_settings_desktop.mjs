@@ -6,8 +6,8 @@ import test from 'node:test'
 // handlers with in-memory hooks and a fake transport only. No DOM, profile, settings or Hermes write.
 const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
 const route = (provider, model, reasoning) => ({ provider, model, reasoning })
-const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use']
-const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex'].includes(id) ? 'heavy' : 'light']))
+const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
+const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex', 'advise'].includes(id) ? 'heavy' : 'light']))
 const offSlots = () => Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }]))
 const declarations = () => Object.fromEntries(slotIds.map(id => [id, { follow: 'main', custom: null }]))
 const role = (state = 'verified', source = 'explicit', editable = true, reason = '') => ({ state, source, editable, reason })

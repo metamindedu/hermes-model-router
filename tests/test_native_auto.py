@@ -32,8 +32,10 @@ def test_schema_is_deterministic_and_empty_allowlist_does_not_offer_profile(auto
 
 
 @pytest.mark.parametrize('purpose,role', list(nd.PURPOSE_ROLES.items()))
-def test_model_uses_origin_role_and_never_profile(automatic, purpose, role):
+def test_model_uses_origin_role_and_never_profile(automatic, monkeypatch, purpose, role):
     provider, config, _ = automatic
+    # advise routes only inside an in-flight ask_advisor call (test_advise_guard covers that gate).
+    monkeypatch.setattr('model_router.advise_guard.advisor_call_active', lambda home, goal: True)
     route = provider.route_task({'execution': 'model', 'purpose': purpose, 'goal': 'specific model task'}, config)
     assert route['model'] == role and route['label'] == 'model:' + role
     assert route['fallback_providers'] == [] and 'profile' not in route

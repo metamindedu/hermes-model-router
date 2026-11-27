@@ -6,8 +6,8 @@ const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'u
 const strip = code => code.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
   .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
   .replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-const api = new Function('DesktopSDK', `${strip(source)}\nreturn { copyProfileDraft, slotFollowDeclaration, slotRoutingForSave, copyNativeDelegationDraft, readPagedStatus, STATUS_CHANGED_MESSAGE, STATUS_PAGE_LIMIT }`)({})
-const ids = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use']
+const api = new Function('DesktopSDK', `${strip(source)}\nreturn { copyProfileDraft, slotFollowDeclaration, slotRoutingForSave, copyNativeDelegationDraft, readPagedStatus, STATUS_CHANGED_MESSAGE, STATUS_PAGE_LIMIT, TASK_SLOTS }`)({})
+const ids = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
 const model = { provider: 'fixture', model: 'example', reasoning: 'high' }
 const slots = Object.fromEntries(ids.map(id => [id, { follow: 'main', custom: null }]))
 const routing = { enabled: true, heavy: { follow: 'main', custom: null }, light: { follow: 'delegation', custom: null }, fallback: { enabled: false, heavy: null, light: null } }
@@ -111,4 +111,14 @@ test('native slot policy drafts are cloned separately from legacy policies', () 
   draft.slotPolicy.design.mode = 'custom'
   assert.equal(dto.slot_policy.design.mode, 'off')
   assert.equal(draft.autoSlotPolicy.design.mode, 'off')
+})
+
+test('the advisor slot is the last, Heavy, and labelled with its own fixed limit', () => {
+  assert.deepEqual(api.TASK_SLOTS.map(slot => slot.id), ids)
+  const advise = api.TASK_SLOTS.at(-1)
+  assert.equal(advise.tier, 'heavy')
+  assert.equal(advise.limitLabel, '5분 고정 제한')
+  assert.match(advise.description, /ask_advisor/)
+  assert.ok(api.TASK_SLOTS.slice(0, -1).every(slot => slot.limitLabel === undefined))
+  assert.match(source, /children: slot\.limitLabel \|\| \(slot\.tier === 'heavy' \? '긴 작업 제한' : '짧은 작업 제한'\)/)
 })

@@ -2,6 +2,18 @@
 
 Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. Native work uses `delegate_task`; historical routed-process starts remain retired. A separate explicitly opt-in `profile_task` path attaches to Gateway-owned target sessions, not a private agent executor. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
+## Advisor slot and `ask_advisor` (0.16.0)
+
+A seventh built-in task slot, **조언** (`advise`, Heavy), is consulted rather than delegated to. The working agent calls the new `ask_advisor(question, context)` tool at a decision point (before committing to an approach, after the same failure twice, before declaring hard work done) and gets a short answer in the same tool call, then keeps working. Set the slot's model on the settings page like any other slot; it is useful when the conversation model is a fast or cheap one and the advisor a stronger one.
+
+- **Same turn.** The tool calls native `delegate_task` synchronously through the registered tool-execution middleware, so the routed runtime limit (300 seconds for this call) and the other delegation observers apply as for an ordinary call. The child gets an output schema (recommendation, reasons, risks, confidence); the host's own iteration limit applies. Only an agent with delegation depth budget can ask (a delegated child at the default depth gets `depth_limit`).
+- **Read-only, enforced.** A `pre_tool_call` guard binds the advisor child's exact session at `subagent_start` and blocks every tool except reading and lookup (`read_file`, `search_files`, `web_search`, `web_extract`, `skill_view`, `skills_list`, `vision_analyze`). It follows the session across compaction and blocks continuing that child. If the child cannot be bound, its answer is discarded.
+- **Skipped on the same model.** When the advise slot resolves to the asking agent's own provider and model, the call returns `skipped` without dispatching.
+- **Not through `delegate_task`.** The `advise` purpose routes only for the in-flight `ask_advisor` call; any other `delegate_task` use is refused. The tool is offered only while the guard is active and task routing is on, and only for sessions delegating through `model-router` or `model-router-auto`.
+- Advice is input to the agent's decision, not verified fact or approval, and it never replaces a required Heavy or independent review.
+
+**Upgrade order.** This release changes `slots.py`, so slot saves stay blocked until every profile runs 0.16.0. Update every profile, restart every Hermes process, then save. Per-slot spare-model blocks saved with the six earlier slots stay valid with the advisor off. Details: [docs/releases/v0.16.0.md](docs/releases/v0.16.0.md).
+
 ## Each composer shows its own chat's status line (0.15.1)
 
 In a split view the primary pane's composer can now keep the status line for its own conversation while a split tile holds focus, instead of hiding it. The host publishes no owner for an unfocused primary, and the active socket is not proof of one, so the plugin uses an owner proof. The proof is the owner the host itself reported while that exact conversation was the focused primary, for example after you select it in the sidebar. The proof ends when the primary changes conversation, the host withdraws the owner, or the connection resets. A primary that is still focused records it again. It is used only when the proven owner equals the live connection and profile. Without a proof the primary line stays hidden and nothing is read. The focused tile keeps its own line. An unfocused tile stays hidden unless it shows the primary's own conversation. Job controls on a primary line appear once that conversation is focused.

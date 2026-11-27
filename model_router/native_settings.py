@@ -11,7 +11,7 @@ import json
 import re
 from typing import Any
 
-from .slots import BUILTIN_SLOTS, SLOT_TIERS
+from .slots import BUILTIN_SLOTS, SLOT_TIERS, complete_slot_keys
 
 AUTO_ROUTING_SUPPORTED = True
 SCHEMA = 1
@@ -144,6 +144,10 @@ def default_policy() -> dict[str, Any]:
     return {role: {"mode": "off", "chain": []} for role in ROLES}
 
 
+def _off_entry(_slot: str) -> dict[str, Any]:
+    return {"mode": "off", "chain": [], "consent": None}
+
+
 def default_slot_policy() -> dict[str, Any]:
     return {slot: {"mode": "off", "chain": []} for slot in BUILTIN_SLOTS}
 
@@ -207,9 +211,11 @@ def validate_slot_policy_block(profile: str, block: Any, *, backend: str = "mode
     """Validate a persisted per-slot block and its slot-bound consent."""
     if not isinstance(block, dict) or set(block) != {"schema", "fallbacks"} or type(block["schema"]) is not int or block["schema"] != SLOT_SCHEMA:
         raise ValueError("invalid native policy block")
-    fallbacks = block["fallbacks"]
-    if not isinstance(fallbacks, dict) or set(fallbacks) != set(BUILTIN_SLOTS):
-        raise ValueError("invalid native policy block")
+    try:
+        # A block saved before a slot existed leaves that slot off.
+        fallbacks = complete_slot_keys(block["fallbacks"], _off_entry)
+    except ValueError:
+        raise ValueError("invalid native policy block") from None
     plain = {}
     for slot in BUILTIN_SLOTS:
         item = fallbacks[slot]
@@ -247,6 +253,7 @@ def patch_slot_policy_block(profile: str, stored: Any, patch: Any, allow_additio
     else:
         validate_slot_policy_block(profile, stored, backend=backend)
         base = copy.deepcopy(stored)
+        base["fallbacks"] = complete_slot_keys(base["fallbacks"], _off_entry)
     plain = {slot: {"mode": base["fallbacks"][slot]["mode"], "chain": base["fallbacks"][slot]["chain"]} for slot in BUILTIN_SLOTS}
     plain.update({slot: patch[slot] for slot in patch})
     parsed = validate_policy(plain, BUILTIN_SLOTS)

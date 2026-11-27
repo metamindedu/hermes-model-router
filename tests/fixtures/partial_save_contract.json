@@ -85,6 +85,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -109,6 +113,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -182,6 +190,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -206,6 +218,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -274,6 +290,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -298,6 +318,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -447,6 +471,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -471,6 +499,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -539,6 +571,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -563,6 +599,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -631,6 +671,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -655,6 +699,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -772,6 +820,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -796,6 +848,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -869,6 +925,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -893,6 +953,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -961,6 +1025,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -985,6 +1053,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -1114,6 +1186,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -1138,6 +1214,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -1211,6 +1291,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -1235,6 +1319,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -1303,6 +1391,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -1327,6 +1419,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -1379,6 +1475,10 @@
               "computer-use": {
                 "mode": "off",
                 "chain": []
+              },
+              "advise": {
+                "mode": "off",
+                "chain": []
               }
             },
             "allow_additional_cost": true
@@ -1415,6 +1515,10 @@
                 "chain": []
               },
               "computer-use": {
+                "mode": "off",
+                "chain": []
+              },
+              "advise": {
                 "mode": "off",
                 "chain": []
               }
@@ -1531,6 +1635,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -1555,6 +1663,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -1628,6 +1740,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -1652,6 +1768,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -1725,6 +1845,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -1749,6 +1873,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -1919,6 +2047,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -1943,6 +2075,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -2020,6 +2156,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -2044,6 +2184,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -2117,6 +2261,10 @@
             "computer-use": {
               "mode": "off",
               "chain": []
+            },
+            "advise": {
+              "mode": "off",
+              "chain": []
             }
           },
           "auto_slot_policy": {
@@ -2141,6 +2289,10 @@
               "chain": []
             },
             "computer-use": {
+              "mode": "off",
+              "chain": []
+            },
+            "advise": {
               "mode": "off",
               "chain": []
             }
@@ -2575,6 +2727,10 @@
           "computer-use": {
             "follow": "main",
             "custom": null
+          },
+          "advise": {
+            "follow": "main",
+            "custom": null
           }
         },
         "p2": {
@@ -2607,6 +2763,10 @@
             "custom": null
           },
           "computer-use": {
+            "follow": "main",
+            "custom": null
+          },
+          "advise": {
             "follow": "main",
             "custom": null
           }
@@ -2668,6 +2828,10 @@
             "computer-use": {
               "follow": "main",
               "custom": null
+            },
+            "advise": {
+              "follow": "main",
+              "custom": null
             }
           }
         },
@@ -2692,7 +2856,8 @@
                 "code-simple": null,
                 "verify-simple": null,
                 "verify-complex": null,
-                "computer-use": null
+                "computer-use": null,
+                "advise": null
               },
               "skill_enabled": true
             }
@@ -2733,7 +2898,8 @@
                 "computer-use": {
                   "follow": "main",
                   "custom": null
-                }
+                },
+                "advise": null
               },
               "skill_enabled": true
             }
@@ -2758,7 +2924,8 @@
                     "reasoning": "xhigh"
                   }
                 },
-                "computer-use": null
+                "computer-use": null,
+                "advise": null
               },
               "skill_enabled": true
             }

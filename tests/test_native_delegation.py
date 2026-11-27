@@ -61,6 +61,7 @@ def test_actual_core_plugin_registration(env):
 @pytest.mark.parametrize('purpose,role', list(nd.PURPOSE_ROLES.items()))
 def test_purpose_routes_and_explicit_continuation(env, monkeypatch, purpose, role):
     home, service = env
+    monkeypatch.setattr('model_router.advise_guard.advisor_call_active', lambda home, goal: True)
     monkeypatch.setattr('model_router.native_watchdog.verify_routed_binding', lambda *args: True)
     p = nd.ModelRouterProvider(home, lambda: service)
     task = {'purpose': purpose, 'goal': 'goal'}

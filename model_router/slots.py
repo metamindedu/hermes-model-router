@@ -14,7 +14,7 @@ import copy
 from typing import Any, Callable, Mapping
 
 # Order is user-visible (settings page) and part of the tool schema.
-BUILTIN_SLOTS = ("design", "code-complex", "code-simple", "verify-simple", "verify-complex", "computer-use")
+BUILTIN_SLOTS = ("design", "code-complex", "code-simple", "verify-simple", "verify-complex", "computer-use", "advise")
 SLOT_TIERS = {
     "design": "heavy",
     "code-complex": "light",
@@ -22,6 +22,7 @@ SLOT_TIERS = {
     "verify-simple": "light",
     "verify-complex": "heavy",
     "computer-use": "light",
+    "advise": "heavy",
 }
 # Existing purposes keep their order; new ones are appended so a running
 # session's cached tool schema only ever grows at the end.
@@ -33,6 +34,7 @@ PURPOSE_SLOTS = {
     "semantic-final": "verify-complex",
     "independent-review": "verify-complex",
     "computer-use": "computer-use",
+    "advise": "advise",
 }
 PURPOSE_ROLES = {purpose: SLOT_TIERS[slot] for purpose, slot in PURPOSE_SLOTS.items()}
 TIERS = ("heavy", "light")
@@ -40,6 +42,27 @@ TIERS = ("heavy", "light")
 TIER_FOLLOWS = {"heavy": "main", "light": "delegation"}
 FOLLOWS = ("main", "delegation", "custom")
 SLOTS_SUPPORTED = True
+# The advisor answers one question for the agent that asked it. Its purpose is
+# dispatched only by the ask_advisor tool, whose child is read-only.
+ADVISE_SLOT = "advise"
+ADVISOR_PURPOSES = frozenset({"advise"})
+# Slot sets an earlier release persisted. A stored per-slot block with one of
+# these key sets is complete: the slots added since then are simply off there.
+LEGACY_SLOT_SETS = (frozenset(BUILTIN_SLOTS[:6]),)
+
+
+def complete_slot_keys(mapping: Any, filler: Callable[[str], Any]) -> dict[str, Any]:
+    """Every built-in slot of a stored per-slot mapping, in slot order.
+
+    A mapping saved by an earlier release lacks the slots added since; those are
+    filled with ``filler(slot)``. Any other key set is refused, never guessed.
+    """
+    if not isinstance(mapping, dict):
+        raise ValueError("per-slot mapping must be an object")
+    keys = frozenset(mapping)
+    if keys != frozenset(BUILTIN_SLOTS) and keys not in LEGACY_SLOT_SETS:
+        raise ValueError("per-slot mapping must name every task slot")
+    return {slot: mapping[slot] if slot in mapping else filler(slot) for slot in BUILTIN_SLOTS}
 
 
 def validate_slots(value: Any, route: Callable[[Any], dict[str, str]]) -> dict[str, dict[str, Any]]:
