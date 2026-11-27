@@ -94,6 +94,12 @@ def test_real_child_is_bound_read_only_and_answers_in_the_same_call(real, monkey
         for name in ('read_file', 'write_file', 'terminal', 'delegate_task', 'tool_call', 'ask_advisor'):
             verdicts[name] = _verdict(child, name)
         verdicts['task_id_is_subagent_id'] = kwargs.get('task_id') == getattr(child, '_subagent_id', None)
+        # The status-line roster binds the advisor row through the core's live registry.
+        from tools.delegate_tool_registry import get_subagent_attribution
+        from model_router.execution_roster import _ADVISOR_GOAL
+        record = get_subagent_attribution(child._subagent_id)
+        verdicts['registry_binds'] = bool(record and _ADVISOR_GOAL.match(record['goal'] or '')
+                                          and record['delegation_id'] and record['delegation_id'] == child._delegation_id)
         return _answer()
     monkeypatch.setattr(AIAgent, 'run_conversation', conversation)
     with bind_subagent_parent(real.parent):
@@ -102,6 +108,7 @@ def test_real_child_is_bound_read_only_and_answers_in_the_same_call(real, monkey
     assert 'use the index' in reply['advice'] and reply['route']['model'] == 'fixture-heavy'
     assert len(children) == 1 and isinstance(children[0], AIAgent)
     assert verdicts.pop('read_file') is None and verdicts.pop('task_id_is_subagent_id') is True
+    assert verdicts.pop('registry_binds') is True
     assert all(message and 'read-only' in message for message in verdicts.values()), verdicts
     assert _verdict(real.parent, 'write_file') is None  # the asker itself is never restricted
     assert real.parent._active_children == []

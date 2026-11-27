@@ -25,6 +25,10 @@ _PURPOSES = {'implementation': 'light', 'mechanical': 'light', 'preliminary-revi
              'plan': 'heavy', 'semantic-final': 'heavy', 'independent-review': 'heavy', 'computer-use': 'light',
              'advise': 'heavy'}
 _BACKENDS = {'model-router', 'model-router-auto', 'model-router-profiles'}
+# The fixed goal prefix of every ask_advisor child (advise_guard.GOAL_MARKER, kept in step by a test).
+_ADVISOR_GOAL = re.compile(r"Advisor consultation [0-9a-f]{12}\. ")
+_ADVISOR_WAIT_SECONDS = 420
+_ACTIVE = ('requested', 'dispatched', 'queued', 'running', 'unknown')
 
 
 # input = uncached prompt; cache_read/cache_write = cached prompt; output includes reasoning where the
@@ -326,12 +330,66 @@ class ExecutionRoster:
             child['held_stops'] = held[-17:]
             self._resolve_stops(child)
 
+    def _waiting_advisor_rows(self, parent):
+        # A waiting row whose call never returned (a lost post hook) stops counting after the host's default
+        # tool deadline (420 s, above the advisor's 300 s), so it cannot block later binds for good.
+        horizon = time.time() - _ADVISOR_WAIT_SECONDS
+        return [r for r in self.rows.values() if r['requested'].get('slot') == 'advise' and r['task_index'] == 0
+                and self._same_session(r['parent_session_id'], parent)
+                and r['subagent_id'] is None and r['status'] not in _TERMINAL and r['updated_at'] >= horizon]
+
+    def _bind_advisor(self, parent, short, goal):
+        # ask_advisor dispatches its child without a model-facing delegate_task call. Bind the child of an
+        # advisor goal to the one waiting advisor row of this parent; with several waiting, never guess.
+        if not (isinstance(goal, str) and _ADVISOR_GOAL.match(goal)):
+            return
+        waiting = self._waiting_advisor_rows(parent)
+        if len(waiting) == 1 and not any(r['subagent_id'] == short for r in self.rows.values()):
+            waiting[0]['subagent_id'] = short
+            _set_status(waiting[0], 'dispatched')
+            waiting[0]['updated_at'] = time.time()
+
+    def _advisor_pending(self):
+        return [(r['subagent_id'], r['id']) for r in self.rows.values() if r['requested'].get('slot') == 'advise'
+                and r['subagent_id'] and not r['delegation_id']][-16:]
+
+    def _advisor_lookup(self, pending):
+        # Outside the hook lock: the core's live registry names the call's delegation id once the child runs.
+        found = {}
+        if not pending:
+            return found
+        try:
+            from tools.delegate_tool_registry import get_subagent_attribution
+        except Exception:
+            return found
+        for sid, row_id in pending:
+            try:
+                record = get_subagent_attribution(sid)
+            except Exception:
+                continue
+            if (isinstance(record, dict) and isinstance(record.get('goal'), str) and _ADVISOR_GOAL.match(record['goal'])
+                    and _safe(record.get('delegation_id'))):
+                found[row_id] = (sid, record['delegation_id'])
+        return found
+
+    def _advisor_apply(self, found):
+        changed = False
+        for row in self.rows.values():
+            hit = found.get(row['id'])
+            if hit and row['subagent_id'] == hit[0] and not row['delegation_id']:
+                row['delegation_id'] = row['async_unit_id'] = row['native_call_delegation_id'] = hit[1]
+                changed = True
+        if changed:
+            self._reconcile()
+        return changed
+
     def start(self, parent_session_id=None, child_session_id=None, child_subagent_id=None, **kwargs):
         try:
             parent, session, short = map(_safe, (parent_session_id, child_session_id, child_subagent_id))
             if not self._owner() or not all((parent, session, short)):
                 return None
             with self.lock:
+                self._bind_advisor(parent, short, kwargs.get('child_goal'))
                 existing = self.children.get(session)
                 if existing is None and self.continuing:
                     existing = self._child(session)  # a continuation may restart on a compacted session id
@@ -658,6 +716,8 @@ class ExecutionRoster:
     def pre(self, tool_name='', args=None, session_id=None, conversation_id=None, tool_call_id=None, **kwargs):
         try:
             self._activity(session_id, tool_name=tool_name)
+            if tool_name == 'ask_advisor' and self._owner() and self.origin_profile:
+                return self._pre_advisor(session_id, conversation_id, tool_call_id)
             if not self._owner() or not self.origin_profile or tool_name != 'delegate_task' or not isinstance(args, dict):
                 return None
             action = args.get('action')
@@ -696,6 +756,54 @@ class ExecutionRoster:
         except Exception:
             pass
         return None
+
+    def _pre_advisor(self, session_id, conversation_id, tool_call_id):
+        # One row per ask_advisor call: the advise slot, one child, no task text kept.
+        root, session, call = map(_safe, (conversation_id, session_id, tool_call_id))
+        if not all((root, session, call)):
+            return None
+        key = (root, session, call, 0)
+        with self.lock:
+            if key not in self.rows:
+                digest = hashlib.sha256(json.dumps(key, ensure_ascii=True).encode()).hexdigest()
+                self.rows[key] = {'id': digest, 'execution_mode': 'native', 'requested': _requested({'purpose': 'advise'}),
+                    'observed': _observed({}), 'conversation_id': root, 'parent_session_id': session,
+                    'tool_call_id': call, 'task_index': 0, 'subagent_id': None, 'delegation_id': None,
+                    'async_unit_id': None, 'native_call_delegation_id': None,
+                    'status': 'requested', 'updated_at': time.time()}
+                while len(self.rows) > 512:
+                    self.rows.pop(next(iter(self.rows)))
+        self._event(root, session)
+        return None
+
+    def _post_advisor(self, root, session, call, result, hook_status):
+        try:
+            reply = json.loads(result) if isinstance(result, str) and len(result) <= 2_000_000 else result
+        except Exception:
+            reply = None
+        status = reply.get('status') if isinstance(reply, dict) else None
+        key = (root, session, call, 0)
+        # The delegation id is bound on the next status-line read (list), from the core's registry.
+        with self.lock:
+            row = self.rows.get(key)
+            if row is None:
+                return
+            if row['subagent_id'] is None and status == 'skipped':
+                del self.rows[key]  # no child ran
+            elif status == 'refused' and row['subagent_id'] is not None and row['status'] in ('completed', *_ACTIVE):
+                # The child ran but its answer was discarded (guard_unbound): the call failed. A child's own
+                # interrupted/timeout/cancelled outcome stays.
+                row['status'] = 'error'
+                row['updated_at'] = time.time()
+            elif row['status'] not in _TERMINAL:
+                if hook_status in ('interrupted', 'cancelled', 'timeout'):
+                    _set_status(row, hook_status)
+                elif status == 'ok':
+                    _set_status(row, 'completed')
+                else:
+                    _set_status(row, 'error')
+                row['updated_at'] = time.time()
+        self._event(root, session)
 
     def _pre_continue(self, args, session_id, conversation_id, tool_call_id):
         # A continuation runs on the original child's route, so it inherits that row's request.
@@ -762,6 +870,11 @@ class ExecutionRoster:
 
     def post(self, tool_name='', args=None, result=None, session_id=None, conversation_id=None, tool_call_id=None, **kwargs):
         try:
+            if tool_name == 'ask_advisor' and self._owner():
+                root, session, call = map(_safe, (conversation_id, session_id, tool_call_id))
+                if all((root, session, call)):
+                    self._post_advisor(root, session, call, result, _status(kwargs.get('status')))
+                return None
             if not self._owner() or tool_name != 'delegate_task' or not isinstance(args, dict):
                 return None
             root, session, call = map(_safe, (conversation_id, session_id, tool_call_id))
@@ -940,9 +1053,15 @@ class ExecutionRoster:
                 selected = [r for _, r in pairs]
                 self._refresh_stored_terminal(selected)
                 pending = self._route_pending(pairs)
+                advisors = self._advisor_pending()
             # Ledger reads stay outside the shared hook lock (busy-DB hold time).
             results = self._read_stored_routes(pending)
+            found = self._advisor_lookup(advisors)
             with self.lock:
+                try:
+                    self._advisor_apply(found)
+                except Exception:
+                    pass
                 try:
                     self._apply_stored_routes(results)
                 except Exception:

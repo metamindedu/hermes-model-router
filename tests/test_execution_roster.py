@@ -892,3 +892,173 @@ def test_dispatched_payload_with_completed_hook_binds_normally(env):
     post(r, {'status': 'dispatched', 'delegation_id': 'deleg-y', 'subagent_ids': ['sa-0-y']}, args, status='completed')
     row = rows(r)[0]
     assert row['status'] == 'dispatched' and row['delegation_id'] == 'deleg-y' and row['subagent_id'] == 'sa-0-y'
+
+
+# ---- ask_advisor rows ---------------------------------------------------------------------------
+
+ADVISOR_GOAL = 'Advisor consultation 0123456789ab. Another agent asks.'
+
+
+def advise_pre(r, call='adv-1'):
+    return r.pre(tool_name='ask_advisor', args={'question': 'PRIVATE_Q'}, session_id='segment-1',
+                 conversation_id='root', tool_call_id=call)
+
+
+def advise_post(r, reply, call='adv-1'):
+    return r.post(tool_name='ask_advisor', args={'question': 'PRIVATE_Q'}, result=json.dumps(reply),
+                  session_id='segment-1', conversation_id='root', tool_call_id=call)
+
+
+@pytest.fixture
+def registry(monkeypatch):
+    from tools import delegate_tool_registry as reg
+    records = {}
+    def lookup(sid):
+        # The core takes its own registry lock: never call it under the roster lock.
+        for roster in records.get('_rosters', []):
+            assert not roster.lock._is_owned()
+        return records.get(sid)
+    monkeypatch.setattr(reg, 'get_subagent_attribution', lookup)
+    return records
+
+
+def test_an_advisor_call_gets_its_own_advise_row_bound_to_its_child(env, registry):
+    r, _, _ = env
+    registry['_rosters'] = [r]
+    advise_pre(r)
+    [row] = rows(r)
+    assert row['requested'] == {'kind': 'model', 'role': 'heavy', 'profile': None, 'purpose': 'advise', 'slot': 'advise'}
+    assert row['status'] == 'requested' and 'PRIVATE_Q' not in json.dumps(row)
+    r.start(parent_session_id='segment-1', child_session_id='adv-child', child_subagent_id='sa-adv', child_goal=ADVISOR_GOAL)
+    assert rows(r)[0]['subagent_id'] == 'sa-adv' and rows(r)[0]['delegation_id'] is None
+    # The core registers the running child with its delegation id; the next read binds it and copies the child.
+    registry['sa-adv'] = {'subagent_id': 'sa-adv', 'goal': ADVISOR_GOAL, 'delegation_id': 'deleg_adv'}
+    r.api_pre(session_id='adv-child', model='gpt-6.2-astra', provider='openai-codex')
+    r.pre(tool_name='read_file', args={}, session_id='adv-child')
+    [row] = rows(r)
+    assert (row['delegation_id'], row['native_call_delegation_id'], row['async_unit_id']) == ('deleg_adv',) * 3
+    assert row['status'] == 'running' and row['model'] == 'gpt-6.2-astra' and row['last_tool'] == 'read_file'
+    r.stop(parent_session_id='segment-1', child_session_id='adv-child', child_status='completed')
+    advise_post(r, {'status': 'ok', 'advice': 'PRIVATE_ADVICE'})
+    [row] = rows(r)
+    assert row['status'] == 'completed' and 'PRIVATE_ADVICE' not in json.dumps(row)
+
+
+def test_a_short_advisor_call_is_bound_and_settled_by_its_result(env, registry):
+    r, _, _ = env
+    advise_pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='adv-child', child_subagent_id='sa-adv', child_goal=ADVISOR_GOAL)
+    registry['sa-adv'] = {'goal': ADVISOR_GOAL, 'delegation_id': 'deleg_adv'}
+    advise_post(r, {'status': 'failed'})  # no list() read happened while it ran
+    [row] = rows(r)
+    assert row['delegation_id'] == 'deleg_adv' and row['status'] == 'error'
+
+
+def test_an_ok_advisor_result_settles_a_row_whose_child_stop_was_not_seen(env, registry):
+    r, _, _ = env
+    advise_pre(r)
+    r.start(parent_session_id='segment-1', child_session_id='adv-child', child_subagent_id='sa-adv', child_goal=ADVISOR_GOAL)
+    advise_post(r, {'status': 'ok', 'advice': 'x'})
+    [row] = rows(r)
+    assert row['status'] == 'completed' and row['delegation_id'] is None
+
+
+def test_skipped_and_refused_advisor_calls(env, registry):
+    r, _, _ = env
+    advise_pre(r, 'skip')
+    advise_post(r, {'status': 'skipped', 'reason': 'same_model'}, 'skip')
+    assert rows(r) == [] or all(row['tool_call_id'] != 'skip' for row in rows(r))
+    advise_pre(r, 'ref')
+    advise_post(r, {'status': 'refused', 'error': 'depth_limit'}, 'ref')
+    assert [row['status'] for row in rows(r)] == ['error']
+
+
+def test_advisor_rows_never_guess_between_waiting_calls_or_other_children(env, registry):
+    r, _, _ = env
+    advise_pre(r, 'a1')
+    advise_pre(r, 'a2')
+    r.start(parent_session_id='segment-1', child_session_id='c1', child_subagent_id='sa-1', child_goal=ADVISOR_GOAL)
+    assert all(row['subagent_id'] is None for row in rows(r))
+    # An ordinary child or another parent's advisor child never binds an advisor row.
+    advise_post(r, {'status': 'refused'}, 'a2')
+    r.start(parent_session_id='segment-1', child_session_id='c2', child_subagent_id='sa-2', child_goal='plain work')
+    r.start(parent_session_id='other', child_session_id='c3', child_subagent_id='sa-3', child_goal=ADVISOR_GOAL)
+    assert [row['subagent_id'] for row in rows(r) if row['tool_call_id'] == 'a1'] == [None]
+    # A registry record whose goal is not an advisor goal is never adopted.
+    r.start(parent_session_id='segment-1', child_session_id='c4', child_subagent_id='sa-4', child_goal=ADVISOR_GOAL)
+    registry['sa-4'] = {'goal': 'plain work', 'delegation_id': 'deleg_x'}
+    [row] = [row for row in rows(r) if row['tool_call_id'] == 'a1']
+    assert row['subagent_id'] == 'sa-4' and row['delegation_id'] is None
+
+
+def test_roster_advisor_marker_matches_the_guard():
+    from model_router import advise_guard, execution_roster
+    goal = advise_guard._goal('0123456789ab')
+    assert execution_roster._ADVISOR_GOAL.match(goal) and advise_guard.GOAL_MARKER.pattern == execution_roster._ADVISOR_GOAL.pattern
+
+
+def test_advisor_interrupt_and_discarded_answers_keep_their_real_outcome(env, registry):
+    r, _, _ = env
+    # The core's terminal post statuses for an abandoned call; plain-text and JSON results alike.
+    for index, (status, result) in enumerate([('cancelled', 'cancelled'), ('timeout', 'timed out'),
+                                              ('cancelled', json.dumps({'error': 'x', 'status': 'cancelled'}))]):
+        call = f'int{index}'
+        advise_pre(r, call)
+        r.start(parent_session_id='segment-1', child_session_id=f'c-{call}', child_subagent_id=f'sa-{call}', child_goal=ADVISOR_GOAL)
+        r.post(tool_name='ask_advisor', args={}, result=result, session_id='segment-1', conversation_id='root',
+               tool_call_id=call, status=status)
+        assert [row['status'] for row in rows(r) if row['tool_call_id'] == call] == [status]
+    # A child's own interrupted outcome is not overwritten by a later refusal.
+    advise_pre(r, 'own')
+    r.start(parent_session_id='segment-1', child_session_id='c-own', child_subagent_id='sa-own', child_goal=ADVISOR_GOAL)
+    registry['sa-own'] = {'goal': ADVISOR_GOAL, 'delegation_id': 'deleg_own'}
+    rows(r)
+    r.stop(parent_session_id='segment-1', child_session_id='c-own', child_status='interrupted')
+    advise_post(r, {'status': 'refused', 'error': 'guard_unbound'}, 'own')
+    assert [row['status'] for row in rows(r) if row['tool_call_id'] == 'own'] == ['interrupted']
+    advise_pre(r, 'gu')
+    r.start(parent_session_id='segment-1', child_session_id='c-gu', child_subagent_id='sa-gu', child_goal=ADVISOR_GOAL)
+    registry['sa-gu'] = {'goal': ADVISOR_GOAL, 'delegation_id': 'deleg_gu'}
+    rows(r)
+    r.stop(parent_session_id='segment-1', child_session_id='c-gu', child_status='completed')
+    advise_post(r, {'status': 'refused', 'error': 'guard_unbound'}, 'gu')
+    assert [row['status'] for row in rows(r) if row['tool_call_id'] == 'gu'] == ['error']
+
+
+def test_a_stale_waiting_advisor_row_does_not_block_later_binds(env, registry):
+    from model_router import execution_roster
+    assert execution_roster._ADVISOR_WAIT_SECONDS == 420
+    r, _, _ = env
+    advise_pre(r, 'lost')
+    for row in r.rows.values():
+        row['updated_at'] -= execution_roster._ADVISOR_WAIT_SECONDS + 1
+    advise_pre(r, 'next')
+    r.start(parent_session_id='segment-1', child_session_id='c-next', child_subagent_id='sa-next', child_goal=ADVISOR_GOAL)
+    assert {row['tool_call_id']: row['subagent_id'] for row in rows(r)} == {'lost': None, 'next': 'sa-next'}
+
+
+def test_advisor_rows_ignore_reused_subagent_ids_and_other_homes(env, registry, monkeypatch, tmp_path):
+    r, _, _ = env
+    advise_pre(r, 'one')
+    r.start(parent_session_id='segment-1', child_session_id='c1', child_subagent_id='sa-dup', child_goal=ADVISOR_GOAL)
+    advise_post(r, {'status': 'ok'}, 'one')
+    advise_pre(r, 'two')
+    r.start(parent_session_id='segment-1', child_session_id='c2', child_subagent_id='sa-dup', child_goal=ADVISOR_GOAL)
+    assert [row['subagent_id'] for row in rows(r) if row['tool_call_id'] == 'two'] == [None]
+    advise_post(r, {'status': 'refused'}, 'two')
+    # The registry's id must be a safe id, and must belong to the row's own child.
+    advise_pre(r, 'three')
+    r.start(parent_session_id='segment-1', child_session_id='c3', child_subagent_id='sa-3', child_goal=ADVISOR_GOAL)
+    assert [row['subagent_id'] for row in rows(r) if row['tool_call_id'] == 'three'] == ['sa-3']
+    registry['sa-3'] = {'goal': ADVISOR_GOAL, 'delegation_id': '../bad'}
+    assert [row['delegation_id'] for row in rows(r) if row['tool_call_id'] == 'three'] == [None]
+    [three] = [row for row in r.rows.values() if row['tool_call_id'] == 'three']
+    r._advisor_apply({three['id']: ('sa-other', 'deleg_other')})
+    assert three['delegation_id'] is None
+    # Another profile's hooks never write this home's roster.
+    other = tmp_path / 'elsewhere'
+    other.mkdir()
+    monkeypatch.setattr(hermes_constants, 'get_hermes_home', lambda: other)
+    advise_pre(r, 'foreign')
+    monkeypatch.undo()
+    assert all(row['tool_call_id'] != 'foreign' for row in r.rows.values())

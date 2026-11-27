@@ -2,6 +2,10 @@
 
 Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. Native work uses `delegate_task`; historical routed-process starts remain retired. A separate explicitly opt-in `profile_task` path attaches to Gateway-owned target sessions, not a private agent executor. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
+## Status line names the advisor child (0.16.1)
+
+The status line above the composer showed an `ask_advisor` child as `종류 미확인`. It now shows it as `조언` with its model, tool and time, bound to the call by the advisor goal marker and the core's delegation id; parallel advisor calls from one turn are left unbound rather than guessed. Details: [docs/releases/v0.16.1.md](docs/releases/v0.16.1.md).
+
 ## Advisor slot and `ask_advisor` (0.16.0)
 
 A seventh built-in task slot, **조언** (`advise`, Heavy), is consulted rather than delegated to. The working agent calls the new `ask_advisor(question, context)` tool at a decision point (before committing to an approach, after the same failure twice, before declaring hard work done) and gets a short answer in the same tool call, then keeps working. Set the slot's model on the settings page like any other slot; it is useful when the conversation model is a fast or cheap one and the advisor a stronger one.

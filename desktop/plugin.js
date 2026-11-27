@@ -6603,7 +6603,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.16.0',
+  version: '0.16.1',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null
