@@ -49,6 +49,9 @@ def scoped(key, compute):
 # Written only while some profile carries task-slot declarations, so an
 # untouched install keeps a file an older package can still read.
 SLOT_SCHEMA = 3
+# Written only while custom slots are defined (store-level `custom_slots`), so an untouched or
+# built-in-only install keeps a file the previous package can still read.
+CUSTOM_SCHEMA = 4
 STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
 STATE_RELATIVE = Path("plugin-data") / "model-router" / "recent_apply.json"
 SKILL_NAME = "adaptive-coding-orchestration"
@@ -829,7 +832,8 @@ def _merge_partial_slots(stored: Any, submitted: dict[str, Any], *, keep_legacy:
         if keep_legacy and isinstance(current, dict) and current.get("follow") == LEGACY_SLOT_FOLLOW:
             continue
         merged[slot] = copy.deepcopy(declaration)
-    return {slot: merged[slot] for slot in slot_model.BUILTIN_SLOTS if slot in merged}
+    customs = sorted(slot for slot in merged if slot not in slot_model.BUILTIN_SLOTS)
+    return {slot: merged[slot] for slot in (*slot_model.BUILTIN_SLOTS, *customs) if slot in merged}
 
 
 def _keep_absent_keys(entry: Any, raw: Any, loaded: Any) -> Any:
@@ -850,8 +854,17 @@ def _keep_absent_keys(entry: Any, raw: Any, loaded: Any) -> Any:
     return out
 
 
-def _store_schema(entries: dict[str, Any]) -> int:
+def _store_schema(entries: dict[str, Any], custom: Any = ()) -> int:
+    if custom:
+        return CUSTOM_SCHEMA
     return SLOT_SCHEMA if any(entry["routing"].get("slots") for entry in entries.values()) else SCHEMA
+
+
+def _store_payload(schema: int, revision: int, profiles: dict[str, Any], custom: Any) -> dict[str, Any]:
+    data = {"schema": schema, "revision": revision, "profiles": profiles}
+    if custom:
+        data["custom_slots"] = copy.deepcopy(list(custom))
+    return data
 
 
 def _stored_slots(entries: dict[str, Any]) -> dict[str, Any]:
@@ -1003,7 +1016,8 @@ class Service:
         except FileNotFoundError:
             return "absent"
 
-    def _preserve_untouched_entries(self, after: dict[str, Any], loaded: dict[str, Any], expected_digest: str) -> dict[str, Any]:
+    def _preserve_untouched_entries(self, after: dict[str, Any], loaded: dict[str, Any], expected_digest: str,
+                                    custom: Any = ()) -> dict[str, Any]:
         """The plan's entries, with every entry the plan leaves unchanged kept exactly as stored.
 
         Loading normalizes entries in memory (for example adding `delegation_fallback: null`).
@@ -1021,7 +1035,7 @@ class Service:
             raw = json.loads(data)
         except ValueError:
             return after
-        if not isinstance(raw, dict) or raw.get("schema") != _store_schema(after) or not isinstance(raw.get("profiles"), dict):
+        if not isinstance(raw, dict) or raw.get("schema") != _store_schema(after, custom) or not isinstance(raw.get("profiles"), dict):
             return after
         stored = raw["profiles"]
         kept: dict[str, Any] = {}
@@ -1042,11 +1056,19 @@ class Service:
             return None
         if (
             not isinstance(data, dict)
-            or set(data) != {"schema", "revision", "profiles"}
             or isinstance(data.get("schema"), bool)
-            or data.get("schema") not in {1, SCHEMA, SLOT_SCHEMA}
+            or data.get("schema") not in {1, SCHEMA, SLOT_SCHEMA, CUSTOM_SCHEMA}
+            or set(data) != ({"schema", "revision", "profiles", "custom_slots"} if data.get("schema") == CUSTOM_SCHEMA
+                             else {"schema", "revision", "profiles"})
         ):
             raise ServiceError("settings schema is invalid")
+        try:
+            custom = slot_model.validate_custom_slots(data["custom_slots"]) if data["schema"] == CUSTOM_SCHEMA else []
+        except ValueError as exc:
+            raise ServiceError("settings custom slots are invalid") from exc
+        if data["schema"] == CUSTOM_SCHEMA and not custom:
+            raise ServiceError("settings schema is invalid")
+        custom_ids = {item["id"] for item in custom}
         if not isinstance(data.get("revision"), int) or isinstance(data.get("revision"), bool) or data["revision"] < 0:
             raise ServiceError("settings revision is invalid")
         if not isinstance(data.get("profiles"), dict):
@@ -1077,8 +1099,10 @@ class Service:
                         raise ValueError("schema2 profile entry has unknown fields")
                     models = _models(entry["models"], allow_empty_model=True)
                     routing = _routing(entry["routing"])
-                    if "slots" in entry["routing"] and (data["schema"] != SLOT_SCHEMA or "slots" not in routing):
+                    if "slots" in entry["routing"] and (data["schema"] not in (SLOT_SCHEMA, CUSTOM_SCHEMA) or "slots" not in routing):
                         raise ValueError("slot declarations require the slot schema and must not be empty")
+                    if set(routing.get("slots", {})) - set(slot_model.BUILTIN_SLOTS) - custom_ids:
+                        raise ValueError("slot declarations name a custom slot that is not defined")
                     native_fallback = self._validate_native_fallback(entry["native_fallback"])
                     delegation_fallback = self._validate_delegation_fallback(entry.get("delegation_fallback"))
                     raw_consent = entry["fallback_consent"]
@@ -1110,7 +1134,7 @@ class Service:
         # through an explicit settings apply or the existing initializer.
         if data["schema"] == SLOT_SCHEMA and _store_schema(normalized) != SLOT_SCHEMA:
             raise ServiceError("settings schema is invalid")
-        return {"schema": data["schema"], "revision": data["revision"], "profiles": normalized}
+        return {"schema": data["schema"], "revision": data["revision"], "profiles": normalized, "custom_slots": custom}
 
     def _validate_native_fallback(self, value: Any) -> dict[str, Any] | None:
         if value is None:
@@ -1433,8 +1457,10 @@ class Service:
         # Validate both routes while allowing the same provider/model/effort.
         _route(heavy)
         _route(light)
-        for slot in routing.get("slots", {}):
-            _route(slot_model.slot_route(routing, models, slot))
+        declared = routing.get("slots", {})
+        tiers = {**slot_model.SLOT_TIERS, **{slot: "heavy" for slot in declared if slot_model.is_custom_slot(slot)}}
+        for slot in declared:
+            _route(slot_model.slot_route(routing, models, slot, tiers))
 
     @staticmethod
     def _check_live_routes(routing: dict[str, Any], live: dict[str, dict[str, str]]) -> None:
@@ -2092,7 +2118,8 @@ class Service:
                 self._check_primary_routes(entries[name]["routing"], entries[name]["models"])
             changed = stored is None or entries != stored["profiles"]
             revision = (stored["revision"] if stored else 0) + (1 if changed else 0)
-            data = {"schema": _store_schema(entries), "revision": revision, "profiles": entries}
+            custom = (stored or {}).get("custom_slots") or []
+            data = _store_payload(_store_schema(entries, custom), revision, entries, custom)
             if changed:
                 _atomic_write(self.store_path, _json_bytes(data))
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -2180,6 +2207,10 @@ class Service:
                 "purposes": dict(slot_model.PURPOSE_SLOTS),
                 "follows": list(slot_model.FOLLOWS),
                 "blocking_profiles": self._slot_blocking_profiles(discovered),
+                # Operator-added slots, shared by every profile (see custom_slots_preview).
+                "custom_slots_supported": True,
+                "custom_slot_limit": slot_model.CUSTOM_SLOT_LIMIT,
+                "custom_slots": copy.deepcopy((stored or {}).get("custom_slots") or []),
             },
         }
         if not paged:
@@ -2226,7 +2257,7 @@ class Service:
             "name": name,
             "models": models,
             "routing": routing,
-            "slots": self._slots_dto(name, routing),
+            "slots": self._slots_dto(name, routing, (stored or {}).get("custom_slots") or []),
             "actual_models": copy.deepcopy(models),
             "model_roles": model_roles,
             "drift": drift,
@@ -2267,12 +2298,12 @@ class Service:
     def _slot_blocking_profiles(self, discovered: list[str]) -> list[str]:
         return [name for name in discovered if not self._slot_capable(name)]
 
-    def _slots_dto(self, profile: str, routing: dict[str, Any]) -> dict[str, Any]:
+    def _slots_dto(self, profile: str, routing: dict[str, Any], custom: Any = ()) -> dict[str, Any]:
         return {
             "schema": 1,
             "capable": self._slot_capable(profile),
-            "stored": [slot for slot in slot_model.BUILTIN_SLOTS if slot in routing.get("slots", {})],
-            "declarations": slot_model.effective_declarations(routing),
+            "stored": [slot for slot in slot_model.slot_ids(custom) if slot in routing.get("slots", {})],
+            "declarations": slot_model.effective_declarations(routing, custom),
         }
 
     def native_route_config(self, profile: str) -> dict[str, Any]:
@@ -2291,6 +2322,7 @@ class Service:
     def routing_config(self, profile: str) -> dict[str, Any]:
         profile = self._require_profile(profile)
         stored = self._load_store()
+        custom = (stored or {}).get("custom_slots") or []
         entry = stored["profiles"].get(profile) if stored else None
         if entry is None:
             routing = self._initial_routing(profile)
@@ -2315,9 +2347,11 @@ class Service:
             "model_roles": model_roles,
             # What each task slot runs on. Heavy/Light above remain for
             # historical readers and for a slot that has never been set.
-            "slots": slot_model.resolved_slots(routing, models),
-            "slot_tiers": dict(slot_model.SLOT_TIERS),
-            "purpose_slots": dict(slot_model.PURPOSE_SLOTS),
+            "slots": slot_model.resolved_slots(routing, models, custom),
+            "slot_tiers": slot_model.slot_tiers(custom),
+            "purpose_slots": slot_model.purpose_slots(custom),
+            "purpose_roles": slot_model.purpose_roles(custom),
+            "custom_slots": copy.deepcopy(custom),
             "fallback": dict(routing["fallback"]),
             "revision": revision,
             "light_timeout_seconds": timeouts.routed_seconds(limits, "light"),
@@ -2475,7 +2509,7 @@ class Service:
             return (set(value) == {"enabled", "slots", "skill_enabled"} and type(value["enabled"]) is bool and
                     (value["skill_enabled"] is None or type(value["skill_enabled"]) is bool) and
                     type(value["slots"]) is dict and len(value["slots"]) <= 32 and
-                    all(text(key, 64) and key in slot_model.BUILTIN_SLOTS and (item is None or declaration(item))
+                    all(text(key, 64) and (key in slot_model.BUILTIN_SLOTS or slot_model.is_custom_slot(key)) and (item is None or declaration(item))
                         for key, item in value["slots"].items()))
         if field == "routing":
             return (type(value) is dict and set(value) == {"enabled", "heavy", "light", "slots", "skill_enabled"} and
@@ -2705,6 +2739,12 @@ class Service:
         if expected != revision:
             raise RevisionConflict("settings revision changed; reload before preview")
         entries = dict(stored["profiles"]) if stored else {}
+        custom_slots = (stored or {}).get("custom_slots") or []
+        if submitted_routing is not None:
+            # A custom slot is saved only while it is defined (definitions: custom_slots_preview).
+            defined = {item["id"] for item in custom_slots}
+            if set(submitted_routing.get("slots") or {}) - set(slot_model.BUILTIN_SLOTS) - defined:
+                raise ValueError("routing.slots names a custom slot that is not defined")
         # Compare the frozen values before projecting anything: a value changed elsewhere (even one
         # that leaves a model unresolvable) is that profile's ExternalChange, not a later error.
         self._check_page_expectations(page_expected, entries, role_subset=native_wire, partial=partial)
@@ -3006,6 +3046,101 @@ class Service:
             plan["owner_profile"] = self.active_profile()
             _atomic_write(plans_dir / (plan_id + ".json"), _json_bytes(plan))
         return {"plan_id": plan_id, "changes": json.loads(json.dumps(changes)), "warnings": [], "expires_at": expires_at}
+
+    def custom_slots_preview(self, body: dict) -> dict[str, Any]:
+        """Replace the custom slot definitions shared by every profile (a whole ordered list).
+
+        A removed slot's model declaration is removed from every profile in the same write, so no
+        stored declaration ever names an undefined slot. Models are chosen per profile afterwards on
+        the slot cards (the ordinary preview). Nothing else in any profile changes.
+        """
+        if not isinstance(body, dict) or set(body) != {"expected_revision", "custom_slots"}:
+            raise ValueError("custom slots preview takes expected_revision and custom_slots")
+        expected = body["expected_revision"]
+        if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        definitions = slot_model.validate_custom_slots(body["custom_slots"])
+        store_digest = self._store_file_digest()
+        stored = self._load_store()
+        revision = stored["revision"] if stored else 0
+        if expected != revision:
+            raise RevisionConflict("settings revision changed; reload before preview")
+        current = (stored or {}).get("custom_slots") or []
+        if definitions and definitions != current and self._slot_blocking_profiles(self._discover_profiles()):
+            raise ValueError("custom slots need every installed profile on this plugin version first")
+        entries = copy.deepcopy(stored["profiles"]) if stored else {}
+        removed = {item["id"] for item in current} - {item["id"] for item in definitions}
+        changes: list[dict[str, Any]] = []
+        if definitions != current:
+            changes.append({"profile": "*", "field": "custom_slots", "before": copy.deepcopy(current), "after": copy.deepcopy(definitions)})
+        after = copy.deepcopy(entries)
+        for name, entry in after.items():
+            slots = entry["routing"].get("slots") or {}
+            gone = sorted(set(slots) & removed)
+            if not gone:
+                continue
+            kept = {slot: value for slot, value in slots.items() if slot not in removed}
+            entry["routing"].pop("slots", None)
+            if kept:
+                entry["routing"]["slots"] = kept
+            changes.append({"profile": name, "field": "routing.slots", "before": {slot: slots[slot] for slot in gone}, "after": None})
+        plan_id = uuid.uuid4().hex
+        expires_epoch = time.time() + self.PLAN_TTL
+        expires_at = datetime.fromtimestamp(expires_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+        plan = {"id": plan_id, "kind": "custom_slots", "revision": revision, "after": after, "custom_slots": definitions,
+                "changes": changes, "state_changed": bool(changes), "expires_epoch": expires_epoch, "store_digest": store_digest,
+                "snapshots": {}, "config_digests": {}, "writes": []}
+        if self._store_file_digest() != store_digest:
+            raise RevisionConflict("settings changed during preview; preview again")
+        self._plans[plan_id] = plan
+        plans_dir = self.store_path.parent / "plans"
+        with _FileLock(self._lock_path):
+            _secure_dir(plans_dir)
+            for path in plans_dir.glob("*.json"):
+                if path.is_symlink():
+                    raise ServiceError("unsafe preview plan path")
+                old = _read_json(path, default={})
+                if old.get("expires_epoch", 0) < time.time():
+                    path.unlink(missing_ok=True)
+            if len(list(plans_dir.glob("*.json"))) >= self.PLAN_LIMIT:
+                raise ServiceError("too many pending previews; wait for expiry")
+            plan["owner_profile"] = self.active_profile()
+            _atomic_write(plans_dir / (plan_id + ".json"), _json_bytes(plan))
+        return {"plan_id": plan_id, "changes": json.loads(json.dumps(changes)), "warnings": [], "expires_at": expires_at}
+
+    def _apply_custom_slots(self, plan: dict[str, Any], plan_id: str, current: dict[str, Any] | None, revision: int) -> dict[str, Any]:
+        """Apply a custom slot definition plan (caller holds the lock and consumed the plan)."""
+        if plan.get("store_digest") is None or self._store_file_digest() != plan["store_digest"]:
+            raise RevisionConflict("settings changed since preview; preview again")
+        definitions = slot_model.validate_custom_slots(plan.get("custom_slots"))
+        if not plan["changes"]:
+            receipt = {"status": "no_change", "plan_id": plan_id, "revision": revision, "applied": [], "remaining": [], "finished_at": _now()}
+            self._store_apply(receipt)
+            return receipt
+        if definitions and definitions != ((current or {}).get("custom_slots") or []):
+            if self._slot_blocking_profiles(self._discover_profiles()):
+                raise RevisionConflict("custom slots need every installed profile on this plugin version first; preview again")
+        after = plan["after"]
+        for entry in after.values():
+            # Never write a declaration of a slot this plan leaves undefined.
+            if set(entry["routing"].get("slots") or {}) - set(slot_model.slot_ids(definitions)):
+                raise ServiceError("custom slot plan is inconsistent")
+        new_revision = revision + 1
+        profiles = self._preserve_untouched_entries(after, (current or {}).get("profiles") or {}, plan["store_digest"], definitions)
+        next_store = _store_payload(_store_schema(after, definitions), new_revision, profiles, definitions)
+
+        def store_unchanged() -> None:
+            if self._store_file_digest() != plan["store_digest"]:
+                raise RevisionConflict("settings changed during apply; nothing was written; preview again")
+
+        _atomic_write(self.store_path, _json_bytes(next_store), before_replace=store_unchanged)
+        written = self._load_store()
+        if not written or written["revision"] != new_revision or written["custom_slots"] != definitions:
+            raise ServiceError("custom slot readback mismatch")
+        receipt = {"status": "applied", "plan_id": plan_id, "revision": new_revision,
+                   "applied": [{"profile": "*", "key": "custom_slots"}], "remaining": [], "finished_at": _now()}
+        self._store_apply(receipt)
+        return receipt
 
     def _plan_auxiliary_fallback(
         self, profile: str, chains: dict[str, list[dict[str, str]]], confirmation: dict[str, bool] | None,
@@ -3552,6 +3687,8 @@ class Service:
                 return native_service.apply_consumed(self, plan, plan_id)
             if plan.get("kind") == "initial_setup":
                 return native_service.initial_setup_apply_consumed(self, plan, plan_id)
+            if plan.get("kind") == "custom_slots":
+                return self._apply_custom_slots(plan, plan_id, current, revision)
             # The plan's `after` replaces the whole store: refuse unless the store is byte-for-byte
             # the one preview computed it from, so no profile the save did not target is reverted.
             if plan.get("store_digest") is None or self._store_file_digest() != plan["store_digest"]:
@@ -3597,8 +3734,9 @@ class Service:
                 self._store_apply(receipt)
                 return receipt
             new_revision = revision + 1 if plan["state_changed"] else revision
-            next_profiles = self._preserve_untouched_entries(plan["after"], (current or {}).get("profiles") or {}, plan["store_digest"])
-            next_store = {"schema": _store_schema(plan["after"]), "revision": new_revision, "profiles": next_profiles}
+            custom = (current or {}).get("custom_slots") or []
+            next_profiles = self._preserve_untouched_entries(plan["after"], (current or {}).get("profiles") or {}, plan["store_digest"], custom)
+            next_store = _store_payload(_store_schema(plan["after"], custom), new_revision, next_profiles, custom)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             profiles_to_backup = sorted({item["profile"] for item in plan["writes"]})
             timeout_writes = [item for item in plan.get("timeout_writes", []) if item.get("write_required", True)]

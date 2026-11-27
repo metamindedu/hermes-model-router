@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .delegation_reports import DelegationRouteReports
-from .slots import PURPOSE_SLOTS
+from .slots import PURPOSE_SLOTS, is_custom_slot
 
 _SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}\Z", re.ASCII)
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+/-]{0,127}(?:\[[A-Za-z0-9._-]{1,32}\])?\Z", re.ASCII)
@@ -45,9 +45,18 @@ def _safe(value):
     return value if isinstance(value, str) and '..' not in value and _SAFE.fullmatch(value) else None
 
 
-def _requested(task):
+def _requested(task, custom=None):
+    """The requested execution of one task. ``custom``: defined custom slots, id -> (tier, label)."""
     task = task if isinstance(task, dict) else {}
+    custom = custom or {}
     raw_purpose = task.get('purpose')
+    if isinstance(raw_purpose, str) and raw_purpose in custom:
+        tier, label = custom[raw_purpose]
+        profile_given = 'profile' in task
+        if task.get('execution') in (None, 'model') and not profile_given:
+            return {'kind': 'model', 'role': tier, 'profile': None, 'purpose': raw_purpose, 'slot': raw_purpose,
+                    'slot_label': label}
+        return {'kind': 'unknown', 'role': None, 'profile': None, 'purpose': None, 'slot': None}
     purpose = raw_purpose if isinstance(raw_purpose, str) and raw_purpose in _PURPOSES else None
     profile = task.get('profile')
     profile = profile if isinstance(profile, str) and _PROFILE.fullmatch(profile) else None
@@ -739,13 +748,14 @@ class ExecutionRoster:
                 tasks = [{}]
             if not isinstance(tasks, list) or not tasks or len(tasks) > 128:
                 return None
+            custom = self._custom_slots() if any(isinstance(t, dict) and is_custom_slot(t.get('purpose')) for t in tasks) else {}
             with self.lock:
                 for i, task in enumerate(tasks):
                     key = (root, session, call, i)
                     if key in self.rows:
                         continue
                     digest = hashlib.sha256(json.dumps(key, ensure_ascii=True).encode()).hexdigest()
-                    self.rows[key] = {'id': digest, 'execution_mode': 'native', 'requested': _requested(task),
+                    self.rows[key] = {'id': digest, 'execution_mode': 'native', 'requested': _requested(task, custom),
                         'observed': _observed({}), 'conversation_id': root, 'parent_session_id': session,
                         'tool_call_id': call, 'task_index': i, 'subagent_id': None, 'delegation_id': None,
                         'async_unit_id': None, 'native_call_delegation_id': None,
@@ -756,6 +766,16 @@ class ExecutionRoster:
         except Exception:
             pass
         return None
+
+    def _custom_slots(self):
+        # Outside the hook lock: this profile's defined custom slots, read-only. Labels are operator
+        # text from the settings page, not task text.
+        try:
+            from .service import Service
+            stored = Service()._load_store()
+            return {item['id']: (item['tier'], item['label']) for item in ((stored or {}).get('custom_slots') or [])}
+        except Exception:
+            return {}
 
     def _pre_advisor(self, session_id, conversation_id, tool_call_id):
         # One row per ask_advisor call: the advise slot, one child, no task text kept.

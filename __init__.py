@@ -25,7 +25,7 @@ def register(ctx):
             return False
 
     def cli_setup(parser):
-        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "apply", "stage", "role-proposal-context", "role-proposal", "profile-jobs-status", "profile-jobs-configure"])
+        parser.add_argument("operation", choices=["status", "preview", "fallback-preview", "delegation-preview", "initial-setup-preview", "custom-slots-preview", "apply", "stage", "role-proposal-context", "role-proposal", "profile-jobs-status", "profile-jobs-configure"])
         parser.add_argument("--body", default="{}")
 
     def cli_handler(args):
@@ -83,6 +83,7 @@ def register(ctx):
                 if args.operation == "fallback-preview": return service.fallback_preview(body)
                 if args.operation == "delegation-preview": return service.delegation_preview(body)
                 if args.operation == "initial-setup-preview": return service.initial_setup_preview(body)
+                if args.operation == "custom-slots-preview": return service.custom_slots_preview(body)
                 if set(body) != {"plan_id"}: raise ValueError("apply accepts only plan_id")
                 return service.apply(body["plan_id"])
             if args.operation in ('role-proposal-context', 'role-proposal'):

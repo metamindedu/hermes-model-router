@@ -72,7 +72,9 @@ def _routed_policies(home: Path, args: Mapping[str, Any], backend: str = 'model-
                 continue  # Native provider owns per-task refusal, preserving valid siblings.
             if execution == 'model' and config.get('enabled') is not True:
                 continue
-        role = (PURPOSE_ROLES.get(purpose) if isinstance(purpose, str) else None) if execution == 'model' else 'profile'
+        # Custom purposes are known from the routing config (the store's defined custom slots).
+        roles = config.get('purpose_roles') or PURPOSE_ROLES
+        role = (roles.get(purpose) if isinstance(purpose, str) else None) if execution == 'model' else 'profile'
         if not isinstance(goal, str):
             raise ValueError('invalid routed task')
         if role is None:

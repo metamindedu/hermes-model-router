@@ -11,7 +11,9 @@ meaning of a slot that has never been set.
 from __future__ import annotations
 
 import copy
-from typing import Any, Callable, Mapping
+import re
+import unicodedata
+from typing import Any, Callable, Iterable, Mapping
 
 # Order is user-visible (settings page) and part of the tool schema.
 BUILTIN_SLOTS = ("design", "code-complex", "code-simple", "verify-simple", "verify-complex", "computer-use", "advise")
@@ -49,6 +51,69 @@ ADVISOR_PURPOSES = frozenset({"advise"})
 # Slot sets an earlier release persisted. A stored per-slot block with one of
 # these key sets is complete: the slots added since then are simply off there.
 LEGACY_SLOT_SETS = (frozenset(BUILTIN_SLOTS[:6]),)
+# Operator-added slots: defined once for every profile (label, one-line scope description, tier),
+# each profile picks its model like a built-in slot. The slot id is also the purpose the agent sends.
+CUSTOM_PREFIX = "custom:"
+CUSTOM_SLOT_LIMIT = 4
+CUSTOM_LABEL_LIMIT = 24
+CUSTOM_DESCRIPTION_LIMIT = 120
+_CUSTOM_ID = re.compile(r"custom:[a-z0-9][a-z0-9-]{1,31}\Z")
+# Control and format characters (C0/C1 controls, bidi controls, zero-width joiners and tag
+# characters), lone surrogates and line/paragraph separators render invisibly or reorder text; the page refuses the same categories.
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def is_custom_slot(value: Any) -> bool:
+    return isinstance(value, str) and _CUSTOM_ID.fullmatch(value) is not None
+
+
+def _custom_text(value: Any, limit: int, field: str) -> str:
+    if (not isinstance(value, str) or not value or len(value) > limit or value != value.strip()
+            or any(unicodedata.category(char) in _HIDDEN_CATEGORIES for char in value)):
+        raise ValueError(f"custom slot {field} must be 1-{limit} characters on one line")
+    return value
+
+
+def validate_custom_slots(value: Any) -> list[dict[str, str]]:
+    """Validate the operator's custom slot definitions (an ordered list, at most four)."""
+    if not isinstance(value, list) or len(value) > CUSTOM_SLOT_LIMIT:
+        raise ValueError(f"custom_slots must be a list of at most {CUSTOM_SLOT_LIMIT} slots")
+    result, ids, labels = [], set(), set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"id", "label", "description", "tier"}:
+            raise ValueError("each custom slot defines id, label, description and tier")
+        slot = item["id"]
+        if not is_custom_slot(slot) or slot in ids:
+            raise ValueError("custom slot id must be custom: plus 2-32 lowercase letters, digits or hyphens, used once")
+        label = _custom_text(item["label"], CUSTOM_LABEL_LIMIT, "label")
+        if label.casefold() in labels:
+            raise ValueError("custom slot labels must differ")
+        description = _custom_text(item["description"], CUSTOM_DESCRIPTION_LIMIT, "description")
+        if item["tier"] not in TIERS:
+            raise ValueError("custom slot tier must be heavy or light")
+        ids.add(slot)
+        labels.add(label.casefold())
+        result.append({"id": slot, "label": label, "description": description, "tier": item["tier"]})
+    return result
+
+
+def slot_tiers(definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, str]:
+    """Every slot's tier: the built-ins, then the defined custom slots in order."""
+    return {**SLOT_TIERS, **{item["id"]: item["tier"] for item in definitions}}
+
+
+def slot_ids(definitions: Iterable[Mapping[str, Any]] = ()) -> tuple[str, ...]:
+    return (*BUILTIN_SLOTS, *(item["id"] for item in definitions))
+
+
+def purpose_slots(definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, str]:
+    """Purpose -> slot. A custom slot's purpose is its own id; built-in purposes come first."""
+    return {**PURPOSE_SLOTS, **{item["id"]: item["id"] for item in definitions}}
+
+
+def purpose_roles(definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, str]:
+    tiers = slot_tiers(definitions)
+    return {purpose: tiers[slot] for purpose, slot in purpose_slots(definitions).items()}
 
 
 def complete_slot_keys(mapping: Any, filler: Callable[[str], Any]) -> dict[str, Any]:
@@ -65,19 +130,27 @@ def complete_slot_keys(mapping: Any, filler: Callable[[str], Any]) -> dict[str, 
     return {slot: mapping[slot] if slot in mapping else filler(slot) for slot in BUILTIN_SLOTS}
 
 
-def validate_slots(value: Any, route: Callable[[Any], dict[str, str]]) -> dict[str, dict[str, Any]]:
+def validate_slots(value: Any, route: Callable[[Any], dict[str, str]],
+                   custom_ids: Iterable[str] | None = None) -> dict[str, dict[str, Any]]:
     """Validate stored or submitted slot declarations.
 
-    Only built-in slots are accepted. An absent slot is valid and means the
-    slot has never been set; it is not filled in here.
+    Built-in slots and custom slot ids are accepted. With ``custom_ids`` given, a custom id must be
+    one of them; without, any well-formed custom id passes here and the caller checks it against the
+    stored definitions. An absent slot is valid and means the slot has never been set; it is not
+    filled in here.
     """
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValueError("routing.slots must be a mapping of slot declarations")
-    unknown = set(value) - set(BUILTIN_SLOTS)
-    if unknown:
+    customs = sorted(key for key in value if key not in BUILTIN_SLOTS)
+    if any(not is_custom_slot(key) for key in customs):
         raise ValueError("routing.slots contains an unknown slot")
+    if custom_ids is not None:
+        known = list(custom_ids)
+        if set(customs) - set(known):
+            raise ValueError("routing.slots names a custom slot that is not defined")
+        customs = [key for key in known if key in value]
     result: dict[str, dict[str, Any]] = {}
-    for slot in BUILTIN_SLOTS:
+    for slot in (*BUILTIN_SLOTS, *customs):
         if slot not in value:
             continue
         item = value[slot]
@@ -101,35 +174,41 @@ def tier_route(routing: Mapping[str, Any], models: Mapping[str, Any], tier: str)
     return models[TIER_FOLLOWS[tier]] if declaration["follow"] == TIER_FOLLOWS[tier] else declaration["custom"]
 
 
-def slot_route(routing: Mapping[str, Any], models: Mapping[str, Any], slot: str) -> Any:
-    """Resolve one built-in slot to its route declaration (not validated here)."""
-    if slot not in SLOT_TIERS:
+def slot_route(routing: Mapping[str, Any], models: Mapping[str, Any], slot: str,
+               tiers: Mapping[str, str] | None = None) -> Any:
+    """Resolve one slot to its route declaration (not validated here). ``tiers`` adds custom slots."""
+    tiers = SLOT_TIERS if tiers is None else tiers
+    if slot not in tiers:
         raise ValueError("unknown slot")
     declaration = (routing.get("slots") or {}).get(slot)
     if declaration is None:
-        return tier_route(routing, models, SLOT_TIERS[slot])
+        return tier_route(routing, models, tiers[slot])
     if declaration["follow"] == "custom":
         return declaration["custom"]
     return models[declaration["follow"]]
 
 
-def resolved_slots(routing: Mapping[str, Any], models: Mapping[str, Any]) -> dict[str, Any]:
-    return {slot: copy.deepcopy(slot_route(routing, models, slot)) for slot in BUILTIN_SLOTS}
+def resolved_slots(routing: Mapping[str, Any], models: Mapping[str, Any],
+                   definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    tiers = slot_tiers(definitions)
+    return {slot: copy.deepcopy(slot_route(routing, models, slot, tiers)) for slot in tiers}
 
 
-def effective_declarations(routing: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def effective_declarations(routing: Mapping[str, Any],
+                           definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, dict[str, Any]]:
     """Every built-in slot as an explicit declaration, for display and editing.
 
     A never-set slot is shown as what it currently resolves through: its tier's
     live link or the tier's custom route. Nothing is persisted by this view.
     """
     stored = routing.get("slots") or {}
+    tiers = slot_tiers(definitions)
     result = {}
-    for slot in BUILTIN_SLOTS:
+    for slot in tiers:
         if slot in stored:
             result[slot] = copy.deepcopy(stored[slot])
             continue
-        tier = SLOT_TIERS[slot]
+        tier = tiers[slot]
         declaration = routing[tier]
         if declaration["follow"] == TIER_FOLLOWS[tier]:
             result[slot] = {"follow": TIER_FOLLOWS[tier], "custom": None}

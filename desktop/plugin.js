@@ -774,6 +774,34 @@ export const TASK_SLOTS = [
   { id: 'computer-use', tier: 'light', label: '컴퓨터 유즈', description: '브라우저나 데스크톱 화면을 직접 조작하는 작업' },
   { id: 'advise', tier: 'heavy', label: '조언', description: '작업 중 판단이 막힐 때 읽기 전용으로 조언만 하는 작업 (ask_advisor 도구)', limitLabel: '5분 고정 제한' }
 ].map(slot => Object.freeze(slot))
+// Operator-added slots (status `slot_capabilities.custom_slots`), defined once for every profile and
+// shown after the built-ins. Each profile picks its model on the slot card like a built-in slot; they
+// have no spare models. The page sets the list from every status it reads (setCustomTaskSlots).
+export const CUSTOM_SLOT_ID = /^custom:[a-z0-9][a-z0-9-]{1,31}$/
+export const CUSTOM_SLOT_LIMIT = 4
+// Same refusal as the service: control/format characters and line/paragraph separators. Lengths count
+// code points (the service's len()), not UTF-16 units.
+const CUSTOM_SLOT_TEXT = /^[^\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]+$/u
+const textLength = value => [...value].length
+let customTaskSlots = Object.freeze([])
+export function customSlotDefinitions(status) {
+  const list = status?.slot_capabilities?.custom_slots
+  if (!Array.isArray(list) || list.length > CUSTOM_SLOT_LIMIT) return []
+  const valid = list.every(item => item && CUSTOM_SLOT_ID.test(item.id) && ['heavy', 'light'].includes(item.tier) &&
+    typeof item.label === 'string' && textLength(item.label) <= 24 && CUSTOM_SLOT_TEXT.test(item.label) &&
+    typeof item.description === 'string' && textLength(item.description) <= 120 && CUSTOM_SLOT_TEXT.test(item.description))
+  return valid && new Set(list.map(item => item.id)).size === list.length
+    ? list.map(item => ({ id: item.id, label: item.label, description: item.description, tier: item.tier })) : []
+}
+export function setCustomTaskSlots(status) {
+  const next = customSlotDefinitions(status)
+  if (!sameValue(next, customTaskSlots.map(slot => ({ id: slot.id, label: slot.label, description: slot.description, tier: slot.tier })))) {
+    customTaskSlots = Object.freeze(next.map(item => Object.freeze({ ...item, custom: true })))
+  }
+  return customTaskSlots
+}
+// The built-in slots, then the defined custom slots. Spare models stay built-in only (TASK_SLOTS).
+export function taskSlots() { return [...TASK_SLOTS, ...customTaskSlots] }
 // What a slot's model can be set to here. 'delegation' (the slot follows the profile's delegation.model)
 // is no longer offered: a slot stored that way is shown with that value as the disabled current
 // option, never switched silently and never copied to another profile (see slotFollowOptions and
@@ -792,7 +820,7 @@ export function slotFollowOptions(declaration, models) {
 // Slot models are copied to other profiles only when no slot still follows the delegation model:
 // copied, such a slot would follow each target's own (hidden) delegation.model.
 export function slotsCopyable(slots) {
-  return !TASK_SLOTS.some(slot => slots?.[slot.id]?.follow === LEGACY_SLOT_FOLLOW)
+  return !taskSlots().some(slot => slots?.[slot.id]?.follow === LEGACY_SLOT_FOLLOW)
 }
 
 // What the loaded profile's installed plugin can do with slots. `available`
@@ -802,7 +830,7 @@ export function slotSupport(status, row) {
   const capabilities = status?.slot_capabilities
   const declarations = row?.slots?.declarations
   const available = capabilities?.schema === 1 && row?.slots?.schema === 1 && row.slots.capable === true &&
-    Boolean(declarations) && TASK_SLOTS.every(slot => ['main', 'delegation', 'custom'].includes(declarations[slot.id]?.follow))
+    Boolean(declarations) && taskSlots().every(slot => ['main', 'delegation', 'custom'].includes(declarations[slot.id]?.follow))
   const blocking = available && Array.isArray(capabilities.blocking_profiles) ? capabilities.blocking_profiles.filter(name => typeof name === 'string') : []
   return { available, editable: available && blocking.length === 0, blocking }
 }
@@ -813,7 +841,7 @@ export function slotResolvedRoute(declaration, models) {
 }
 
 export function slotDraftError(slots) {
-  for (const slot of TASK_SLOTS) {
+  for (const slot of taskSlots()) {
     const declaration = slots?.[slot.id]
     if (!declaration || !['main', 'delegation', 'custom'].includes(declaration.follow)) return `${slot.label}: 모델 기준을 선택하세요.`
     if (declaration.follow !== 'custom') continue
@@ -838,7 +866,7 @@ export const COPY_ALL_LABEL = '현재 설정 전체 복사'
 export const COPY_ALL_HINT = '체크하지 않으면 바꾼 값만 저장합니다. 체크하면 불러온 프로필의 현재 설정 전체를 선택한 프로필에 복사합니다.'
 // The slots whose drafted declaration differs from the frozen one, in slot order.
 export function editedSlotIds(draftSlots, frozenSlots) {
-  return TASK_SLOTS.map(slot => slot.id).filter(id => draftSlots?.[id] && !sameValue(draftSlots[id], frozenSlots?.[id] ?? null))
+  return taskSlots().map(slot => slot.id).filter(id => draftSlots?.[id] && !sameValue(draftSlots[id], frozenSlots?.[id] ?? null))
 }
 // The stored slots a partial save keeps on one target (service.py _merge_partial_slots): on a profile
 // other than the loaded one, a submitted slot stored there as following the delegation model.
@@ -854,9 +882,11 @@ export function mergePartialSlots(stored, submitted, keepLegacy) {
     if (keepLegacy && merged[id]?.follow === LEGACY_SLOT_FOLLOW) continue
     merged[id] = deepClone(declaration)
   }
-  return Object.fromEntries(TASK_SLOTS.map(slot => slot.id).filter(id => merged[id]).map(id => [id, merged[id]]))
+  // Built-ins in slot order, then custom ids (the service orders them the same way).
+  const ids = [...TASK_SLOTS.map(slot => slot.id), ...Object.keys(merged).filter(id => CUSTOM_SLOT_ID.test(id)).sort()]
+  return Object.fromEntries(ids.filter(id => merged[id]).map(id => [id, merged[id]]))
 }
-const slotLabels = ids => ids.map(id => TASK_SLOTS.find(slot => slot.id === id)?.label || id).join('·')
+const slotLabels = ids => ids.map(id => taskSlots().find(slot => slot.id === id)?.label || id).join('·')
 
 export function toggleName(names, name, checked) {
   const set = new Set(Array.isArray(names) ? names : [])
@@ -3009,7 +3039,7 @@ export function submittedEditCoverage(view, sent) {
             const sent = body.routing.slots && typeof body.routing.slots === 'object' ? body.routing.slots : {}
             if (body.partial_save_schema === PARTIAL_SAVE_SCHEMA) {
               // A partial body covers the slot edit when it carries every edited slot as drafted.
-              if (TASK_SLOTS.every(slot => has(sent, slot.id))) covered.add('copy.slots')
+              if (taskSlots().every(slot => has(sent, slot.id))) covered.add('copy.slots')
               const edited = Array.isArray(view.editedSlots) ? view.editedSlots : []
               if (edited.every(id => has(sent, id)) && Object.keys(sent).every(id => sameValue(sent[id], view.slots?.[id] ?? null))) covered.add('routing.slots')
             } else {
@@ -3301,7 +3331,7 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
     // never switched by the page; the operator may pick another basis, and go back to the stored one.
     const legacy = declaration.follow === LEGACY_SLOT_FOLLOW
     const storedLegacy = slots.frozen?.[slot.id]?.follow === LEGACY_SLOT_FOLLOW
-    const spare = spareReady ? nativeDraftSlotPolicy(draft)[slot.id] : null
+    const spare = spareReady && !slot.custom ? nativeDraftSlotPolicy(draft)[slot.id] : null
     const model = [
       jsx(ChoiceField, { id: `slot-${slot.id}-follow`, label: '모델 기준', value: declaration.follow, disabled: primaryLocked,
         options: slotFollowOptions(declaration, slots.models), onChange: follow => slots.onFollow(slot.id, follow) }),
@@ -3331,8 +3361,8 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
       onMove: (index, delta) => updateSparePolicy(slot.id, current => ({ ...current, chain: moveChainEntry(current.chain, index, delta) })),
       onRemove: index => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })),
       onAdd: () => updateSparePolicy(slot.id, current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })) })
-      : jsx('p', { style: styles.hint, children: '이 슬롯의 예비 모델은 플러그인을 업데이트한 뒤 설정할 수 있습니다.' })
-    return jsx(ModelCard, { id: `slot-${slot.id}`, title: slot.label, description: slot.description,
+      : jsx('p', { style: styles.hint, children: slot.custom ? '사용자지정 슬롯은 예비 모델을 지원하지 않습니다. 이 모델을 쓸 수 없으면 작업이 실패합니다.' : '이 슬롯의 예비 모델은 플러그인을 업데이트한 뒤 설정할 수 있습니다.' })
+    return jsx(ModelCard, { id: `slot-${slot.id}`, title: slot.custom ? `${slot.label} · 사용자지정` : slot.label, description: slot.description,
       badge: jsx(Badge, { variant: 'muted', children: slot.limitLabel || (slot.tier === 'heavy' ? '긴 작업 제한' : '짧은 작업 제한') }),
       model, notes, spare: spareEditor }, slot.id)
   }
@@ -3355,7 +3385,7 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
         slots.support.available && !slots.support.editable ? jsx('p', { id: 'slot-blocked-note', role: 'note', style: styles.warning, children: `다음 프로필의 플러그인을 먼저 업데이트해야 슬롯별 모델을 저장할 수 있습니다: ${slots.support.blocking.join(', ')}. 그때까지 아래 슬롯 모델은 읽기 전용입니다.` }) : null,
         slots.support.available && !spareReady ? jsx('p', { id: 'slot-spare-update-note', role: 'note', style: styles.hint, children: '슬롯별 예비 모델은 이 프로필의 플러그인을 업데이트한 뒤 설정할 수 있습니다.' }) : null,
         slots.support.available && slots.support.editable && slots.firstSave ? jsx('p', { id: 'slot-first-save-note', role: 'note', style: styles.warning, children: '슬롯 설정을 처음 저장하기 전에: 플러그인을 업데이트한 뒤 다시 시작하지 않은 Hermes 창이나 게이트웨이가 있으면 먼저 다시 시작하세요. 이전 버전으로 실행 중인 곳은 슬롯 설정을 읽지 못해, 다시 시작할 때까지 맡긴 작업을 거절합니다.' }) : null,
-        slots.support.available && slots.draft ? jsx('div', { id: 'task-slot-cards', style: styles.roleGrid, children: TASK_SLOTS.map(slotCard) }) : null,
+        slots.support.available && slots.draft ? jsx('div', { id: 'task-slot-cards', style: styles.roleGrid, children: taskSlots().map(slotCard) }) : null,
         spareReady && TASK_SLOTS.some(slot => nativeDraftSlotPolicy(draft)[slot.id].mode === 'custom') ? jsx('p', { id: 'slot-spare-cost-note', role: 'note', style: styles.warning, children: `예비 모델을 저장하면 선택한 ${selected.length}개 프로필에서 필요할 때 그 모델로 이어서 실행합니다. 제공자의 요금제에 따라 사용량이나 비용이 늘 수 있습니다.` }) : null
       ] }) : null,
 
@@ -3458,6 +3488,145 @@ function ProfileDelegationCard({ dto, draft, profiles, origin, targets, disabled
   ] })
 }
 
+// The '사용자지정 슬롯' section: define up to four operator slots (shared by every profile), saved on
+// its own through 'custom-slots-preview' and 'apply'. Each profile then picks the slot's model on its
+// slot card. Removing a slot also removes its model setting from every profile (listed before apply).
+export const CUSTOM_SLOT_TIERS = Object.freeze([
+  { value: 'heavy', label: '긴 작업 제한 (Heavy)' },
+  { value: 'light', label: '짧은 작업 제한 (Light)' }
+])
+export function customSlotDraftError(list) {
+  if (!Array.isArray(list)) return '슬롯 목록을 확인할 수 없습니다.'
+  if (list.length > CUSTOM_SLOT_LIMIT) return `사용자지정 슬롯은 ${CUSTOM_SLOT_LIMIT}개까지 만들 수 있습니다.`
+  const ids = new Set(), labels = new Set()
+  for (const [index, item] of list.entries()) {
+    const name = `${index + 1}번째 슬롯`
+    if (!CUSTOM_SLOT_ID.test(item?.id || '')) return `${name}: ID는 영문 소문자로 시작하는 2~32자의 영문 소문자·숫자·하이픈으로 정하세요.`
+    if (ids.has(item.id)) return `${name}: 같은 ID가 이미 있습니다.`
+    const label = typeof item.label === 'string' ? item.label : ''
+    if (!label || label !== label.trim() || textLength(label) > 24 || !CUSTOM_SLOT_TEXT.test(label)) return `${name}: 이름은 앞뒤 공백 없이 1~24자로 정하세요. 줄바꿈·제어문자·보이지 않는 서식 문자(이모지 결합 문자 포함)는 쓸 수 없습니다.`
+    if (labels.has(label.toLowerCase())) return `${name}: 같은 이름이 이미 있습니다.`
+    const description = typeof item.description === 'string' ? item.description : ''
+    if (!description || description !== description.trim() || textLength(description) > 120 || !CUSTOM_SLOT_TEXT.test(description)) return `${name}: 설명은 앞뒤 공백 없이 한 줄, 1~120자로 쓰세요. 줄바꿈·제어문자·보이지 않는 서식 문자(이모지 결합 문자 포함)는 쓸 수 없습니다.`
+    if (!['heavy', 'light'].includes(item.tier)) return `${name}: 시간 제한 종류를 고르세요.`
+    ids.add(item.id)
+    labels.add(label.toLowerCase())
+  }
+  return ''
+}
+// What a definition save changes, in words (the service lists the same as `changes`).
+export function customSlotChangeLines(before, after, changes) {
+  const lines = []
+  const old = new Map((before || []).map(item => [item.id, item])), next = new Map((after || []).map(item => [item.id, item]))
+  for (const item of after || []) {
+    const prior = old.get(item.id)
+    if (!prior) lines.push(`추가: ${item.label} (${item.id})`)
+    else if (!sameValue(prior, item)) lines.push(`변경: ${prior.label} → ${item.label} (${item.id})`)
+  }
+  for (const item of before || []) if (!next.has(item.id)) lines.push(`삭제: ${item.label} (${item.id})`)
+  for (const change of Array.isArray(changes) ? changes : []) {
+    if (change?.field === 'routing.slots' && change.before && typeof change.before === 'object') {
+      lines.push(`${change.profile}: 삭제하는 슬롯의 모델 설정도 지웁니다 (${Object.keys(change.before).join(', ')})`)
+    }
+  }
+  return lines
+}
+function CustomSlotsSection({ status, rest, disabled, onApplied }) {
+  const stored = customSlotDefinitions(status)
+  const [draft, setDraft] = useState(null)
+  const [preview, setPreview] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  // A draft belongs to the definitions it was started from: a reload that changes them drops it.
+  const storedKey = JSON.stringify([status?.revision ?? null, stored])
+  const startedFrom = useRef(storedKey)
+  useEffect(() => {
+    if (startedFrom.current === storedKey) return
+    startedFrom.current = storedKey
+    setDraft(null); setPreview(null)
+  }, [storedKey])
+  const capabilities = status?.slot_capabilities
+  if (capabilities?.custom_slots_supported !== true) return null
+  const blocking = Array.isArray(capabilities.blocking_profiles) ? capabilities.blocking_profiles.filter(name => typeof name === 'string') : []
+  // Definitions this page cannot read (made elsewhere) are shown, never replaced from here.
+  const raw = capabilities.custom_slots
+  if (Array.isArray(raw) && raw.length && !stored.length) {
+    return section('사용자지정 슬롯', '저장된 사용자지정 슬롯 정의를 이 화면에서 읽을 수 없습니다.', jsx('p', { id: 'custom-slots-unreadable', role: 'alert', style: styles.warning,
+      children: '이 화면이 확인할 수 없는 정의가 저장되어 있어 편집을 막았습니다. 모든 프로필의 플러그인 버전을 맞춘 뒤 다시 열어 주세요.' }))
+  }
+  const list = draft ?? stored
+  // A row added on this page carries `fresh` (never sent): only its ID can still be typed.
+  const plain = rows => rows.map(({ fresh, ...item }) => item)
+  const editing = draft !== null
+  const changed = editing && !sameValue(plain(draft), stored)
+  const error = editing ? customSlotDraftError(plain(draft)) : ''
+  const locked = disabled || busy || Boolean(preview)
+  const edit = (index, field, value) => { setPreview(null); setMessage(''); setDraft(current => (current ?? stored).map((item, at) => at === index ? { ...item, [field]: value } : item)) }
+  const add = () => { setPreview(null); setMessage(''); setDraft(current => [...(current ?? stored), { id: 'custom:', label: '', description: '', tier: 'heavy', fresh: true }]) }
+  const remove = index => { setPreview(null); setMessage(''); setDraft(current => (current ?? stored).filter((_, at) => at !== index)) }
+  const reset = () => { setDraft(null); setPreview(null); setMessage('') }
+  const check = async () => {
+    if (error || !changed) return
+    setBusy(true); setMessage('')
+    const key = storedKey
+    try {
+      const result = await rest('/custom-slots-preview', { body: { expected_revision: status.revision, custom_slots: plain(draft) } })
+      // The status reloaded while this check ran: its plan belongs to the dropped draft.
+      if (startedFrom.current !== key) return
+      setPreview({ planId: result.plan_id, lines: customSlotChangeLines(stored, plain(draft), result.changes) })
+    } catch (failure) { setMessage(failure?.message || '변경 내용을 확인하지 못했습니다. 설정은 바뀌지 않았습니다.') }
+    finally { setBusy(false) }
+  }
+  const apply = async () => {
+    if (!preview) return
+    setBusy(true); setMessage('')
+    try {
+      const receipt = await rest('/apply', { body: { plan_id: preview.planId } })
+      if (receipt?.status !== 'applied' && receipt?.status !== 'no_change') throw new Error('적용 결과를 확인할 수 없습니다. 상태를 새로고침해 실제 반영 여부를 확인하세요.')
+      setDraft(null); setPreview(null)
+      setMessage('저장했습니다. 새 대화부터 에이전트가 이 슬롯을 고를 수 있습니다.')
+      await onApplied()
+    } catch (failure) { setPreview(null); setMessage(failure?.message || '저장하지 못했습니다. 상태를 새로고침해 확인하세요.') }
+    finally { setBusy(false) }
+  }
+  const row = (item, index) => {
+    const isNew = item.fresh === true
+    const name = item.id.startsWith('custom:') ? item.id.slice('custom:'.length) : item.id
+    return jsxs('article', { id: `custom-slot-${index}`, style: styles.roleCard, children: [
+      jsxs('div', { style: styles.statusLine, children: [jsx('h4', { style: styles.roleTitle, children: item.label || `새 슬롯 ${index + 1}` }), jsx(Badge, { variant: 'muted', children: item.id })] }),
+      jsxs('div', { style: styles.fields, children: [
+        isNew ? jsx(Field, { id: `custom-slot-${index}-id`, label: 'ID (영문 소문자·숫자·하이픈)', value: name, disabled: locked,
+          onChange: value => edit(index, 'id', `custom:${value.trim().toLowerCase()}`), hint: '에이전트가 이 값을 목적(purpose)으로 보냅니다. 저장한 뒤에는 바꿀 수 없습니다.' }) : null,
+        jsx(Field, { id: `custom-slot-${index}-label`, label: '이름 (24자 이내)', value: item.label, disabled: locked, onChange: value => edit(index, 'label', value) }),
+        jsx(ChoiceField, { id: `custom-slot-${index}-tier`, label: '시간 제한', value: item.tier, disabled: locked, options: CUSTOM_SLOT_TIERS, onChange: value => edit(index, 'tier', value) })
+      ] }),
+      jsx(Field, { id: `custom-slot-${index}-description`, label: '맡길 작업 설명 (한 줄, 120자 이내)', value: item.description, disabled: locked, onChange: value => edit(index, 'description', value),
+        hint: '에이전트가 이 설명을 보고 슬롯을 고릅니다. 지시문이 아니라 작업 범위를 쓰세요. 예: Blender Python·Three.js 코드와 렌더 결과 검수' }),
+      jsx(Button, { id: `custom-slot-${index}-remove`, size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: locked, onClick: () => remove(index), children: '이 슬롯 삭제' })
+    ] }, `${index}`)
+  }
+  return section('사용자지정 슬롯', `3D 작업, 영상 편집, 한국어 글쓰기처럼 특정 작업에 맞는 슬롯을 ${CUSTOM_SLOT_LIMIT}개까지 만듭니다. 슬롯 정의는 모든 프로필이 함께 쓰고, 모델은 위 작업 슬롯 카드에서 프로필마다 정합니다. 예비 모델은 지원하지 않습니다.`, jsxs('div', { id: 'custom-slots', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
+    blocking.length ? jsx('p', { id: 'custom-slots-blocked', role: 'note', style: styles.warning, children: `다음 프로필의 플러그인을 먼저 업데이트해야 사용자지정 슬롯을 저장할 수 있습니다: ${blocking.join(', ')}. 모든 슬롯을 지우는 저장은 지금도 할 수 있습니다.` }) : null,
+    list.length ? jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.75rem' }, children: list.map(row) }) : jsx('p', { style: styles.hint, children: '아직 만든 사용자지정 슬롯이 없습니다.' }),
+    jsxs('div', { style: styles.actions, children: [
+      jsx(Button, { id: 'custom-slot-add', size: 'sm', variant: 'secondary', disabled: locked || list.length >= CUSTOM_SLOT_LIMIT, onClick: add, children: '슬롯 추가' }),
+      editing ? jsx(Button, { id: 'custom-slot-reset', size: 'sm', variant: 'secondary', disabled: busy, onClick: reset, children: '편집 취소' }) : null
+    ] }),
+    error ? jsx('p', { id: 'custom-slots-error', role: 'alert', style: styles.warning, children: error }) : null,
+    changed && !preview ? jsx('p', { role: 'note', style: styles.hint, children: '저장하면 설정을 다시 불러옵니다. 다른 섹션에서 저장하지 않은 편집이 있으면 먼저 저장하세요. 슬롯을 처음 저장하기 전에 플러그인을 업데이트한 모든 Hermes 창과 게이트웨이를 다시 시작하세요.' }) : null,
+    changed && !preview ? jsx(Button, { id: 'custom-slots-check', size: 'sm', style: { alignSelf: 'flex-start' }, disabled: disabled || busy || Boolean(error) || (blocking.length > 0 && plain(draft).length > 0), onClick: () => void check(), children: busy ? '확인 중…' : '변경 내용 확인' }) : null,
+    preview ? jsxs('div', { id: 'custom-slots-preview', role: 'note', style: styles.section, children: [
+      jsx('strong', { children: '저장할 내용' }),
+      jsx('ul', { children: preview.lines.map((line, index) => jsx('li', { children: line }, index)) }),
+      jsxs('div', { style: styles.actions, children: [
+        jsx(Button, { id: 'custom-slots-apply', size: 'sm', disabled: busy, onClick: () => void apply(), children: busy ? '저장 중…' : '저장' }),
+        jsx(Button, { id: 'custom-slots-back', size: 'sm', variant: 'secondary', disabled: busy, onClick: () => setPreview(null), children: '다시 편집' })
+      ] })
+    ] }) : null,
+    message ? jsx('p', { id: 'custom-slots-message', role: 'status', style: styles.hint, children: message }) : null
+  ] }))
+}
+
 export async function nativeBackendCall(path, options = {}) {
   // The status of many profiles does not fit one CLI reply; it is read in pages.
   if (path === '/status' && !options.body) return readPagedStatus(body => nativeBackendCallOnce(path, { ...options, body }))
@@ -3465,7 +3634,7 @@ export async function nativeBackendCall(path, options = {}) {
 }
 
 async function nativeBackendCallOnce(path, options = {}) {
-  const operation = { '/status': 'status', '/preview': 'preview', '/fallback-preview': 'fallback-preview', '/delegation-preview': 'delegation-preview', '/initial-setup-preview': 'initial-setup-preview', '/apply': 'apply' }[path]
+  const operation = { '/status': 'status', '/preview': 'preview', '/fallback-preview': 'fallback-preview', '/delegation-preview': 'delegation-preview', '/initial-setup-preview': 'initial-setup-preview', '/custom-slots-preview': 'custom-slots-preview', '/apply': 'apply' }[path]
   if (!operation) throw new Error('지원하지 않는 플러그인 요청입니다.')
   const profile = options.profile || host.state.profile.get() || 'default'
   const params = (name, body) => ({ argv: ['--profile', profile, 'model-router', name, '--body', JSON.stringify(body)], profile, timeout: 180 })
@@ -3640,6 +3809,8 @@ function RouterPage({ ctx: pluginContext }) {
     retry: false,
     staleTime: 0
   })
+  // The custom slots every slot helper sees come from the status this page renders.
+  setCustomTaskSlots(statusQuery.data)
   const profiles = Array.isArray(statusQuery.data?.profiles) ? statusQuery.data.profiles : []
   const statusDataRef = useRef(statusQuery.data)
   statusDataRef.current = statusQuery.data
@@ -3844,7 +4015,7 @@ function RouterPage({ ctx: pluginContext }) {
   const slotCopyAll = modelCopyAll && slotCardsVisible
   // A partial save sends only the slots whose declaration changed (all six on copy-all).
   const editedSlots = slotInfo.editable && draft?.slots && frozenProfile ? editedSlotIds(draft.slots, frozenProfile.slots) : []
-  const slotSendIds = !draft?.slots ? [] : partialSave && !slotCopyAll ? editedSlots : TASK_SLOTS.map(slot => slot.id)
+  const slotSendIds = !draft?.slots ? [] : partialSave && !slotCopyAll ? editedSlots : taskSlots().map(slot => slot.id).filter(id => draft.slots[id])
   // A slot still following the delegation model (an earlier setting) is never copied to another
   // profile: the slot models then go to the loaded profile only, and every other target is named as
   // keeping its own slot models. No copy intent is pending for them.
@@ -4184,7 +4355,7 @@ function RouterPage({ ctx: pluginContext }) {
     ((modelWriteNeeded || routingCopyPending) ? storeDriftError : '') || (modelWriteNeeded ? modelDriftError || modelRoleError : '') || nativeDelegationError || (routingCopyPending ? routingTargetError : '') || noTargetError || noNativeTargetError ||
     nativeFallbackSaveError || auxiliarySaveError ||
     (nativeWriteNeeded && !nativeStorageAvailable ? '저장 준비를 확인할 수 없습니다. 플러그인을 다시 열어 주세요.' : '')
-  const customSlotCount = draft?.slots ? TASK_SLOTS.filter(slot => draft.slots[slot.id]?.follow === 'custom').length : 0
+  const customSlotCount = draft?.slots ? taskSlots().filter(slot => draft.slots[slot.id]?.follow === 'custom').length : 0
   const spareSlotCount = nativeSlotCopy ? TASK_SLOTS.filter(slot => nativeDraftSlotPolicy(nativeDelegationDraft)[slot.id].mode === 'custom').length : 0
   // What the method part of a partial save sends: the method only when edited, the edited slots' spares.
   const nativeDelta = partialSave && !modelCopyAll
@@ -5347,6 +5518,7 @@ function RouterPage({ ctx: pluginContext }) {
         reenableGroup,
         modelTargetGroup
       ] })) : null,
+      profiles.length && !needsReload ? jsx(CustomSlotsSection, { status: statusQuery.data, rest: ctx.rest, disabled: disabled || revisionChanged, onApplied: () => reloadStatus() }) : null,
       profiles.length ? profileDelegationSection : null,
       profiles.length ? timeoutSettingsSection : null,
       pageVanished.length ? jsx('div', { id: 'page-vanished-alert', role: 'alert', style: styles.warning, children: `전체 저장: ${vanishedMessage(pageVanished)}` }) : null,
@@ -5402,8 +5574,10 @@ function executionUnknown() { return { kind: 'unknown', role: null, profile: nul
 export function executionIdentity(value) {
   if (!value || typeof value !== 'object') return executionUnknown()
   if (value.kind === 'model' && ['heavy', 'light'].includes(value.role) && value.profile == null) {
-    const slot = TASK_SLOTS.some(item => item.id === value.slot) ? value.slot : null
-    return { kind: 'model', role: value.role, profile: null, slot, evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
+    // A custom slot carries its own label (operator text from the settings page, not task text).
+    const custom = CUSTOM_SLOT_ID.test(value.slot) && typeof value.slot_label === 'string' && textLength(value.slot_label) <= 24 && CUSTOM_SLOT_TEXT.test(value.slot_label)
+    const slot = TASK_SLOTS.some(item => item.id === value.slot) || custom ? value.slot : null
+    return { kind: 'model', role: value.role, profile: null, slot, ...(custom ? { slot_label: value.slot_label } : {}), evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
   }
   if (value.kind === 'profile' && typeof value.profile === 'string' && EXECUTION_PROFILE.test(value.profile) && value.role == null) {
     return { kind: 'profile', role: null, profile: value.profile, evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
@@ -5412,7 +5586,7 @@ export function executionIdentity(value) {
 }
 export function executionLabel(identity) {
   const known = executionIdentity(identity)
-  const slot = known.kind === 'model' && TASK_SLOTS.find(item => item.id === known.slot)
+  const slot = known.kind === 'model' && (TASK_SLOTS.find(item => item.id === known.slot) || (known.slot_label ? { label: known.slot_label } : null))
   return known.kind === 'model' ? `모델 · ${slot ? slot.label : known.role === 'heavy' ? 'Heavy' : 'Light'}` : known.kind === 'profile' ? `프로필 · ${known.profile}` : '실행 종류 미확인'
 }
 function executionSafeText(value, limit = 256) {
@@ -6086,7 +6260,7 @@ function executionActivityLabels(row) {
 export function ExecutionRow({ row, bare = false }) {
   const observed = row.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
   // A route label names the tier only; the requested slot stays the more specific name.
-  const identity = observed ? (row.observed.kind === 'model' && row.requested?.kind === 'model' ? { ...row.observed, slot: row.requested.slot } : row.observed) : row.requested
+  const identity = observed ? (row.observed.kind === 'model' && row.requested?.kind === 'model' ? { ...row.observed, slot: row.requested.slot, slot_label: row.requested.slot_label } : row.observed) : row.requested
   // The model the child's own API requests reported (runtime report, also when a spare model took over).
   const runtimeModel = row.model ? `${row.model}${row.provider ? ` · ${row.provider}` : ''}` : null
   const activity = executionActivityLabels(row)
@@ -6132,9 +6306,9 @@ export function sortExecutionRows(rows) {
 }
 function executionShortLabel(row) {
   const observed = row.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
-  const identity = executionIdentity(observed ? (row.observed.kind === 'model' && row.requested?.kind === 'model' ? { ...row.observed, slot: row.requested.slot } : row.observed) : row.requested)
+  const identity = executionIdentity(observed ? (row.observed.kind === 'model' && row.requested?.kind === 'model' ? { ...row.observed, slot: row.requested.slot, slot_label: row.requested.slot_label } : row.observed) : row.requested)
   if (identity.kind === 'profile') return `프로필 · ${identity.profile}`
-  if (identity.kind === 'model') return TASK_SLOTS.find(item => item.id === identity.slot)?.label || (identity.role === 'heavy' ? 'Heavy' : 'Light')
+  if (identity.kind === 'model') return TASK_SLOTS.find(item => item.id === identity.slot)?.label || identity.slot_label || (identity.role === 'heavy' ? 'Heavy' : 'Light')
   return row.execution_mode === 'gateway' ? '전체 프로필' : '종류 미확인'
 }
 function executionTime(row) {
@@ -6603,7 +6777,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.16.1',
+  version: '0.17.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

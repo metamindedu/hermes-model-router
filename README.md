@@ -2,6 +2,12 @@
 
 Profile-scoped model management and **Hermes-native subagent routing**, with a native Desktop settings page. Native work uses `delegate_task`; historical routed-process starts remain retired. A separate explicitly opt-in `profile_task` path attaches to Gateway-owned target sessions, not a private agent executor. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
+## Custom task slots (0.17.0)
+
+Define up to four extra task slots, shared by every profile, in the new **사용자지정 슬롯** section: an id `custom:<name>` (also the purpose agents send), a label, a one-line scope description shown to agents as untrusted descriptive data, and a Heavy/Light tier. Each profile picks the slot's model on its slot card. Custom slots have no spare models, and a removed slot is refused even in sessions that still list it. They choose the agent LLM, not image/video generation models.
+
+**Upgrade order.** Custom slots write settings schema 4, which earlier packages refuse. Update every profile, restart every Hermes process, then save the first custom slot; the page blocks the save until every installed profile runs 0.17.0. Details: [docs/releases/v0.17.0.md](docs/releases/v0.17.0.md).
+
 ## Status line names the advisor child (0.16.1)
 
 The status line above the composer showed an `ask_advisor` child as `종류 미확인`. It now shows it as `조언` with its model, tool and time, bound to the call by the advisor goal marker and the core's delegation id; parallel advisor calls from one turn are left unbound rather than guessed. Details: [docs/releases/v0.16.1.md](docs/releases/v0.16.1.md).
