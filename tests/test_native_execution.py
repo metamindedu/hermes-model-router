@@ -38,8 +38,8 @@ def test_real_native_child_completion_and_cooperative_stop(tmp_path, monkeypatch
     (target / 'SOUL.md').write_text('Offline specialist identity fixture', encoding='utf-8')
     (home / 'config.yaml').write_text(json.dumps({
         'plugins': {'enabled': ['model-router']},
-        'model': {'provider': 'openrouter', 'default': 'fixture-heavy'},
-        'delegation': {'backend': backend, 'provider': 'openrouter', 'model': 'fixture-light', 'backends': {'model-router-profiles': {'schema': 1, 'profiles': [{'name': 'specialist', 'description': 'Offline evidence specialist'}], 'default': None}}},
+        'model': {'provider': 'openrouter', 'default': 'fixture-main'},
+        'delegation': {'backend': backend, 'provider': 'openrouter', 'model': 'fixture-delegate', 'backends': {'model-router-profiles': {'schema': 1, 'profiles': [{'name': 'specialist', 'description': 'Offline evidence specialist'}], 'default': None}}},
         'agent': {'reasoning_effort': 'high'},
     }), encoding='utf-8')
     monkeypatch.setenv('HERMES_HOME', str(home))
@@ -120,7 +120,7 @@ def test_real_native_child_completion_and_cooperative_stop(tmp_path, monkeypatch
             run()
         assert len(children) == (3 if profile_route == 'mixed' else 1)
         assert all(isinstance(child, AIAgent) for child in children)
-        expected = ['fixture-light', 'fixture-heavy', 'fixture-target'] if profile_route == 'mixed' else ['fixture-target' if profile_route else 'fixture-light']
+        expected = ['fixture-delegate', 'fixture-main', 'fixture-target'] if profile_route == 'mixed' else ['fixture-target' if profile_route else 'fixture-delegate']
         for entry, model in zip(result['value']['results'], expected):
             assert entry['status'] in ({'interrupted', 'failed'} if cancel != 'complete' else {'completed'})
             assert entry['route']['backend'] == backend

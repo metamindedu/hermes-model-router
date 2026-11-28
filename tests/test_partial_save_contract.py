@@ -21,10 +21,11 @@ FIXTURE = Path(__file__).with_name('fixtures') / 'partial_save_contract.json'
 CONTRACT = json.loads(FIXTURE.read_text(encoding='utf-8'))
 NATIVE = [case for case in CONTRACT['cases'] if case['kind'] == 'native']
 STORE = [case for case in CONTRACT['cases'] if case['kind'] == 'store']
-DTO_FIELDS = ('schema', 'supported', 'editable', 'backend', 'policy', 'auto_policy', 'slot_policy', 'auto_slot_policy',
+DTO_FIELDS = ('schema', 'supported', 'editable', 'backend', 'slot_policy', 'auto_slot_policy',
               'policy_schema', 'auto_policy_schema', 'slot_policy_supported', 'auto_supported', 'profile_routes')
 MISSING = object()
-SPLIT_FIELDS = ('delegate_total_seconds', 'routed_light_total_seconds', 'routed_heavy_total_seconds')
+# Timeouts schema 3: the ordinary delegation limit and the slots that have their own limit.
+TIMEOUT_FIELDS = ('delegate_total_seconds', 'slot_seconds')
 
 # What each target's allow-list must be after the save (the merge rules, written out independently).
 EXPECTED_ROUTES = {
@@ -60,9 +61,7 @@ def _seed_native(service, name, seed):
     put_path(config, ns.KEY_BACKEND, seed['backend'])
     if seed.get('routes') is not None:
         put_path(config, ns.KEY_PROFILES, {'schema': 1, **seed['routes']})
-    if seed.get('twoRole'):
-        put_path(config, ns.KEY_POLICY, ns.build_policy_block(name, ns.default_policy(), False, backend='model-router'))
-    elif seed.get('slot'):
+    if seed.get('slot'):
         policy = ns.default_slot_policy()
         custom = {} if seed['slot'] == 'off' else seed['slot']
         for slot, model in custom.items():
@@ -75,8 +74,8 @@ def test_the_contract_fixture_is_the_generated_one():
     assert CONTRACT['schema'] == 1 and CONTRACT['generated_by'] == 'tests/test_partial_save_contract_desktop.mjs'
     assert {case['name'] for case in CONTRACT['cases']} >= {
         'native-slot-spare-patch', 'native-slot-spare-off-patch', 'native-method-only', 'native-copy-all',
-        'profiles-routes-patch', 'profiles-routes-remove-and-describe', 'slot-merge', 'slot-legacy-collision',
-        'slot-copy-all', 'timeout-one-field', 'timeout-copy-all'}
+        'profiles-routes-patch', 'profiles-routes-remove-and-describe', 'slot-merge', 'slot-overwrite',
+        'slot-copy-all', 'timeout-one-field', 'timeout-slot-patch', 'timeout-copy-all'}
     assert all(case['body']['partial_save_schema'] == 1 for case in CONTRACT['cases'])
 
 
@@ -146,7 +145,6 @@ def test_a_partial_delegation_body_writes_only_what_it_names(fixture, case):
 def _store_setup(tmp_path, monkeypatch):
     root, cli = setup_home(tmp_path, monkeypatch)
     monkeypatch.setattr(Service, '_timeout_enforcement_available', lambda self, profile: True)
-    monkeypatch.setattr(Service, '_timeout_role_enforcement_available', lambda self, profile: True)
     service = Service(root=root, writer=cli.writer)
     service.initialize(['default', 'p1', 'p2'])
     return service, cli
@@ -157,7 +155,7 @@ def _seed_slots(service, name, slots):
     row = find_profile(status, name)
     body = {'expected_revision': status['revision'], 'profile': name, 'save_scope': 'routing',
             'models': copy.deepcopy(row['models']), 'model_targets': [],
-            'routing': {**copy.deepcopy(row['routing']), 'slots': copy.deepcopy(slots)}, 'routing_targets': [name],
+            'routing': {'enabled': row['routing']['enabled'], 'slots': copy.deepcopy(slots)}, 'routing_targets': [name],
             'routing_profiles': [item['name'] for item in status['profiles'] if item['routing']['enabled']]}
     assert service.apply(service.preview(body)['plan_id'])['status'] == 'applied'
 
@@ -168,8 +166,9 @@ def test_a_partial_store_body_writes_only_what_it_names(tmp_path, monkeypatch, c
     timeouts_case = case['body']['save_scope'] == 'timeouts'
     for name, seed in case['seeds'].items():
         if timeouts_case:
-            if seed['schema'] == 2:
-                write_timeouts(service._profile_home(name), {key: seed[key] for key in SPLIT_FIELDS}, expected_digest='MISSING', expected_revision=0)
+            assert seed['schema'] == 3 and seed['default_slot_seconds'] == 7200
+            if seed['revision'] > 0:
+                write_timeouts(service._profile_home(name), {key: seed[key] for key in TIMEOUT_FIELDS}, expected_digest='MISSING', expected_revision=0)
         else:
             _seed_slots(service, name, seed)
     status = service.status()
@@ -180,7 +179,7 @@ def test_a_partial_store_body_writes_only_what_it_names(tmp_path, monkeypatch, c
             seed = case['seeds'][row['name']]
             assert {key: row['timeouts'].get(key) for key in seed if key != 'warnings'} == {key: value for key, value in seed.items() if key != 'warnings'}
         else:
-            assert row['routing'].get('slots') == case['seeds'].get(row['name']), row['name']
+            assert row['routing'] == {'enabled': True, 'slots': case['seeds'].get(row['name']) or {}}, row['name']
     store_before = json.loads(service.store_path.read_text(encoding='utf-8'))['profiles']
     timeouts_before = {name: read_timeouts(service._profile_home(name)) for name in ('default', 'p1', 'p2')}
     body = copy.deepcopy(case['body'])
@@ -198,23 +197,35 @@ def test_a_partial_store_body_writes_only_what_it_names(tmp_path, monkeypatch, c
             if name not in targets:
                 assert current == timeouts_before[name]
                 continue
-            sent = {key: value for key, value in targets[name].items() if key in SPLIT_FIELDS}
-            assert current['schema'] == 2 and current['revision'] == timeouts_before[name]['revision'] + (1 if sent else 0)
-            assert {key: current[key] for key in SPLIT_FIELDS} == {**{key: timeouts_before[name][key] for key in SPLIT_FIELDS}, **sent}
+            sent, old = targets[name], timeouts_before[name]
+            assert set(sent) - {'profile', 'expected_revision'} <= set(TIMEOUT_FIELDS), sent
+            # A partial update is a patch: the ordinary limit when sent, and each sent slot set (or,
+            # null, back to the 2-hour default); every other slot keeps its own limit.
+            delegate = sent.get('delegate_total_seconds', old['delegate_total_seconds'])
+            slots = dict(old['slot_seconds'])
+            for slot, seconds in (sent.get('slot_seconds') or {}).items():
+                if seconds is None:
+                    slots.pop(slot, None)
+                else:
+                    slots[slot] = seconds
+            changed = delegate != old['delegate_total_seconds'] or slots != old['slot_seconds']
+            assert current['schema'] == 3 and current['revision'] == old['revision'] + (1 if changed else 0)
+            assert current['delegate_total_seconds'] == delegate and current['slot_seconds'] == slots, (case['name'], name)
+            row = find_profile(service.status(), name)['timeouts']
+            assert row['slot_seconds'] == slots and row['default_slot_seconds'] == 7200
         assert after == store_before, 'a timeout save writes no model or routing state'
         return
     for name in ('default', 'p1', 'p2'):
         if name not in body['routing_targets']:
             assert after[name] == store_before[name], name
             continue
-        # Heavy/Light are not sent: each target keeps its own.
-        assert after[name]['routing']['heavy'] == store_before[name]['routing']['heavy']
-        assert after[name]['routing']['light'] == store_before[name]['routing']['light']
+        # Routing is exactly {enabled, slots} (store schema 5).
+        assert set(after[name]['routing']) <= {'enabled', 'slots'}, after[name]['routing']
         stored_old = store_before[name]['routing'].get('slots') or {}
         merged = after[name]['routing'].get('slots') or {}
         assert merged == case['merged'][name], name
         for slot in stored_old:
-            if slot not in body['routing']['slots'] or slot in case['skips'][name]:
+            if slot not in body['routing']['slots']:
                 assert merged[slot] == stored_old[slot], (name, slot)
         for slot in set(merged) - set(stored_old):
             assert slot in body['routing']['slots'], (name, slot, 'absent stays absent')

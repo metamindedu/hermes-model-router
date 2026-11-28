@@ -11,17 +11,11 @@ POLICY_VERSION = 1
 NATIVE_TRIGGER = "hermes_runtime"
 NATIVE_EXECUTION = "continue_conversation"
 NATIVE_REASONING = "profile_overrides"
-ROUTING_TRIGGER = "subscription_exhaustion_before_tools"
-ROUTING_EXECUTION = "fresh_task"
-ROUTING_MAX_RETRIES = 1
 
 CAPABILITIES = {
     "native_trigger": NATIVE_TRIGGER,
     "native_execution": NATIVE_EXECUTION,
     "native_reasoning": NATIVE_REASONING,
-    "routing_trigger": ROUTING_TRIGGER,
-    "routing_execution": ROUTING_EXECUTION,
-    "routing_max_retries": ROUTING_MAX_RETRIES,
 }
 
 
@@ -29,8 +23,6 @@ def selection_for(scope: str, value: dict[str, Any]) -> dict[str, Any]:
     """Return only the exact target selection; ON/OFF does not invalidate consent."""
     if scope == "native":
         return {"chain": value["chain"]}
-    if scope == "routing":
-        return {"heavy": value["heavy"], "light": value["light"]}
     if scope == "delegation":
         # Default/disabled/custom have different runtime meaning, even with an
         # empty chain. Consent never migrates between these modes or scopes.
@@ -60,7 +52,7 @@ def make_consent(profile: str, scope: str, value: dict[str, Any], *, source: str
         "selection_digest": selection_digest(profile, scope, selection_for(scope, value)),
         "source": source,
         "allow_additional_cost": True,
-        "allow_task_rerun": scope == "routing",
+        "allow_task_rerun": False,
     }
 
 
@@ -77,9 +69,9 @@ def validate_consent(value: Any) -> dict[str, Any] | None:
     digest = value["selection_digest"]
     if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
         raise ValueError("fallback consent digest is invalid")
-    if value["source"] not in {"explicit", "legacy-approved"}:
+    if value["source"] != "explicit":
         raise ValueError("fallback consent source is invalid")
-    if value["allow_additional_cost"] is not True or not isinstance(value["allow_task_rerun"], bool):
+    if value["allow_additional_cost"] is not True or value["allow_task_rerun"] is not False:
         raise ValueError("fallback consent flags are invalid")
     return dict(value)
 
@@ -91,5 +83,5 @@ def consent_matches(profile: str, scope: str, value: dict[str, Any], consent: An
     return (
         parsed["selection_digest"] == selection_digest(profile, scope, selection_for(scope, value))
         and parsed["allow_additional_cost"] is True
-        and parsed["allow_task_rerun"] is (scope == "routing")
+        and parsed["allow_task_rerun"] is False
     )

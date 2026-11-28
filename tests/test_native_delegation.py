@@ -9,9 +9,9 @@ from model_router import native_delegation as nd
 class Service:
     def __init__(self, root):
         self.root = root
-        self.config = {'enabled': True, 'heavy': {'provider': 'p', 'model': 'heavy', 'reasoning': 'high'},
-                       'light': {'provider': 'p', 'model': 'light', 'reasoning': 'low'},
-                       'heavy_timeout_seconds': 10800, 'light_timeout_seconds': .5}
+        self.config = {'enabled': True,
+                       'slots': {slot: {'provider': 'p', 'model': 'model-' + slot, 'reasoning': 'high'} for slot in nd.BUILTIN_SLOTS},
+                       'slot_timeout_seconds': {slot: 7200 for slot in nd.BUILTIN_SLOTS}}
     def active_profile(self): return 'default'
     def routing_config(self, name):
         assert name == 'default'
@@ -37,7 +37,7 @@ def test_real_classes_registration_and_deterministic_schema(env):
     assert [p.name for p in providers] == ['model-router', 'model-router-profiles', 'model-router-auto']
     p = nd.ModelRouterProvider(home, lambda: service)
     assert p.task_parameters({}) == p.task_parameters({'api_key': 'SECRET'})
-    assert list(p.task_parameters({})['purpose']['enum']) == list(nd.PURPOSE_ROLES)
+    assert list(p.task_parameters({})['purpose']['enum']) == list(nd.PURPOSE_SLOTS)
 
 
 def test_actual_core_plugin_registration(env):
@@ -58,31 +58,33 @@ def test_actual_core_plugin_registration(env):
         manager.unload('model-router')
 
 
-@pytest.mark.parametrize('purpose,role', list(nd.PURPOSE_ROLES.items()))
-def test_purpose_routes_and_explicit_continuation(env, monkeypatch, purpose, role):
+@pytest.mark.parametrize('purpose,slot', list(nd.PURPOSE_SLOTS.items()))
+def test_purpose_routes_and_explicit_continuation(env, monkeypatch, purpose, slot):
     home, service = env
     monkeypatch.setattr('model_router.advise_guard.advisor_call_active', lambda home, goal: True)
     monkeypatch.setattr('model_router.native_watchdog.verify_routed_binding', lambda *args: True)
     p = nd.ModelRouterProvider(home, lambda: service)
     task = {'purpose': purpose, 'goal': 'goal'}
     result = p.route_task(task, {'fallback_providers': [{'provider': 'inherited', 'model': 'bad'}]})
-    assert result == {'provider': 'p', 'model': role, 'reasoning_effort': 'high' if role == 'heavy' else 'low', 'label': role, 'fallback_providers': []}
+    assert result == {'provider': 'p', 'model': 'model-' + slot, 'reasoning_effort': 'high', 'label': slot, 'fallback_providers': []}
     chain = [{'provider': 'other', 'model': 'm/v1'}]
-    policy = {'schema': 1, 'fallbacks': {r: {'mode': 'off', 'chain': [], 'consent': None} for r in ('heavy', 'light')}}
-    policy['fallbacks'][role] = {'mode': 'custom', 'chain': chain, 'consent': nd.make_continuation_consent('default', role, chain)}
+    policy = {'schema': 2, 'fallbacks': {s: {'mode': 'off', 'chain': [], 'consent': None} for s in nd.BUILTIN_SLOTS}}
+    policy['fallbacks'][slot] = {'mode': 'custom', 'chain': chain, 'consent': nd.make_slot_continuation_consent('default', slot, chain)}
     assert p.route_task(task, {'backends': {'model-router': policy}})['fallback_providers'] == chain
-    policy['fallbacks'][role]['consent'] = {'allow_task_rerun': True}
+    policy['fallbacks'][slot]['consent'] = {'allow_task_rerun': True}
     with pytest.raises(DelegationRouteError): p.route_task(task, {'backends': {'model-router': policy}})
 
 
 def test_consent_binds_exact_scope_and_validation():
     chain = [{'provider': 'p', 'model': 'm'}]
-    consent = nd.make_continuation_consent('default', 'heavy', chain)
-    assert nd.validate_continuation_consent('default', 'heavy', chain, consent)
-    assert not nd.validate_continuation_consent('claire', 'heavy', chain, consent)
-    assert not nd.validate_continuation_consent('default', 'light', chain, consent)
-    assert not nd.validate_continuation_consent('default', 'heavy', [{'provider': 'p', 'model': 'm2'}], consent)
-    with pytest.raises(ValueError): nd.make_continuation_consent('default', 'heavy', [{'provider': 'p', 'model': 'https://private'}])
+    consent = nd.make_slot_continuation_consent('default', 'design', chain)
+    assert consent == nd.make_slot_continuation_consent('default', 'design', chain)
+    assert consent != nd.make_slot_continuation_consent('claire', 'design', chain)
+    assert consent != nd.make_slot_continuation_consent('default', 'verify-complex', chain)
+    assert consent != nd.make_slot_continuation_consent('default', 'design', [{'provider': 'p', 'model': 'm2'}])
+    assert consent != nd.make_slot_continuation_consent('default', 'design', chain, backend='model-router-auto')
+    with pytest.raises(ValueError): nd.make_slot_continuation_consent('default', 'design', [{'provider': 'p', 'model': 'https://private'}])
+    assert not hasattr(nd, 'make_continuation_consent') and not hasattr(nd, 'validate_continuation_consent')
 
 
 def test_routes_refuse_without_binding_invalid_and_disabled(env, monkeypatch):
@@ -138,10 +140,10 @@ def test_profile_validation_strict():
 def test_settings_worker_consent_interoperability():
     from model_router import native_settings
     chain = [{'provider': 'provider', 'model': 'model/v1'}]
-    policy = {'heavy': {'mode': 'custom', 'chain': chain}, 'light': {'mode': 'off', 'chain': []}}
-    block = native_settings.build_policy_block('default', policy, True)
+    policy = {**native_settings.default_slot_policy(), 'design': {'mode': 'custom', 'chain': chain}}
+    block = native_settings.build_slot_policy_block('default', policy, True)
     assert nd.validate_native_policy(block, 'default') == block
-    assert block['fallbacks']['heavy']['consent'] == nd.make_continuation_consent('default', 'heavy', chain)
-    assert native_settings.consent_matches('default', 'model-router', 'heavy', chain, block['fallbacks']['heavy']['consent'])
-    block['fallbacks']['heavy']['consent']['additional_cost'] = 1
+    assert block['fallbacks']['design']['consent'] == nd.make_slot_continuation_consent('default', 'design', chain)
+    assert native_settings.slot_consent_matches('default', 'model-router', 'design', chain, block['fallbacks']['design']['consent'])
+    block['fallbacks']['design']['consent']['additional_cost'] = 1
     with pytest.raises(ValueError): nd.validate_native_policy(block, 'default')

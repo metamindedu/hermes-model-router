@@ -16,10 +16,10 @@ def route(provider: str, model: str, reasoning: str = "medium") -> dict[str, str
 
 def models(suffix: str = "") -> dict[str, dict[str, str]]:
     return {
-        "main": route("openai-codex", f"heavy{suffix}", "high"),
-        "delegation": route("deepseek", f"light{suffix}", "low"),
-        "compression": route("openai-codex", f"heavy{suffix}", "high"),
-        "title": route("openai-codex", f"heavy{suffix}", "high"),
+        "main": route("openai-codex", f"main-model{suffix}", "high"),
+        "delegation": route("deepseek", f"delegation-model{suffix}", "low"),
+        "compression": route("openai-codex", f"main-model{suffix}", "high"),
+        "title": route("openai-codex", f"main-model{suffix}", "high"),
     }
 
 
@@ -30,10 +30,10 @@ class FakeConfig:
             suffix = str(index)
             self.values[profile] = {
                 "model.provider": "openai-codex",
-                "model.default": f"heavy{suffix}",
+                "model.default": f"main-model{suffix}",
                 "agent.reasoning_effort": "high",
                 "delegation.provider": "deepseek",
-                "delegation.model": f"light{suffix}",
+                "delegation.model": f"delegation-model{suffix}",
                 "delegation.reasoning_effort": "low",
                 "auxiliary.compression.provider": "auto",
                 "auxiliary.compression.model": "",
@@ -92,7 +92,7 @@ def confirmation(scope: str, name: str = "default") -> dict[str, object]:
         "profile": name,
         "scope": scope,
         "allow_additional_cost": True,
-        "allow_task_rerun": scope == "routing",
+        "allow_task_rerun": False,
     }
 
 
@@ -104,88 +104,27 @@ def fallback_body(service: Service, updates: list[dict], confirmations: list[dic
     }
 
 
-def test_schema2_status_exposes_fixed_capabilities_and_additive_entry_fields(tmp_path, monkeypatch):
+def test_status_exposes_fixed_capabilities_and_entry_fields(tmp_path, monkeypatch):
     service, _fake, root = setup_service(tmp_path, monkeypatch)
     status = service.status()
     stored = json.loads(service.store_path.read_text(encoding="utf-8"))
     entry = stored["profiles"]["default"]
 
-    assert stored["schema"] == 2
+    assert stored["schema"] == 5
     assert set(entry) == {"models", "routing", "native_fallback", "delegation_fallback", "fallback_consent"}
+    assert entry["routing"] == {"enabled": True, "slots": {}}
     assert entry["native_fallback"] is None
     assert entry["delegation_fallback"] is None
-    assert entry["fallback_consent"] == {"native": None, "routing": None, "delegation": None}
-    assert set(profile(status)["fallbacks"]) == {"native", "routing", "delegation"}
+    assert entry["fallback_consent"] == {"native": None, "delegation": None}
+    assert set(profile(status)["fallbacks"]) == {"native", "delegation"}
     assert status["fallback_capabilities"] == {
         "native_trigger": "hermes_runtime",
         "native_execution": "continue_conversation",
         "native_reasoning": "profile_overrides",
-        "routing_trigger": "subscription_exhaustion_before_tools",
-        "routing_execution": "fresh_task",
-        "routing_max_retries": 1,
     }
     assert profile(status)["fallbacks"]["native"]["managed"] is False
     assert profile(status)["fallbacks"]["native"]["editable"] is True
     assert root.joinpath("config.yaml").exists()
-
-
-def test_schema1_status_is_read_only_and_maps_enabled_routing_fallback_to_legacy_approval(tmp_path, monkeypatch):
-    service, fake, _root = setup_service(tmp_path, monkeypatch)
-    current = profile(service.status())
-    routing = copy.deepcopy(current["routing"])
-    routing["fallback"] = {
-        "enabled": True,
-        "heavy": route("xiaomi", "mimo-pro", "high"),
-        "light": route("deepseek", "flash", "low"),
-    }
-    schema1 = {
-        "schema": 1,
-        "revision": service.status()["revision"],
-        "profiles": {"default": {"models": current["models"], "routing": routing}},
-    }
-    service.store_path.write_text(json.dumps(schema1), encoding="utf-8")
-    before = service.store_path.read_bytes()
-    fake.calls.clear()
-
-    status = service.status()
-    config = service.routing_config("default")
-
-    assert service.store_path.read_bytes() == before
-    assert fake.calls == []
-    assert profile(status)["models"] == current["models"]
-    assert profile(status)["routing"] == routing
-    assert profile(status)["fallbacks"]["native"]["consent"] is None
-    consent = profile(status)["fallbacks"]["routing"]["consent"]
-    assert consent["source"] == "legacy-approved"
-    assert consent["allow_additional_cost"] is True
-    assert consent["allow_task_rerun"] is True
-    assert config["fallback_policy"] == {
-        "trigger": "subscription_exhaustion_before_tools",
-        "max_retries": 1,
-        "approved": True,
-    }
-
-
-def test_schema1_explicit_fallback_apply_migrates_without_losing_model_or_route_values(tmp_path, monkeypatch):
-    service, _fake, _root = setup_service(tmp_path, monkeypatch)
-    before = profile(service.status())
-    schema1 = {
-        "schema": 1,
-        "revision": service.status()["revision"],
-        "profiles": {"default": {"models": before["models"], "routing": before["routing"]}},
-    }
-    service.store_path.write_text(json.dumps(schema1), encoding="utf-8")
-
-    preview = service.fallback_preview(fallback_body(service, [{
-        "profile": "default", "native_fallback": {"enabled": False, "chain": []},
-    }]))
-    assert service.apply(preview["plan_id"])["status"] == "applied"
-    migrated = json.loads(service.store_path.read_text(encoding="utf-8"))
-
-    assert migrated["schema"] == 2
-    assert migrated["profiles"]["default"]["models"] == before["models"]
-    assert migrated["profiles"]["default"]["routing"] == before["routing"]
-    assert migrated["profiles"]["default"]["native_fallback"] == {"enabled": False, "chain": []}
 
 
 def test_native_chain_merges_legacy_keys_and_explicit_apply_projects_both_keys(tmp_path, monkeypatch):
@@ -213,7 +152,6 @@ def test_native_chain_merges_legacy_keys_and_explicit_apply_projects_both_keys(t
     assert row["fallbacks"]["native"]["managed"] is True
     assert row["fallbacks"]["native"]["drift"] is False
     assert row["fallbacks"]["native"]["consent"]["source"] == "explicit"
-    assert service.routing_config("default")["fallback"]["enabled"] is False
 
 
 def test_native_off_clears_both_legacy_keys_and_keeps_the_stored_chain(tmp_path, monkeypatch):
@@ -263,52 +201,8 @@ def test_advanced_native_entry_is_sanitized_and_read_only(tmp_path, monkeypatch)
     assert fake.calls == []
 
 
-def test_routing_fallback_requires_exact_confirmation_and_coexists_with_native(tmp_path, monkeypatch):
-    service, fake, _root = setup_service(tmp_path, monkeypatch)
-    native_chain = [{"provider": "xiaomi", "model": "mimo-v2"}]
-    native_preview = service.fallback_preview(fallback_body(
-        service,
-        [{"profile": "default", "native_fallback": {"enabled": True, "chain": native_chain}}],
-        [confirmation("native")],
-    ))
-    assert service.apply(native_preview["plan_id"])["status"] == "applied"
-
-    desired = {
-        "enabled": True,
-        "heavy": route("openai-api", "gpt-6-heavy", "high"),
-        "light": route("deepseek", "flash-light", "low"),
-    }
-    body = fallback_body(service, [{"profile": "default", "routing_fallback": desired}])
-    with pytest.raises(ValueError, match="confirmation"):
-        service.fallback_preview(body)
-    bad = fallback_body(service, [{"profile": "default", "routing_fallback": desired}], [{
-        "profile": "default", "scope": "routing", "allow_additional_cost": True, "allow_task_rerun": False,
-    }])
-    with pytest.raises(ValueError, match="retry flag"):
-        service.fallback_preview(bad)
-
-    preview = service.fallback_preview(fallback_body(service, [{"profile": "default", "routing_fallback": desired}], [confirmation("routing")]))
-    assert service.apply(preview["plan_id"])["status"] == "applied"
-    config = service.routing_config("default")
-    row = profile(service.status())
-    assert config["fallback"] == desired
-    assert config["fallback_policy"]["approved"] is True
-    assert row["fallbacks"]["native"]["enabled"] is True
-    assert row["fallbacks"]["routing"]["consent"]["allow_task_rerun"] is True
-    assert fake.values["default"]["fallback_providers"] == native_chain
-
-
 def test_model_preview_cannot_change_fallback_and_preserves_additive_state(tmp_path, monkeypatch):
     service, _fake, _root = setup_service(tmp_path, monkeypatch)
-    desired = {
-        "enabled": True,
-        "heavy": route("openai-api", "gpt-6-heavy", "high"),
-        "light": route("deepseek", "flash-light", "low"),
-    }
-    approved = service.fallback_preview(fallback_body(
-        service, [{"profile": "default", "routing_fallback": desired}], [confirmation("routing")]
-    ))
-    assert service.apply(approved["plan_id"])["status"] == "applied"
     native_chain = [{"provider": "xiaomi", "model": "mimo-v2"}]
     native_approved = service.fallback_preview(fallback_body(
         service, [{"profile": "default", "native_fallback": {"enabled": True, "chain": native_chain}}],
@@ -326,19 +220,17 @@ def test_model_preview_cannot_change_fallback_and_preserves_additive_state(tmp_p
     }
     attempted = copy.deepcopy(body)
     attempted["routing"]["fallback"] = {"enabled": False, "heavy": None, "light": None}
-    with pytest.raises(ValueError, match="fallback_preview"):
+    with pytest.raises(ValueError, match="routing must define enabled and slots"):
         service.preview(attempted)
 
     for role in ("main", "compression", "title"):
-        body["models"][role]["model"] = "heavy-updated"
+        body["models"][role]["model"] = "main-updated"
     preview = service.preview(body)
     assert service.apply(preview["plan_id"])["status"] == "applied"
     after = profile(service.status())
-    assert after["models"]["main"]["model"] == "heavy-updated"
+    assert after["models"]["main"]["model"] == "main-updated"
     assert after["fallbacks"] == before["fallbacks"]
     stored = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]["default"]
-    assert stored["routing"]["fallback"] == desired
-    assert stored["fallback_consent"]["routing"]["source"] == "explicit"
     assert stored["native_fallback"] == {"enabled": True, "chain": native_chain}
     assert stored["fallback_consent"]["native"]["source"] == "explicit"
 
@@ -351,7 +243,7 @@ def test_confirmation_paths_profiles_and_chain_validation_are_strict(tmp_path, m
     with pytest.raises(ValueError, match="duplicate profiles"):
         service.fallback_preview(fallback_body(service, [
             {"profile": "default", "native_fallback": {"enabled": False, "chain": []}},
-            {"profile": "default", "routing_fallback": {"enabled": False, "heavy": None, "light": None}},
+            {"profile": "default", "delegation_fallback": {"mode": "off", "chain": []}},
         ]))
     with pytest.raises(ValueError, match="duplicate profile scopes"):
         service.fallback_preview(fallback_body(service, [{"profile": "default", "native_fallback": {"enabled": True, "chain": chain}}], [confirmation("native"), confirmation("native")]))
@@ -359,7 +251,14 @@ def test_confirmation_paths_profiles_and_chain_validation_are_strict(tmp_path, m
     with pytest.raises(ValueError, match="at most five"):
         service.fallback_preview(fallback_body(service, [{"profile": "default", "native_fallback": {"enabled": False, "chain": too_long}}]))
     with pytest.raises(ValueError, match="profile scope"):
-        service.fallback_preview(fallback_body(service, [{"profile": "default", "native_fallback": {"enabled": False, "chain": []}}], [confirmation("routing")]))
+        service.fallback_preview(fallback_body(service, [{"profile": "default", "native_fallback": {"enabled": False, "chain": []}}], [confirmation("delegation")]))
+    with pytest.raises(ValueError, match="confirmation scope"):
+        service.fallback_preview(fallback_body(service, [{"profile": "default", "native_fallback": {"enabled": True, "chain": chain}}], [confirmation("routing")]))
+    with pytest.raises(ValueError, match="retry flag"):
+        service.fallback_preview(fallback_body(service, [{"profile": "default", "native_fallback": {"enabled": True, "chain": chain}}],
+                                               [{**confirmation("native"), "allow_task_rerun": True}]))
+    with pytest.raises(ValueError, match="known fallback scopes"):
+        service.fallback_preview(fallback_body(service, [{"profile": "default", "routing_fallback": {"enabled": False, "heavy": None, "light": None}}]))
 
 
 def test_native_partial_apply_receipt_does_not_claim_unwritten_key(tmp_path, monkeypatch):

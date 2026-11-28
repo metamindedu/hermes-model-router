@@ -3,11 +3,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_native_completion_does_not_reuse_legacy_join_protocol():
-    text = (ROOT/'skills/adaptive-coding-orchestration/SKILL.md').read_text(encoding='utf-8')
+def test_the_policy_uses_native_delegation_and_no_process_jobs():
+    text = (ROOT / 'skills/adaptive-coding-orchestration/SKILL.md').read_text(encoding='utf-8')
     assert 'NEW work uses the real `delegate_task`' in text
-    assert 'coding_route(action="start")' in text
-    assert 'Historical process jobs only' in text
-    assert 'owner-bound `join`' in text
-    assert 'not native completion acknowledgement' in text
-    assert 'must not automatically rejoin' in text
+    assert 'do not poll job files, manufacture handles, adopt processes' in text
+    for retired in ('coding_route(action="start")', 'Historical process jobs', '`join`', 'start_retired'):
+        assert retired not in text

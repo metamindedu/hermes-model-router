@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 import json
+import re
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -69,15 +70,7 @@ def plugin(monkeypatch):
         def fallback_preview(self, body):
             state['fallback_body'] = body
             return {'plan_id': 'f' * 32, 'changes': [], 'warnings': []}
-    class Router:
-        def __init__(self, service, **kwargs):
-            self.service = service
-            state['router_kwargs'] = kwargs
-            self.fast_snapshot = kwargs.get('fast_snapshot')
-            self.runtime = kwargs.get('runtime')
-        def start(self, *args, **kwargs): state["started"] += 1; state['start_kwargs'] = kwargs; return {"job_id": "a" * 32, "status": "running"}
-        def status(self, job_id): return {"status": "failed", "verification_status": "unmet"}
-    for name, cls in [("service", Service), ("routing", Router)]:
+    for name, cls in [("service", Service)]:
         child = ModuleType(package.__name__ + "." + name)
         setattr(child, cls.__name__, cls)
         monkeypatch.setitem(sys.modules, child.__name__, child)
@@ -88,14 +81,6 @@ def plugin(monkeypatch):
     constants.set_hermes_home_override = lambda home: state["bound"].append(str(home)) or "token"
     constants.reset_hermes_home_override = lambda token: state["bound"].append(token)
     monkeypatch.setitem(sys.modules, "hermes_constants", constants)
-    observer_module = ModuleType(package.__name__ + '.attempt_observer')
-    observer_module.record_event = lambda event_name, **payload: state.setdefault('events', []).append((event_name, payload))
-    monkeypatch.setitem(sys.modules, observer_module.__name__, observer_module)
-    runtime_module = ModuleType(package.__name__ + '.runtime_tracking')
-    from contextlib import nullcontext
-    runtime_module.route_session_context = lambda **kwargs: nullcontext()
-    runtime_module.capture_runtime = lambda **kwargs: state.setdefault('runtime_calls', []).append(kwargs) or SimpleNamespace(parent_session_id='parent-session')
-    monkeypatch.setitem(sys.modules, runtime_module.__name__, runtime_module)
     watchdog_module = ModuleType(package.__name__ + '.native_watchdog')
     watchdog_module.register_native_watchdog = lambda ctx, home: state.setdefault('watchdog_homes', []).append(str(home))
     monkeypatch.setitem(sys.modules, watchdog_module.__name__, watchdog_module)
@@ -110,7 +95,7 @@ def plugin(monkeypatch):
     native_module.register_native_delegation = lambda ctx, home: state.setdefault('provider_homes', []).append(str(home))
     monkeypatch.setitem(sys.modules, native_module.__name__, native_module)
 
-    # This fixture isolates legacy root registration; the new adapters' real
+    # This fixture isolates root registration; the adapters' real
     # registration/authority/inertness is exercised by their own native tests.
     for feature, registrar, key in [('execution_roster', 'register_execution_roster', 'roster_homes'),
                                      ('profile_jobs', 'register_profile_jobs', 'profile_job_homes'),
@@ -127,7 +112,7 @@ def plugin(monkeypatch):
     return mod, ctx, state, tools, skills
 
 
-def test_disabled_profile_keeps_legacy_reads_and_provider_registration(plugin):
+def test_disabled_profile_keeps_config_reads_and_provider_registration(plugin):
     mod, ctx, state, tools, skills = plugin
     state['enabled'] = False
     mod.register(ctx)
@@ -142,13 +127,12 @@ def test_disabled_profile_keeps_legacy_reads_and_provider_registration(plugin):
     assert advise_kwargs['routing_enabled']() is True
 
 
-def test_active_profile_registers_scoped_legacy_tool_and_policy(plugin):
+def test_active_profile_registers_the_config_tool_and_policy(plugin):
     mod, ctx, state, tools, skills = plugin
     mod.register(ctx)
     assert tools[0]['name'] == 'coding_route' and skills[0][0] == 'adaptive-coding-orchestration'
-    result = json.loads(tools[0]['handler']({'action': 'start', 'purpose': 'independent-review', 'prompt': 'bounded', 'cwd': 'C:/fake'}))
-    assert result['error'] == 'start_retired' and state['started'] == 0
-    assert state.get('runtime_calls', []) == [] and state['bound'][-1] == 'token'
+    assert json.loads(tools[0]['handler']({'action': 'config'}))['enabled'] is True
+    assert state['bound'][-1] == 'token'
 
 
 def test_registered_discovery_copy_defaults_small_work_to_main(plugin):
@@ -157,38 +141,33 @@ def test_registered_discovery_copy_defaults_small_work_to_main(plugin):
     description = tools[0]['schema']['description']
     assert 'Main handles small bounded changes directly' in description
     assert 'at least two substantive independent workstreams' in description
-    assert 'heavy context, long runtime' in description
+    assert 'large context, long runtime' in description
     assert "on Main's own model, design stays with Main" in description
     assert 'unless explicitly requested by the user' in description
-    assert 'required Heavy/independent review remains mandatory' in description
+    assert 'required reviews (semantic-final, independent-review) remain mandatory' in description
+    assert not re.search(r'heavy|light', description, re.IGNORECASE)
     assert 'Main handles small bounded changes directly' in skills[0][2]
-    assert state['started'] == 0
     assert tools[0]['schema']['parameters']['required'] == ['action']
 
 
-def test_new_tool_schema_has_no_process_launch_fields(plugin):
+def test_the_tool_only_reads_config(plugin):
     mod, ctx, state, tools, _ = plugin
     mod.register(ctx)
     props = tools[0]['schema']['parameters']['properties']
-    assert props['action']['enum'] == ['config', 'status', 'join']
-    assert not set(props) & {'title', 'purpose', 'prompt', 'cwd', 'timeout', 'completion_mode'}
-    assert state['started'] == 0
+    assert props == {'action': {'type': 'string', 'enum': ['config']}}
+    assert tools[0]['schema']['parameters']['additionalProperties'] is False
 
 
-def test_legacy_wait_is_not_a_new_job_timeout(plugin):
-    mod, ctx, _, tools, _ = plugin
-    mod.register(ctx)
-    props = tools[0]['schema']['parameters']['properties']
-    assert 'timeout' not in props
-    assert props['wait_timeout']['minimum'] == 1
-    assert 'maximum' not in props['wait_timeout']
-
-
-def test_stale_start_is_retired_even_after_routing_disable(plugin):
+@pytest.mark.parametrize('args', [
+    {'action': 'start', 'purpose': 'implementation'}, {'action': 'status', 'job_id': 'a' * 32},
+    {'action': 'join', 'job_id': 'owned-job', 'wait_timeout': 30}, {'action': 'config', 'profile': 'other'}, {},
+])
+def test_every_other_call_is_refused_and_launches_nothing(plugin, args):
     mod, ctx, state, tools, _ = plugin
-    mod.register(ctx); state['enabled'] = False
-    result = json.loads(tools[0]['handler']({'action': 'start', 'purpose': 'implementation'}))
-    assert result['error'] == 'start_retired' and state['started'] == 0
+    mod.register(ctx)
+    result = json.loads(tools[0]['handler'](args, session_id='parent-session', task_id='host-task'))
+    assert result['error'] == 'invalid_or_denied'
+    assert state.get('fast_captures', []) == []
 
 
 def test_backend_fallback_preview_uses_separate_service_method(api):
@@ -215,28 +194,11 @@ def test_native_fallback_command_is_scoped_and_framed(plugin, capsys):
     assert 'x' * 50 not in capsys.readouterr().out
 
 
-def test_observer_events_bind_distinct_names_and_original_profile(plugin, monkeypatch, tmp_path):
+def test_registration_adds_no_api_or_tool_hooks_of_its_own(plugin):
     mod, ctx, state, _, _ = plugin
-    home = tmp_path / 'claire'
-    home.mkdir()
-    monkeypatch.setattr(sys.modules['hermes_constants'], 'get_hermes_home', lambda: home)
-    monkeypatch.setenv('HERMES_HOME', str(home))
     mod.register(ctx)
-    expected = {'pre_api_request', 'post_api_request', 'api_request_error', 'pre_tool_call', 'post_tool_call'}
-    assert set(state['hooks']) == expected
-    for event in sorted(expected):
-        state['hooks'][event](session_id='attempt-session')
-        assert state['events'][-1] == (event, {'session_id': 'attempt-session'})
-        assert state['bound'][-2] == str(home)
-        assert state['bound'][-1] == 'token'
-
-
-def test_tool_rejects_cross_profile_field(plugin):
-    mod, ctx, state, tools, _ = plugin
-    mod.register(ctx)
-    result = json.loads(tools[0]["handler"]({"action": "start", "purpose": "implementation", "profile": "other"}))
-    assert result["error"] == "start_retired"
-    assert state["started"] == 0
+    # Every hook belongs to a feature module (stubbed here); the root registers none.
+    assert state.get('hooks', {}) == {}
 
 
 def test_fast_registration_is_independent_of_routing_opt_in(plugin):
@@ -245,52 +207,3 @@ def test_fast_registration_is_independent_of_routing_opt_in(plugin):
     mod.register(ctx)
     assert state['fast_homes'] == [str(Path('C:/fake/profiles/claire'))]
     assert len(tools) == 1 and tools[0]["check_fn"]()
-
-
-def test_retired_start_never_captures_fast_snapshot_or_dispatch_runtime(plugin):
-    mod, ctx, state, tools, _ = plugin
-    mod.register(ctx)
-    for extra in ({}, {'fast_snapshot': {'forged': True}}, {'completion_mode': 'join'}):
-        result = json.loads(tools[0]['handler']({'action': 'start', **extra}, session_id='parent-session', task_id='host-task'))
-        assert result['error'] == 'start_retired'
-    assert state['started'] == 0
-    assert state.get('fast_captures', []) == state.get('runtime_calls', []) == []
-
-
-def test_status_never_captures_or_changes_fast_mode(plugin):
-    mod, ctx, state, tools, _ = plugin
-    mod.register(ctx)
-    result = json.loads(tools[0]['handler']({'action': 'status', 'job_id': 'a' * 32}))
-    assert result['status'] == 'failed'
-    assert state.get('fast_captures', []) == []
-
-
-def test_join_schema_and_dispatch_capture_only_current_host_owner(plugin):
-    mod, ctx, state, tools, _ = plugin
-    router_type = sys.modules['test_model_router_plugin.model_router.routing'].Router
-    def join(self, job_id, *, wait_timeout=None):
-        state['joined'] = (job_id, wait_timeout, self.runtime.parent_session_id)
-        return {'join_status':'joined','status':'completed','completion_consumed':True}
-    router_type.join = join
-    mod.register(ctx)
-    props = tools[0]['schema']['parameters']['properties']
-    assert 'join' in props['action']['enum']
-    assert 'completion_mode' not in props
-    assert props['wait_timeout']['minimum'] == 1
-    result = json.loads(tools[0]['handler']({'action':'join','job_id':'owned-job','wait_timeout':30},
-                                         session_id='parent-session',task_id='host-task'))
-    assert result['join_status'] == 'joined'
-    assert state['joined'] == ('owned-job',30,'parent-session')
-    assert state['runtime_calls'] == [{'task_id':'host-task','expected_profile':'claire'}]
-    assert state.get('fast_captures',[]) == [] and state['started'] == 0
-    denied = json.loads(tools[0]['handler']({'action':'join','job_id':'owned-job','timeout':60}))
-    assert denied['error'] == 'invalid_or_denied'
-
-
-def test_notify_and_join_stale_start_variants_never_launch(plugin):
-    mod, ctx, state, tools, _ = plugin
-    mod.register(ctx)
-    for mode in ('notify', 'join'):
-        result = json.loads(tools[0]['handler']({'action': 'start', 'completion_mode': mode}))
-        assert result['error'] == 'start_retired'
-    assert state['started'] == 0

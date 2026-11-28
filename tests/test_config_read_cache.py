@@ -16,9 +16,9 @@ def test_same_config_bytes_are_parsed_once_per_service(tmp_path, monkeypatch):
         calls.append(raw)
         return original(raw)
     monkeypatch.setattr(yaml, "safe_load", counted)
-    assert service._read_key("default", "model.default") == "heavy-test"
-    assert service._read_key("default", "delegation.model") == "light-test"
-    assert service._read_key("default", "model.default") == "heavy-test"
+    assert service._read_key("default", "model.default") == "main-test"
+    assert service._read_key("default", "delegation.model") == "delegate-test"
+    assert service._read_key("default", "model.default") == "main-test"
     assert len(calls) == 1, "a status request must not parse the same full YAML once per field"
 
 
@@ -27,14 +27,14 @@ def test_external_change_is_seen_even_when_size_and_timestamp_are_unchanged(tmp_
     root = make_home(tmp_path)
     service = Service(root)
     path = root / "config.yaml"
-    assert service._read_key("default", "model.default") == "heavy-test"
+    assert service._read_key("default", "model.default") == "main-test"
     stat = path.stat()
     before = path.read_bytes()
-    after = before.replace(b"heavy-test", b"other-test")
-    assert len(before) == len(after)
+    after = before.replace(b"main-test", b"next-test")
+    assert before != after and len(before) == len(after)
     path.write_bytes(after)
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
-    assert service._read_key("default", "model.default") == "other-test"
+    assert service._read_key("default", "model.default") == "next-test"
 
 
 def test_mutating_returned_container_cannot_change_cached_config(tmp_path):
@@ -74,9 +74,9 @@ def test_invalid_changed_config_never_reuses_old_cached_values(tmp_path):
     service = Service(root)
     path = root / "config.yaml"
     original = path.read_bytes()
-    assert service._read_key("default", "model.default") == "heavy-test"
+    assert service._read_key("default", "model.default") == "main-test"
     path.write_text("model: [broken\n")
     with pytest.raises(ServiceError):
         service._read_key("default", "model.default")
     path.write_bytes(original)
-    assert service._read_key("default", "model.default") == "heavy-test"
+    assert service._read_key("default", "model.default") == "main-test"

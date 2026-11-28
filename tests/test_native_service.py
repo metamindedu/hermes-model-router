@@ -33,7 +33,7 @@ def fixture(tmp_path, monkeypatch):
         (home / 'config.yaml').write_text(yaml.safe_dump({
             'model': {'provider': 'fixture', 'default': 'main'},
             'agent': {'reasoning_effort': 'high'},
-            'delegation': {'model': 'light', 'provider': 'fixture', 'backends': {'unrelated': {'keep': True}}},
+            'delegation': {'model': 'delegate', 'provider': 'fixture', 'backends': {'unrelated': {'keep': True}}},
             'plugins': {'enabled': ['model-router']},
             'skills': {'disabled': []}, 'unrelated': {'preserve': name},
         }), encoding='utf-8')
@@ -64,7 +64,7 @@ def body(service, profile='default', backend='model-router', profiles=None):
     assert dto['editable'], dto
     return {'expected_revision': 0, 'updates': [{
         'profile': profile, 'expected_digest': dto['digest'], 'backend': backend,
-        'policy': ns.default_policy(), 'profile_routes': profiles or {'profiles': [], 'default': None},
+        'slot_policy': ns.default_slot_policy(), 'profile_routes': profiles or {'profiles': [], 'default': None},
         'allow_additional_cost': False, 'allow_profile_access': False,
     }]}
 
@@ -75,7 +75,7 @@ def test_status_is_readonly_and_legacy_fallback_consent_is_not_imported(fixture)
     before = path.read_bytes()
     dto = native_service.status(service, 'default')
     assert dto['backend'] == 'default'
-    assert dto['policy'] == ns.default_policy()
+    assert dto['slot_policy'] == ns.default_slot_policy() and 'policy' not in dto
     assert dto['profile_routes'] == {'profiles': [], 'default': None}
     assert before == path.read_bytes() and calls == []
     assert not service.store_path.exists()
@@ -91,7 +91,7 @@ def test_apply_writes_only_exact_owned_keys_and_backend_last(fixture):
     assert [row[1] for row in calls] == [ns.KEY_POLICY, ns.KEY_PROFILES, ns.KEY_BACKEND]
     config = yaml.safe_load((service.root / 'config.yaml').read_text())
     assert get_path(config, ns.KEY_BACKEND) == 'model-router'
-    assert config['delegation']['model'] == 'light'
+    assert config['delegation']['model'] == 'delegate'
     assert config['delegation']['backends']['unrelated'] == {'keep': True}
     assert config['unrelated'] == {'preserve': 'default'}
     assert before_other == (service.root / 'profiles/p1/config.yaml').read_bytes()
@@ -128,14 +128,14 @@ def test_profile_grant_rejects_same_name_resolved_by_core_in_foreign_root(fixtur
 def test_custom_continuation_needs_fresh_bound_cost_consent(fixture):
     service, calls, _ = fixture
     request = body(service)
-    request['updates'][0]['policy']['heavy'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'backup'}]}
+    request['updates'][0]['slot_policy']['design'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'backup'}]}
     with pytest.raises(ValueError, match='additional-cost'): service.delegation_preview(request)
     request['updates'][0]['allow_additional_cost'] = True
     assert service.apply(service.delegation_preview(request)['plan_id'])['status'] == 'applied'
     config = yaml.safe_load((service.root / 'config.yaml').read_text())
     block = get_path(config, ns.KEY_POLICY)
-    assert ns.validate_policy_block('default', block)['heavy']['mode'] == 'custom'
-    with pytest.raises(ValueError): ns.validate_policy_block('p1', block)
+    assert ns.validate_slot_policy_block('default', block)['design']['mode'] == 'custom'
+    with pytest.raises(ValueError): ns.validate_slot_policy_block('p1', block)
     assert get_path(config, 'delegation.fallback_providers') is None
 
 
@@ -346,12 +346,13 @@ def test_partial_update_fields_are_exact(fixture):
     service, calls, _ = fixture
     _seed(service, backend='model-router')
     for fields, message in (({'allow_additional_cost': False, 'profile_routes': {'profiles': [], 'default': None}}, 'update fields'),
-                            ({'policy': ns.default_policy()}, 'update fields'),
-                            ({'policy': ns.default_policy(), 'slot_policy': ns.default_slot_policy(), 'allow_additional_cost': False}, 'update fields'),
+                            ({'slot_policy': ns.default_slot_policy()}, 'update fields'),
+                            ({'policy': ns.default_slot_policy(), 'allow_additional_cost': False}, 'update fields'),
+                            ({'slot_policy_patch': {}, 'slot_policy': ns.default_slot_policy(), 'allow_additional_cost': False}, 'update fields'),
                             ({'allow_additional_cost': False}, 'update fields'),
                             ({'unknown': True}, 'update fields')):
         with pytest.raises(ValueError, match=message): service.delegation_preview(_part_update(service, 'model-router', **fields))
-    request = _part_update(service, 'model-router', policy=ns.default_policy(), allow_additional_cost=False)
+    request = _part_update(service, 'model-router', slot_policy=ns.default_slot_policy(), allow_additional_cost=False)
     request['updates'][0]['allow_profile_access'] = True
     with pytest.raises(ValueError, match='needs submitted profile routes'): service.delegation_preview(request)
     assert calls == []

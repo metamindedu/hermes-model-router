@@ -147,9 +147,9 @@ class ProfileJobs:
             status = 'unknown'
         pending = copy.deepcopy(job.get('pending_request'))
         mutable = permitted and not job.get('operation_unknown') and not job.get('cancel_requested') and not job.get('pending_operation')
-        observed = {'kind': 'unknown', 'role': None, 'profile': None, 'evidence': 'unknown'}
+        observed = {'kind': 'unknown', 'profile': None, 'evidence': 'unknown'}
         if job.get('gateway_profile_id') and job.get('admission_id'):
-            observed = {'kind': 'profile', 'role': None, 'profile': job['target_profile'], 'evidence': 'runtime_reported'}
+            observed = {'kind': 'profile', 'profile': job['target_profile'], 'evidence': 'runtime_reported'}
         return {'id': job['id'], 'origin_profile': self.origin, 'parent_session_id': job['parent_session_id'],
             'target_profile': job['target_profile'], 'execution_mode': 'gateway', 'status': status,
             'target_session_id': job.get('target_session_id'), 'admission_id': job.get('admission_id'),
@@ -352,7 +352,7 @@ class ProfileJobs:
                 self._update(job_id, lambda j: j.update(status='creating', pending_operation='create'))
                 remote_attempted = True
                 created = client.call('session.create', {'request_id': job['create_id'], 'source': 'tool', 'cwd': job['cwd'],
-                    'client': {'name': CLIENT_NAME, 'version': '0.17.0'}})
+                    'client': {'name': CLIENT_NAME, 'version': '0.18.0'}})
             sid = created.get('session_id')
             if not identifier(sid) or created.get('stored_session_id', sid) != sid:
                 raise JobError('session_identity_mismatch', unknown=True)
@@ -770,7 +770,7 @@ class ProfileJobs:
 
 
 SCHEMA = {'name': 'profile_task', 'description':
-    'Separate opt-in full-profile Gateway jobs; never a native subagent or Heavy adapter. Start requires separately saved full-profile grants. '
+    'Separate opt-in full-profile Gateway jobs; never a native subagent or review route. Start requires separately saved full-profile grants. '
     'Use status without a job_id to read allowed targets and this exact conversation only. Start requires a stable request_id; reuse it unchanged after a known retry, never replay an unknown outcome. '
     'Target normal model/memory/context/tool policy is used on the tool surface; no parent toolset override. Existing Gateway required: none is started. '
     'Legacy bare start collects result explicitly. For automatic return, call prepare with an explicit finite wait_seconds; '

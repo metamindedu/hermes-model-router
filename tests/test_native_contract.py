@@ -17,7 +17,7 @@ from test_native_service import fixture, get_path, put_path  # noqa: F401 (pytes
 FIXTURE = Path(__file__).with_name('fixtures') / 'native_delegation_contract.json'
 CONTRACT = json.loads(FIXTURE.read_text(encoding='utf-8'))
 CASES = CONTRACT['cases']
-DTO_FIELDS = ('schema', 'supported', 'editable', 'backend', 'policy', 'auto_policy', 'slot_policy', 'auto_slot_policy',
+DTO_FIELDS = ('schema', 'supported', 'editable', 'backend', 'slot_policy', 'auto_slot_policy',
               'policy_schema', 'auto_policy_schema', 'slot_policy_supported', 'auto_supported', 'profile_routes', 'warnings')
 MISSING = object()
 
@@ -65,6 +65,8 @@ def test_a_page_body_is_accepted_and_leaves_every_omitted_part_as_stored(fixture
         actual = native_service.status(service, name)
         for key in DTO_FIELDS:
             assert actual[key] == expected[key], (case['name'], name, key)
+        # Spare models are per slot only: neither side has a two-role view any more.
+        assert 'policy' not in actual and 'auto_policy' not in actual and 'policy' not in expected and 'auto_policy' not in expected
         assert actual['role_intro_inheritance']['supported'] == expected['role_intro_inheritance']['supported']
     raw_before = {name: _path(service, name).read_bytes() for name in case['seeds']}
     before = {name: yaml.safe_load(raw.decode('utf-8')) for name, raw in raw_before.items()}

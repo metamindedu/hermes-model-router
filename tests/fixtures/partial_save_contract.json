@@ -5,7 +5,7 @@
     {
       "kind": "native",
       "name": "native-slot-spare-patch",
-      "description": "Only the edited slot spare model goes to each target; a target with nothing stored starts from all off; a two-role target is skipped.",
+      "description": "Only the edited slot spare model goes to each target; a target with nothing stored starts from all off; a target stored on another method is skipped.",
       "part": "native",
       "origin": "default",
       "targets": [
@@ -25,8 +25,7 @@
           }
         },
         "p2": {
-          "backend": "model-router",
-          "twoRole": true
+          "backend": "model-router-auto"
         }
       },
       "dtos": {
@@ -41,26 +40,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -141,26 +120,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -239,33 +198,13 @@
           "schema": 1,
           "supported": true,
           "editable": true,
-          "backend": "model-router",
+          "backend": "model-router-auto",
           "digest": "digest:p2",
           "role_intro_inheritance": {
             "schema": 1,
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -326,7 +265,7 @@
               "chain": []
             }
           },
-          "policy_schema": 1,
+          "policy_schema": 0,
           "auto_policy_schema": 0,
           "slot_policy_supported": true,
           "profile_routes": {
@@ -417,26 +356,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "custom",
@@ -527,26 +446,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -627,26 +526,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -776,26 +655,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -876,26 +735,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "custom",
@@ -981,26 +820,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1137,26 +956,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "custom",
@@ -1242,26 +1041,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1347,26 +1126,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1591,26 +1350,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1696,26 +1435,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1801,26 +1520,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2003,26 +1702,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2112,26 +1791,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2217,26 +1876,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2368,7 +2007,7 @@
             }
           },
           "code-simple": {
-            "follow": "delegation",
+            "follow": "main",
             "custom": null
           }
         }
@@ -2376,10 +2015,6 @@
       "edited": [
         "design"
       ],
-      "skips": {
-        "p1": [],
-        "p2": []
-      },
       "merged": {
         "p1": {
           "design": {
@@ -2409,7 +2044,7 @@
             }
           },
           "code-simple": {
-            "follow": "delegation",
+            "follow": "main",
             "custom": null
           },
           "computer-use": {
@@ -2503,8 +2138,8 @@
     },
     {
       "kind": "store",
-      "name": "slot-legacy-collision",
-      "description": "A submitted slot that another target stores as following the delegation model is kept there.",
+      "name": "slot-overwrite",
+      "description": "A submitted slot replaces the declaration another target stores for it.",
       "origin": "p1",
       "seeds": {
         "p1": {
@@ -2519,20 +2154,18 @@
         },
         "p2": {
           "code-simple": {
-            "follow": "delegation",
-            "custom": null
+            "follow": "custom",
+            "custom": {
+              "provider": "operator",
+              "model": "p2-coder",
+              "reasoning": "medium"
+            }
           }
         }
       },
       "edited": [
         "code-simple"
       ],
-      "skips": {
-        "p1": [],
-        "p2": [
-          "code-simple"
-        ]
-      },
       "merged": {
         "p1": {
           "code-simple": {
@@ -2542,7 +2175,7 @@
         },
         "p2": {
           "code-simple": {
-            "follow": "delegation",
+            "follow": "main",
             "custom": null
           }
         }
@@ -2622,8 +2255,12 @@
               "enabled": true,
               "slots": {
                 "code-simple": {
-                  "follow": "delegation",
-                  "custom": null
+                  "follow": "custom",
+                  "custom": {
+                    "provider": "operator",
+                    "model": "p2-coder",
+                    "reasoning": "medium"
+                  }
                 }
               },
               "skill_enabled": true
@@ -2682,18 +2319,12 @@
             }
           },
           "code-simple": {
-            "follow": "delegation",
+            "follow": "main",
             "custom": null
           }
         }
       },
       "edited": [],
-      "skips": {
-        "p1": [],
-        "p2": [
-          "code-simple"
-        ]
-      },
       "merged": {
         "p1": {
           "design": {
@@ -2747,7 +2378,7 @@
             "custom": null
           },
           "code-simple": {
-            "follow": "delegation",
+            "follow": "main",
             "custom": null
           },
           "verify-simple": {
@@ -2912,7 +2543,7 @@
                 "design": null,
                 "code-complex": null,
                 "code-simple": {
-                  "follow": "delegation",
+                  "follow": "main",
                   "custom": null
                 },
                 "verify-simple": null,
@@ -2940,32 +2571,36 @@
       "origin": "p1",
       "seeds": {
         "default": {
-          "schema": 1,
+          "schema": 3,
           "revision": 0,
           "delegate_total_seconds": 0,
-          "routed_total_seconds": 3600,
+          "slot_seconds": {},
+          "default_slot_seconds": 7200,
           "editable": true,
-          "split_routing_supported": true,
           "warnings": []
         },
         "p1": {
-          "schema": 2,
+          "schema": 3,
           "revision": 1,
           "delegate_total_seconds": 60,
-          "routed_light_total_seconds": 1800,
-          "routed_heavy_total_seconds": 7200,
+          "slot_seconds": {
+            "code-simple": 1800,
+            "design": 7200
+          },
+          "default_slot_seconds": 7200,
           "editable": true,
-          "split_routing_supported": true,
           "warnings": []
         },
         "p2": {
-          "schema": 2,
+          "schema": 3,
           "revision": 1,
           "delegate_total_seconds": 30,
-          "routed_light_total_seconds": 4000,
-          "routed_heavy_total_seconds": 5000,
+          "slot_seconds": {
+            "code-simple": 4000,
+            "verify-complex": 5000
+          },
+          "default_slot_seconds": 7200,
           "editable": true,
-          "split_routing_supported": true,
           "warnings": []
         }
       },
@@ -3018,37 +2653,134 @@
     },
     {
       "kind": "store",
-      "name": "timeout-copy-all",
-      "description": "Copy-all sends all three values.",
+      "name": "timeout-slot-patch",
+      "description": "One slot limit set and one cleared (null: back to the 2-hour default) are a patch over each target's own limits.",
       "origin": "p1",
       "seeds": {
         "default": {
-          "schema": 1,
+          "schema": 3,
           "revision": 0,
           "delegate_total_seconds": 0,
-          "routed_total_seconds": 3600,
+          "slot_seconds": {},
+          "default_slot_seconds": 7200,
           "editable": true,
-          "split_routing_supported": true,
           "warnings": []
         },
         "p1": {
-          "schema": 2,
+          "schema": 3,
           "revision": 1,
           "delegate_total_seconds": 60,
-          "routed_light_total_seconds": 1800,
-          "routed_heavy_total_seconds": 7200,
+          "slot_seconds": {
+            "code-simple": 1800,
+            "design": 7200
+          },
+          "default_slot_seconds": 7200,
           "editable": true,
-          "split_routing_supported": true,
           "warnings": []
         },
         "p2": {
-          "schema": 2,
+          "schema": 3,
           "revision": 1,
           "delegate_total_seconds": 30,
-          "routed_light_total_seconds": 4000,
-          "routed_heavy_total_seconds": 5000,
+          "slot_seconds": {
+            "code-simple": 4000,
+            "verify-complex": 5000
+          },
+          "default_slot_seconds": 7200,
           "editable": true,
-          "split_routing_supported": true,
+          "warnings": []
+        }
+      },
+      "body": {
+        "partial_save_schema": 1,
+        "expected_revision": 0,
+        "profile": "p1",
+        "models": {
+          "main": {
+            "provider": "placeholder",
+            "model": "main",
+            "reasoning": "high"
+          },
+          "compression": {
+            "provider": "placeholder",
+            "model": "main",
+            "reasoning": "high"
+          },
+          "title": {
+            "provider": "placeholder",
+            "model": "main",
+            "reasoning": "high"
+          }
+        },
+        "model_targets": [],
+        "routing": {
+          "enabled": true
+        },
+        "routing_profiles": [
+          "default",
+          "p1",
+          "p2"
+        ],
+        "routing_targets": [],
+        "save_scope": "timeouts",
+        "timeout_updates": [
+          {
+            "profile": "p1",
+            "expected_revision": 1,
+            "slot_seconds": {
+              "design": null,
+              "code-simple": 2700
+            }
+          },
+          {
+            "profile": "p2",
+            "expected_revision": 1,
+            "slot_seconds": {
+              "design": null,
+              "code-simple": 2700
+            }
+          }
+        ],
+        "expected": []
+      }
+    },
+    {
+      "kind": "store",
+      "name": "timeout-copy-all",
+      "description": "Copy-all sends the ordinary limit and every slot, null for a slot without its own limit.",
+      "origin": "p1",
+      "seeds": {
+        "default": {
+          "schema": 3,
+          "revision": 0,
+          "delegate_total_seconds": 0,
+          "slot_seconds": {},
+          "default_slot_seconds": 7200,
+          "editable": true,
+          "warnings": []
+        },
+        "p1": {
+          "schema": 3,
+          "revision": 1,
+          "delegate_total_seconds": 60,
+          "slot_seconds": {
+            "code-simple": 1800,
+            "design": 7200
+          },
+          "default_slot_seconds": 7200,
+          "editable": true,
+          "warnings": []
+        },
+        "p2": {
+          "schema": 3,
+          "revision": 1,
+          "delegate_total_seconds": 30,
+          "slot_seconds": {
+            "code-simple": 4000,
+            "verify-complex": 5000
+          },
+          "default_slot_seconds": 7200,
+          "editable": true,
           "warnings": []
         }
       },
@@ -3089,8 +2821,15 @@
             "profile": "p2",
             "expected_revision": 1,
             "delegate_total_seconds": 60,
-            "routed_light_total_seconds": 1800,
-            "routed_heavy_total_seconds": 7200
+            "slot_seconds": {
+              "design": 7200,
+              "code-complex": null,
+              "code-simple": 1800,
+              "verify-simple": null,
+              "verify-complex": null,
+              "computer-use": null,
+              "advise": null
+            }
           }
         ],
         "expected": []

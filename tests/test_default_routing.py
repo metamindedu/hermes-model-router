@@ -3,6 +3,7 @@ import copy
 
 import pytest
 
+from model_router.slots import BUILTIN_SLOTS
 from model_router.service import Service, SKILL_NAME
 from test_integration import make_home, writer
 
@@ -23,7 +24,10 @@ def test_fresh_installed_profile_defaults_on_without_writing_settings(tmp_path):
     assert row['routing']['enabled'] is True
     assert service.routing_config('default')['enabled'] is True
     assert row['drift'] == []
-    assert row['routing']['fallback']['enabled'] is False
+    assert row['routing'] == {'enabled': True, 'slots': {}}
+    assert set(row['fallbacks']) == {'native', 'delegation'}
+    routes = service.routing_config('default')['slots']
+    assert routes == dict.fromkeys(BUILTIN_SLOTS, row['models']['main'])
     assert config.read_bytes() == before
     assert not (root / 'plugin-data').exists()
 
@@ -72,7 +76,7 @@ def test_fresh_install_can_save_identical_models_then_explicitly_opt_out(tmp_pat
     root = make_home(tmp_path)
     install_marker(root)
     write = writer(root)
-    write('default', 'delegation.model', 'heavy-test')
+    write('default', 'delegation.model', 'main-test')
     service = Service(root, write)
     status = service.status()
     row = status['profiles'][0]
@@ -88,7 +92,7 @@ def test_fresh_install_can_save_identical_models_then_explicitly_opt_out(tmp_pat
     assert receipt['status'] == 'applied'
     config = service.routing_config('default')
     assert config['enabled'] is True
-    assert (config['heavy']['provider'], config['heavy']['model']) == (config['light']['provider'], config['light']['model'])
+    assert config['slots'] == dict.fromkeys(BUILTIN_SLOTS, row['models']['main'])
     fresh = service.status()
     body.update(expected_revision=fresh['revision'], models=fresh['profiles'][0]['models'])
     body['routing']['enabled'] = False

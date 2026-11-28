@@ -1,18 +1,18 @@
-# Execution roster and full-profile jobs (0.10.0)
+# Execution roster and full-profile jobs
 
-This documents the 0.10.0 implementation. Package installation, active registration and successful live target/provider execution require separate evidence; source tests alone establish none of them.
+Package installation, active registration and successful live target/provider execution require separate evidence; source tests alone establish none of them.
 
 The approved workflow separates authority: the original registered **host operator CLI** administers grants; the plugin manages scoped jobs; approval/clarification decisions belong to the **native target conversation**. Generic session control, a checkbox or caller `human`/`operator` flags confer neither privileged authority. The plugin refuses all decision relay, including denial and internal-controller calls.
 
 ## Two adapters, no silent replacement
 
-The composer supplement and **실행 현황** pane distinguish native model Heavy/Light, native profile routing, and separate Gateway-owned profile jobs. Requested identity is separate from runtime-reported identity. A matching model name does not prove a role, profile, successful provider response or semantic success. Ambiguous native correlations remain unknown; the existing native subagent cards and controls remain unchanged.
+The composer status line (**실행 현황**) distinguishes native model slots, native profile routing and separate Gateway-owned profile jobs. The `execution-roster/2` rows carry the slot. The `model-router` backend reports the slot ID; automatic routing reports `model:<slot>` or `profile:<name>`. Requested identity is separate from runtime-reported identity. A matching model name does not prove a role, profile, successful provider response or semantic success. Ambiguous native correlations remain unknown; the existing native subagent cards and controls remain unchanged.
 
-Data is scoped to the exact connection, source profile and focused parent conversation. Composer contributions can occur in multiple tiles; their label explicitly describes the **focused** conversation rather than pretending to describe each surrounding tile. Events invalidate authenticated reads only. Bounded snapshots recover missed events; events do not wake a model.
+Data is scoped to the exact connection, source profile and owning parent conversation. Each composer shows rows only when its chat can be identified; a focused split tile does not own the primary pane's rows. Events invalidate authenticated reads only. Bounded snapshots recover missed events; events do not wake a model.
 
 ## Separate opt-in authority
 
-The policy is independent and defaults OFF with no targets. **전체 프로필 작업 → 운영자 설정 안내** is read-only and never invokes grant commands. Native allowlists, Heavy/Light/fallback saves, installation, registration and discovery do not grant this access or add new profiles. A saved policy alone does not rebuild an existing conversation's pinned tool schema.
+The policy is independent and defaults OFF with no targets. **전체 프로필 작업 → 운영자 설정 안내** is read-only and never invokes grant commands. Native allowlists, slot or fallback saves, installation, registration and discovery do not grant this access or add new profiles. A saved policy alone does not rebuild an existing conversation's pinned tool schema.
 
 The target must exist under the same validated Hermes root, have a literal existing local `terminal.cwd`, and expose the required canonical Gateway features. CWD/profile inventory is not proof that a Gateway is running. The plugin attaches to an existing owner using the installed public CLI and canonical WebSocket protocol; it never supplies `--start` or `--recover`. Missing/old owners fail unavailable. No alternate backend, private agent executor, credential copy, model override, toolset override or approval bypass is used.
 

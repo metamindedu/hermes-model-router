@@ -3,48 +3,65 @@ import copy
 import pytest
 
 from model_router import native_settings as ns
+from model_router.slots import BUILTIN_SLOTS
 
 
 def custom():
-    value = ns.default_policy()
-    value['heavy'] = {'mode': 'custom', 'chain': [
+    value = ns.default_slot_policy()
+    value['design'] = {'mode': 'custom', 'chain': [
         {'provider': 'openai', 'model': 'model-a'},
         {'provider': 'example', 'model': 'model-b'},
     ]}
     return value
 
 
-def test_consent_binds_origin_backend_role_and_order_and_not_legacy():
+def test_consent_binds_origin_backend_slot_and_order():
     policy = custom()
-    chain = policy['heavy']['chain']
-    consent = ns.make_consent('default', 'model-router', 'heavy', chain)
-    assert ns.consent_matches('default', 'model-router', 'heavy', chain, consent)
-    assert not ns.consent_matches('other', 'model-router', 'heavy', chain, consent)
-    assert not ns.consent_matches('default', 'model-router-profiles', 'heavy', chain, consent)
-    assert not ns.consent_matches('default', 'model-router', 'light', chain, consent)
-    assert not ns.consent_matches('default', 'model-router', 'heavy', list(reversed(chain)), consent)
-    assert not ns.consent_matches('default', 'model-router', 'heavy', chain, {'allow_task_rerun': True})
+    chain = policy['design']['chain']
+    consent = ns.make_slot_consent('default', 'model-router', 'design', chain)
+    assert ns.slot_consent_matches('default', 'model-router', 'design', chain, consent)
+    assert not ns.slot_consent_matches('other', 'model-router', 'design', chain, consent)
+    assert not ns.slot_consent_matches('default', 'model-router-auto', 'design', chain, consent)
+    assert not ns.slot_consent_matches('default', 'model-router', 'code-simple', chain, consent)
+    assert not ns.slot_consent_matches('default', 'model-router', 'design', list(reversed(chain)), consent)
+    assert not ns.slot_consent_matches('default', 'model-router', 'design', chain, {'allow_task_rerun': True})
+    with pytest.raises(ValueError):
+        ns.make_slot_consent('default', 'model-router-profiles', 'design', chain)
+    for retired in ('heavy', 'light', 'custom:extra'):
+        with pytest.raises(ValueError):
+            ns.make_slot_consent('default', 'model-router', retired, chain)
 
 
 def test_custom_requires_fresh_cost_approval_and_final_block_is_checked():
     with pytest.raises(ValueError):
-        ns.build_policy_block('default', custom(), False)
-    block = ns.build_policy_block('default', custom(), True)
-    assert ns.validate_policy_block('default', block) == custom()
+        ns.build_slot_policy_block('default', custom(), False)
+    block = ns.build_slot_policy_block('default', custom(), True)
+    assert ns.validate_slot_policy_block('default', block) == custom()
     with pytest.raises(ValueError):
-        ns.validate_policy_block('other', block)
-    block['fallbacks']['heavy']['chain'].reverse()
+        ns.validate_slot_policy_block('other', block)
+    block['fallbacks']['design']['chain'].reverse()
     with pytest.raises(ValueError):
-        ns.validate_policy_block('default', block)
+        ns.validate_slot_policy_block('default', block)
 
 
 def test_opt_out_is_explicit_and_has_no_consent():
-    block = ns.build_policy_block('default', ns.default_policy(), False)
+    block = ns.build_slot_policy_block('default', ns.default_slot_policy(), False)
+    assert set(block['fallbacks']) == set(BUILTIN_SLOTS)
     assert all(entry['consent'] is None for entry in block['fallbacks'].values())
-    assert ns.validate_policy_block('default', block) == ns.default_policy()
-    block['fallbacks']['heavy']['consent'] = {'allow_task_rerun': True}
+    assert ns.validate_slot_policy_block('default', block) == ns.default_slot_policy()
+    block['fallbacks']['design']['consent'] = {'allow_task_rerun': True}
     with pytest.raises(ValueError):
-        ns.validate_policy_block('default', block)
+        ns.validate_slot_policy_block('default', block)
+
+
+def test_only_the_slot_block_schema_is_read():
+    assert ns.read_policy('default', None) == {'schema': 0, 'slot_policy': ns.default_slot_policy()}
+    block = ns.build_slot_policy_block('default', custom(), True)
+    assert ns.read_policy('default', block) == {'schema': 2, 'slot_policy': custom()}
+    two_role = {'schema': 1, 'fallbacks': {'heavy': {'mode': 'off', 'chain': [], 'consent': None},
+                                           'light': {'mode': 'off', 'chain': [], 'consent': None}}}
+    with pytest.raises(ValueError):
+        ns.read_policy('default', two_role)
 
 
 @pytest.mark.parametrize('bad', [
@@ -55,18 +72,22 @@ def test_opt_out_is_explicit_and_has_no_consent():
 ])
 def test_invalid_route_is_not_normalized_or_accepted(bad):
     value = custom()
-    value['heavy']['chain'] = [bad]
+    value['design']['chain'] = [bad]
     with pytest.raises(ValueError):
         ns.validate_policy(value)
 
 
 def test_duplicate_and_advanced_policy_rejected():
     value = custom()
-    value['heavy']['chain'].append(copy.deepcopy(value['heavy']['chain'][0]))
+    value['design']['chain'].append(copy.deepcopy(value['design']['chain'][0]))
     with pytest.raises(ValueError):
         ns.validate_policy(value)
     value = custom()
-    value['heavy']['consent'] = None
+    value['design']['consent'] = None
+    with pytest.raises(ValueError):
+        ns.validate_policy(value)
+    value = custom()
+    value['heavy'] = {'mode': 'off', 'chain': []}
     with pytest.raises(ValueError):
         ns.validate_policy(value)
 
@@ -113,9 +134,13 @@ def test_effective_reader_uses_only_owned_keys(monkeypatch, tmp_path):
 
 
 def test_runtime_consent_interoperability():
-    # The provider workstream's current public pure validation interface.
-    from model_router.native_delegation import validate_native_policy, make_continuation_consent
-    block = ns.build_policy_block('default', custom(), True)
+    # The provider's own validation accepts exactly the block the settings side builds.
+    from model_router.native_delegation import validate_native_policy, make_slot_continuation_consent
+    block = ns.build_slot_policy_block('default', custom(), True)
     assert validate_native_policy(block, 'default') == block
-    assert block['fallbacks']['heavy']['consent'] == make_continuation_consent(
-        'default', 'heavy', custom()['heavy']['chain'])
+    assert block['fallbacks']['design']['consent'] == make_slot_continuation_consent(
+        'default', 'design', custom()['design']['chain'])
+    auto = ns.build_slot_policy_block('default', custom(), True, backend='model-router-auto')
+    assert validate_native_policy(auto, 'default', backend='model-router-auto') == auto
+    with pytest.raises(ValueError):
+        validate_native_policy(auto, 'default')

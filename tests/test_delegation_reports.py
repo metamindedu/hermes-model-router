@@ -102,9 +102,12 @@ def rows(r, sid='root'):
     return r.list({'session_id': sid}, session_id=sid)['rows']
 
 
-def dispatched_profile_child(r):
+def dispatched_profile_child(r, *, automatic=True):
     """The screenshot lifecycle: an async profile delegation whose API calls this origin never sees."""
-    args = {'tasks': [{'execution': 'profile', 'profile': 'claire'}]}
+    task = {'profile': 'claire'}
+    if automatic:
+        task['execution'] = 'profile'
+    args = {'tasks': [task]}
     pre(r, args)
     r.start(parent_session_id='segment-1', child_session_id='child-session', child_subagent_id='sa-0-42a7cfcf')
     post(r, {'status': 'dispatched', 'delegation_id': 'deleg_9b8c23bb', 'subagent_ids': ['sa-0-42a7cfcf']}, args)
@@ -240,18 +243,19 @@ def test_invalid_task_index_types_rejected(tmp_path):
 
 # --- roster integration ----------------------------------------------------
 
-def test_async_profile_row_adopts_stored_route_report(env):
+@pytest.mark.parametrize('backend,label', [('model-router-auto', 'profile:claire'), ('model-router-profiles', 'claire')])
+def test_async_profile_row_adopts_stored_route_report(env, backend, label):
     r, _, home = env
-    dispatched_profile_child(r)
+    dispatched_profile_child(r, automatic=backend == 'model-router-auto')
     assert rows(r)[0]['observed']['evidence'] == 'unknown'  # dispatch carries only ids
-    ledger(home)
+    ledger(home, results=[entry(route={**ROUTE, 'backend': backend, 'label': label})])
     row = rows(r)[0]
     assert row['status'] == 'completed'
-    assert row['observed'] == {'kind': 'profile', 'role': None, 'profile': 'claire', 'backend': 'model-router-auto',
+    assert row['observed'] == {'kind': 'profile', 'slot': None, 'profile': 'claire', 'backend': backend,
                                'model': 'qwen/qwen4-max:free', 'provider': 'nous', 'evidence': 'runtime_reported'}
     # The stored report is route evidence, never the child's own API-hook observation.
     assert row.get('model') is None and row.get('provider') is None
-    assert row['requested'] == {'kind': 'profile', 'role': None, 'profile': 'claire', 'purpose': None, 'slot': None}
+    assert row['requested'] == {'kind': 'profile', 'profile': 'claire', 'purpose': None, 'slot': None}
 
 
 def test_adopted_report_is_stable_and_not_requeried(env, monkeypatch):
@@ -277,7 +281,7 @@ def test_api_hook_model_is_not_replaced_by_stored_report(env):
     post(r, {'status': 'dispatched', 'delegation_id': 'deleg_9b8c23bb', 'subagent_ids': ['sa-0-42a7cfcf']}, args)
     r.api_pre(session_id='child-session', model='slot/model', provider='sub')
     r.stop(parent_session_id='segment-1', child_session_id='child-session', child_status='completed')
-    ledger(home, results=[entry(route={**ROUTE, 'label': 'model:light', 'model': 'other/model'})])
+    ledger(home, results=[entry(route={**ROUTE, 'label': 'model:code-complex', 'model': 'other/model'})])
     row = rows(r)[0]
     assert row['model'] == 'slot/model' and row['provider'] == 'sub'
     assert row['observed']['evidence'] == 'unknown'  # live API evidence already answers; no stored read

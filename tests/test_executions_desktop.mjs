@@ -26,9 +26,9 @@ function load(overrides = {}) {
 }
 const scope = () => ({ connectionId: 'owner', profile: 'claire', sessionId: 'parent' })
 const route = () => ({ mode: 'local', connectionId: 'owner', profile: 'claire', targetProfile: 'claire' })
-const unknown = () => ({ kind: 'unknown', role: null, profile: null, evidence: 'unknown' })
+const unknown = () => ({ kind: 'unknown', profile: null, slot: null, evidence: 'unknown' })
 const row = (id = 'call:0') => ({ id, execution_mode: 'native', conversation_id: 'parent', parent_session_id: 'segment', task_index: 0, subagent_id: 'sa-0-native', delegation_id: 'deleg-native',
-  requested: { kind: 'profile', profile: 'wallace', role: null }, observed: unknown(), status: 'dispatched', updated_at: 1 })
+  requested: { kind: 'profile', profile: 'wallace', purpose: null, slot: null }, observed: unknown(), status: 'dispatched', updated_at: 1 })
 const snapshot = () => ({ schema: 1, supported: true, origin_profile: 'claire', conversation_id: 'parent', rows: [row()] })
 const text = node => typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join(' ') : node?.props ? text(node.props.children) : ''
 function* walk(node) { if (Array.isArray(node)) { for (const child of node) yield* walk(child) } else if (node && typeof node === 'object') { yield node; yield* walk(node.props?.children) } }
@@ -57,7 +57,7 @@ test('route selection retains exact SDK descriptor and refuses absent/ambiguous 
 })
 test('composer strip orders running work first and summarises counts with slot and model', () => {
   const api = load(), now = Date.now() / 1000
-  const model = (id, status, extra = {}) => ({ ...row(id), requested: { kind: 'model', role: 'light', slot: 'code-simple', profile: null }, status, ...extra })
+  const model = (id, status, extra = {}) => ({ ...row(id), requested: { kind: 'model', profile: null, purpose: 'testing', slot: 'code-simple' }, status, ...extra })
   const rows = [model('old-done', 'completed', { updated_at: now - 300, duration_seconds: 42, model: 'gpt-6.1-terra', model_source: 'api' }),
     model('failed', 'error', { updated_at: now - 100 }),
     model('run-old', 'running', { started_at: now - 90, model: 'gpt-6.1-sol' }),
@@ -67,15 +67,18 @@ test('composer strip orders running work first and summarises counts with slot a
   const strip = api.ExecutionStrip({ rows })
   const summary = text(strip.props.children[0])
   assert.match(summary, /서브에이전트 · 실행 중 2 · 완료 2 · 오류 1/)
-  assert.match(summary, /코드 · 간단 · gpt-6\.1-sol · 1분 3\d초/)
+  assert.match(summary, /모델 · 코드 · 간단 · gpt-6\.1-sol · 1분 3\d초/)
   assert.doesNotMatch(summary, /Heavy|Light|미확인|포커스 대화/)
   const lines = strip.props.children[1].props.children.filter(Boolean)
   assert.deepEqual(lines.map(item => item.props.row.id), ['run-new', 'run-old', 'new-done', 'failed', 'old-done'])
   const line = text(api.ExecutionLine({ row: rows[0] }))
-  assert.match(line, /완료 코드 · 간단 gpt-6\.1-terra 42초/); assert.match(line, /API 호출 기준/); assert.match(line, /하위 작업 sa-0-native/)
+  assert.match(line, /완료 모델 · 코드 · 간단 gpt-6\.1-terra 42초/); assert.match(line, /API 호출 기준/); assert.match(line, /하위 작업 sa-0-native/)
   assert.match(text(api.ExecutionLine({ row: rows[4] })), /모델 보고 전/)
   // Only finished work: the latest one is the chip.
-  assert.match(text(api.ExecutionStrip({ rows: [rows[0], rows[3]] }).props.children[0]), /완료 2 .*코드 · 간단 · gpt-6-astra · 완료/)
+  assert.match(text(api.ExecutionStrip({ rows: [rows[0], rows[3]] }).props.children[0]), /완료 2 .*모델 · 코드 · 간단 · gpt-6-astra · 완료/)
+  // A model run whose slot the page does not know says so instead of guessing.
+  const unknownSlot = model('u', 'completed', { requested: { kind: 'model', profile: null, purpose: null, slot: 'custom:gone' } })
+  assert.match(text(api.ExecutionLine({ row: unknownSlot })), /완료 모델 · 슬롯 미확인/)
   assert.equal(api.ExecutionStrip({ rows: [] }), null)
   // Gaps, conflicts and stops are never counted as completed.
   const mixed = [rows[0], model('gap', 'unknown', { observation_gap: true }), model('stop', 'cancelled'), model('int', 'interrupted'), model('t', 'timeout')]
@@ -88,21 +91,24 @@ test('composer strip orders running work first and summarises counts with slot a
 })
 test('model and profile badges do not promote requests into verified runtime identity', () => {
   const api = load()
-  assert.equal(api.executionLabel({ kind: 'model', role: 'heavy' }), '모델 · Heavy')
-  assert.equal(api.executionLabel({ kind: 'model', role: 'light' }), '모델 · Light')
-  assert.equal(api.executionLabel(api.executionIdentity({ kind: 'model', role: 'light', slot: 'code-simple' })), '모델 · 코드 · 간단')
-  assert.equal(api.executionIdentity({ kind: 'model', role: 'light', slot: '../x' }).slot, null)
+  assert.equal(api.executionLabel({ kind: 'model', slot: 'design' }), '모델 · 설계')
+  assert.equal(api.executionLabel({ kind: 'model', slot: 'advise' }), '모델 · 조언')
+  assert.equal(api.executionLabel({ kind: 'model' }), '모델 · 슬롯 미확인')
+  assert.equal(api.executionLabel(api.executionIdentity({ kind: 'model', slot: 'code-simple' })), '모델 · 코드 · 간단')
+  assert.equal(api.executionIdentity({ kind: 'model', slot: '../x' }).slot, null)
+  assert.equal(api.executionLabel({ kind: 'model', slot: '../x' }), '모델 · 슬롯 미확인')
   assert.equal(api.executionLabel({ kind: 'profile', profile: 'wallace' }), '프로필 · wallace')
-  assert.equal(api.executionIdentity({ kind: 'model', role: 'heavy' }).evidence, 'unknown')
-  assert.deepEqual(api.executionIdentity({ kind: 'profile', profile: 'wallace', role: 'heavy' }), unknown())
-  assert.deepEqual(api.executionIdentity({ kind: 'model', role: 'heavy', evidence: 'response_verified' }), { kind: 'model', role: 'heavy', profile: null, slot: null, evidence: 'unknown' })
+  assert.equal(api.executionIdentity({ kind: 'model', slot: 'design' }).evidence, 'unknown')
+  assert.deepEqual(api.executionIdentity({ kind: 'profile', profile: '../wallace' }), unknown())
+  assert.deepEqual(api.executionIdentity({ kind: 'model', profile: 'wallace', slot: 'design' }), unknown(), 'a model run names no profile')
+  assert.deepEqual(api.executionIdentity({ kind: 'model', slot: 'design', evidence: 'response_verified' }), { kind: 'model', profile: null, slot: 'design', evidence: 'unknown' })
 })
 test('split units correlate live call IDs without duplicate cards or suffix inference', () => {
   const api = load(), data = snapshot()
   data.rows = [
     {...row('split:0'), delegation_id:'opaque-unit-z', async_unit_id:'opaque-unit-z', native_call_delegation_id:'call-wide'},
     {...row('split:1'), subagent_id:'sa-1-native', task_index:1, delegation_id:'opaque-unit-a', async_unit_id:'opaque-unit-a', native_call_delegation_id:'call-wide',
-      requested:{kind:'model',role:'heavy',profile:null}}
+      requested:{kind:'model',profile:null,purpose:'architecture',slot:'design'}}
   ]
   const live = {subagents:[
     {subagent_id:'sa-0-native',delegation_id:'call-wide',status:'running'},
@@ -112,7 +118,7 @@ test('split units correlate live call IDs without duplicate cards or suffix infe
   assert.equal(cards.length,2)
   assert.deepEqual(cards.map(c=>c.status),['running','running'])
   assert.deepEqual(cards.map(c=>c.async_unit_id),['opaque-unit-z','opaque-unit-a'])
-  assert.equal(cards[0].requested.profile,'wallace'); assert.equal(cards[1].requested.role,'heavy')
+  assert.equal(cards[0].requested.profile,'wallace'); assert.equal(cards[1].requested.slot,'design')
   assert.ok(cards.every(c=>c.native_call_delegation_id==='call-wide' && c.observed.kind==='unknown'))
   data.rows[0].status='completed'
   assert.equal(api.mergeExecutionRows(data,live,'claire').length,2,'late live row must not duplicate a settled child')
@@ -148,12 +154,12 @@ test('foreign-profile metadata and malformed identifiers are not projected', () 
 test('runtime identity and response verification remain distinct in actual row output', () => {
   const api = load(), requested = row()
   const pending = text(api.ExecutionRow({ row: { ...requested, model: 'reported-model' } }))
-  assert.match(pending, /프로필 · wallace/); assert.match(pending, /역할은 요청 기준/)
-  const actual = { ...requested, observed: { kind: 'profile', role: null, profile: 'wallace', evidence: 'runtime_reported' } }
+  assert.match(pending, /프로필 · wallace/); assert.match(pending, /슬롯과 프로필은 요청 기준/)
+  const actual = { ...requested, observed: { kind: 'profile', slot: null, profile: 'wallace', evidence: 'runtime_reported' } }
   const output = text(api.ExecutionRow({ row: actual }))
   assert.match(output, /런타임 보고/); assert.match(output, /개별 API 응답/); assert.match(output, /네이티브/)
   assert.doesNotMatch(output, /검증 완료|전체 프로필/)
-  const modelRow = { ...requested, requested: { kind: 'model', role: 'light', slot: 'code-simple', profile: null }, model: 'gpt-6.1-terra', provider: 'openai-codex', model_source: 'api' }
+  const modelRow = { ...requested, requested: { kind: 'model', profile: null, purpose: 'testing', slot: 'code-simple' }, model: 'gpt-6.1-terra', provider: 'openai-codex', model_source: 'api' }
   const reported = text(api.ExecutionRow({ row: modelRow }))
   assert.match(reported, /모델 · 코드 · 간단/); assert.match(reported, /실행: gpt-6\.1-terra · openai-codex \(API 호출 기준\)/)
   assert.doesNotMatch(reported, /실행: 미확인/)
@@ -169,7 +175,7 @@ test('model and provider stay one pair from one source; the roster model is neve
   assert.deepEqual([rosterOnly.model, rosterOnly.provider, rosterOnly.model_source], ['primary-model', null, 'roster'])
   const output = text(api.ExecutionLine({ row: rosterOnly }))
   assert.match(output, /primary-model \(시작 시 배정/); assert.doesNotMatch(output, /API 호출 기준/)
-  const routed = snapshot(); routed.rows[0] = { ...routed.rows[0], observed: { kind: 'model', role: 'light', model: 'route-model', provider: 'route-provider', evidence: 'runtime_reported' } }
+  const routed = snapshot(); routed.rows[0] = { ...routed.rows[0], observed: { kind: 'model', slot: 'code-simple', profile: null, model: 'route-model', provider: 'route-provider', evidence: 'runtime_reported' } }
   assert.deepEqual(api.mergeExecutionRows(routed, live('running'), 'claire').map(item => [item.model, item.provider, item.model_source])[0], ['route-model', 'route-provider', 'route'])
 })
 test('a completed profile delegation shows its stored route report instead of 모델 보고 없음', () => {
@@ -177,7 +183,7 @@ test('a completed profile delegation shows its stored route report instead of �
   // after completion; the backend fills observed from the stored delegation route report.
   const api = load(), data = snapshot()
   data.rows[0] = { ...data.rows[0], status: 'completed', duration_seconds: 144,
-    observed: { kind: 'profile', role: null, profile: 'wallace', backend: 'model-router-auto',
+    observed: { kind: 'profile', slot: null, profile: 'wallace', backend: 'model-router-auto',
       model: 'qwen/qwen4-max:free', provider: 'nous', evidence: 'runtime_reported' } }
   const [merged] = api.mergeExecutionRows(data, { subagents: [] }, 'claire')
   assert.deepEqual([merged.model, merged.provider, merged.model_source], ['qwen/qwen4-max:free', 'nous', 'route'])
@@ -217,7 +223,7 @@ test('a whole-call refused request is settled as 오류, never counted as 실행
 })
 test('a spare-model switch names the model that ran and the routed model it replaced', () => {
   const api = load()
-  const data = snapshot(); data.rows[0] = { ...data.rows[0], requested: { kind: 'model', role: 'light', slot: 'code-simple', profile: null }, status: 'running',
+  const data = snapshot(); data.rows[0] = { ...data.rows[0], requested: { kind: 'model', profile: null, purpose: 'testing', slot: 'code-simple' }, status: 'running',
     model: 'gemini-4-hydrogen', provider: 'gemini', models: [{ model: 'gpt-6.1-terra', provider: 'openai-codex' }, { model: 'gemini-4-hydrogen', provider: 'gemini' }, { model: '../bad', provider: 'x' }] }
   const [row] = api.mergeExecutionRows(data, { subagents: [] }, 'claire')
   assert.equal(row.models.length, 2, 'unsafe pairs are dropped')
@@ -297,7 +303,7 @@ test('primary owner proof comes only from the host focused-owner projection of t
 
 test('full-profile job controls and the profile-job guide stay reachable from the composer strip', () => {
   const api = load(), job = { id: 'job-1', target_profile: 'wallace', status: 'running' }
-  const rows = [{ id: 'gateway:job-1', execution_mode: 'gateway', requested: { kind: 'profile', profile: 'wallace', role: null }, observed: unknown(), status: 'running', job }, row()]
+  const rows = [{ id: 'gateway:job-1', execution_mode: 'gateway', requested: { kind: 'profile', profile: 'wallace', purpose: null, slot: null }, observed: unknown(), status: 'running', job }, row()]
   const panel = []
   const closed = api.ExecutionStrip({ rows, jobsPanel: () => { panel.push(1); return null } })
   assert.ok(!closed.props.children[1].props.children.some(item => /전체 프로필 작업/.test(item?.props?.label || '')), 'a closed strip does not mount the guide')
@@ -392,7 +398,7 @@ test('native snapshot fields reach the card without admitting goal, arguments or
   assert.match(rendered, /실행 중/); assert.match(rendered, /도구 7회/); assert.match(rendered, /모델 호출 3회/)
   assert.match(rendered, /최근 도구: read_file/); assert.match(rendered, /경과: 1분/); assert.match(rendered, /최근 활동:/)
   assert.doesNotMatch(JSON.stringify(projected) + rendered, /PRIVATE_/)
-  assert.equal(projected.observed.kind, 'unknown', 'model metadata is not proof of a profile or Heavy role')
+  assert.equal(projected.observed.kind, 'unknown', 'model metadata is not proof of a profile or a slot')
 })
 test('invalid activity fields and tool argument strings are omitted rather than rendered', () => {
   const api = load(), data = snapshot()

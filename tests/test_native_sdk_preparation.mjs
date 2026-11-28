@@ -78,7 +78,7 @@ for (const topology of ['primary', 'shared', 'isolated']) test(`actual SDK ${top
 
 const id = value => value.repeat(64)
 function readiness(ready = false) {
-  return { schema: 1, state: ready ? 'ready' : 'missing', files: ready ? 'complete' : 'missing', python: ready ? 'enabled' : 'not_enabled', base_supported: ready, split_supported: ready, explicit_opt_out: false, managed_selection: false, version: ready ? '0.4.8' : null, identity: id(ready ? '2' : '1'), reason_codes: ready ? [] : ['package_missing'] }
+  return { schema: 1, state: ready ? 'ready' : 'missing', files: ready ? 'complete' : 'missing', python: ready ? 'enabled' : 'not_enabled', base_supported: ready, explicit_opt_out: false, managed_selection: false, version: ready ? '0.4.8' : null, identity: id(ready ? '2' : '1'), reason_codes: ready ? [] : ['package_missing'] }
 }
 for (const topology of ['primary', 'shared', 'isolated']) test(`actual native SDK ${topology} transport binds the selected target, not the source`, { skip: !core && 'set HERMES_DESKTOP_SOURCE_ROOT to the pinned compatible Hermes checkout' }, async () => {
   const api = plugin(), source = { mode: 'local', connectionId: 'local-source', profile: 'source', targetProfile: 'source' }

@@ -1,33 +1,26 @@
 # 서브 에이전트 전체 시간 제한
 
-## 결정
+| 작업 | 저장값 | 지정하지 않았을 때 |
+|---|---|---|
+| 내장·사용자지정 슬롯 작업 | `slot_seconds[슬롯 ID]` | 슬롯당 2시간(7200초, `DEFAULT_SLOT_SECONDS`) |
+| 일반 위임·프로필 위임 | `delegate_total_seconds` | `0` (플러그인 전체 시간 제한 없음) |
 
-일반 native 자식, Light 라우팅, Heavy 라우팅의 **전체 경과 시간**을 독립적인 플러그인 옵션으로 둔다. 화면 입력은 분 단위이고 저장·실행 API는 초 단위다. 설치된 Hermes의 `delegation.child_timeout_seconds`는 진행 신호가 없는 시간의 제한이므로 숫자 상속이나 기존 키 편집으로 요구를 혼합하지 않는다. Native 전체 시간 기본 0은 기존 무제한 동작을 보존하고, Light/Heavy 각 기본 60분은 짧은 기본값/별도 900초 상한으로 정상 작업을 반복 중단하던 경계를 완화한다.
+슬롯 행에는 **분**으로 입력한다. 빈칸은 2시간 기본값이고 `0`은 그 슬롯의 제한을 끈다. 일반·프로필 위임 제한은 슬롯에 추가로 적용하지 않는다. 요청·반복 횟수 제한과 Hermes의 무진행 시간 제한(`delegation.child_timeout_seconds`)은 별개다.
 
-## 설정 저장 경계
+## 저장과 조회
 
-- 프로필별 `plugin-data/model-router/timeouts.json`을 공유 모델/폴백 schema와 분리한다. 이전 프로필 설치가 공유 settings를 계속 읽을 수 있어야 한다.
-- 시간 옵션의 독립 적용 대상에 복수 프로필을 명시할 수 있다. 모델/Heavy·Light/폴백의 일괄 대상 선택이 시간 옵션 복사 승인이 되지 않는다. 기본 전체 체크와 명시적 복사 의도를 구분하고 수동 부분·빈 대상은 새로고침/프로필 변경으로 확대하지 않는다.
-- 각 대상의 독립 revision을 고정한다. 불러온 프로필의 revision을 모든 대상에 복사하거나 백그라운드 조회의 최신 revision을 오래된 초안과 섞지 않는다. 검증 중 다른 대상이 바뀌면 적용을 중단한다.
-- 시간·모델·라우팅의 개별 저장은 기존 단일 계획에 명시적 저장 범위를 부여한다. 시간-only는 canonical 모델/라우팅이나 native YAML/skills를 조정하지 않는다. 모델-only는 라우팅 활성 상태/skills를 복구하지 않으며, 라우팅-only는 모델·시간·폴백을 복사하지 않는다. 전체 저장은 여전히 수정/복사 의도가 있는 범위들을 한 계획으로 합성한다.
-- 기존 immutable 단일 preview/apply에 파일 digest와 독립 시간 revision을 합성한다. 다른 설정에 쓰기 전에 모든 시간 CAS를 확인하고, 부분 실패와 실제 readback을 유지한다. 수정하지 않은 시간 옵션은 읽기 전용 모델/폴백 저장으로 다시 기록하지 않는다.
-- Native inactivity·모델·fallback consent·실행 중 정책은 변경하지 않는다. 새 자식/작업만 시작 시 값을 고정한다.
-- 구 schema 1의 단일 라우팅 값을 양쪽 역할에 동일하게 이어받고 읽기/설치만으로 파일을 변경하지 않는다. 새 세 값의 실변경 저장은 schema 2이며, schema 2에 구 단일 시간 payload를 쓰는 요청은 거부해 분리 예산의 조용한 손실을 막는다. 같은 값은 형식 전환이나 revision 증가 없이 NOOP으로 남는다.
-- 분 입력을 표시할 때 나누고 payload 생성 때만 변환한다. 표시값이 불러온 원래 초 값의 분 표시와 같으면 원래 초 값을 그대로 보내 나눗셈/곱셈 부동소수점 오차가 다른 시간값의 수정으로 오인되지 않게 한다. 소수 분과 0을 지원하며, 유한한 분의 초 변환이 비유한 값이 되면 저장을 거부한다.
-- 새 UI는 명시적인 분리 실행 지원 capability를 요구한다. 구 DTO 값이 읽힌다는 사실은 해당 설치가 Light/Heavy 예산을 강제한다는 증거가 아니다. 설치된 role-aware 실행 코드가 없으면 편집을 잠그고, 역할별 필드가 존재하나 유효하지 않으면 legacy scalar/default로 대체하지 않는다.
+각 프로필의 `plugin-data/model-router/timeouts.json`은 schema 3이다. 예를 들어 아래 설정에서는 `code-simple`만 제한이 없고 `design`은 30분, 나머지 슬롯은 각각 2시간이다. 일반·프로필 위임은 제한하지 않는다.
 
-## 일반 native 적용 함정
+```json
+{"schema":3,"revision":1,"delegate_total_seconds":0,"slot_seconds":{"code-simple":0,"design":1800}}
+```
 
-- `subagent_start` observer는 자식 구성/큐 대기 전에 발생할 수 있다. 이 훅 시점이나 batch dispatch부터 전체 시간을 세면 큐 대기가 자식 실행 예산을 소모한다.
-- 설치된 owned `delegate_task(action="list")`는 `started_at` 원문 대신 실제 native 등록 시각에서 계산한 `running_seconds`를 노출한다. 첫 확인에서 이 값을 사용하여 monotonic deadline을 한 번 바인딩하고, 이후 진행/조회 때 다시 시작하지 않는다.
-- 실제 tool execution middleware의 부모/profile 권한과 생성 훅의 정확한 child ID를 묶는다. 비동기 spawn 응답 뒤에도 관찰하되 종료/미확인/다른 부모·profile은 조작하지 않는다. Private registry를 재작성하거나 native lifecycle을 위조하지 않는다.
-- Native 소유권 검증을 거치는 정확한 자식 stop 요청을 사용한다. `interrupt_requested`는 종료 증거가 아니다. 공유 Python process나 DB를 강제로 닫지 않는다. 플러그인 unload는 자체 관찰만 정리하며 실행 중 자식 자체는 종료하지 않는다.
+`coding_route(action="config")`는 `slot_timeout_seconds`에 슬롯별 초 값을, `delegate_timeout_seconds`에 일반·프로필 위임의 초 값을 반환한다. 저장할 때 대상 프로필별 revision과 파일 상태를 확인한다. 프로필의 설치본 `model_router/timeouts.py`에 `SLOT_TIMEOUTS_SUPPORTED = True`가 없으면 시간 제한을 저장할 수 없다. 이전 schema나 손상된 시간 파일은 읽기 전용으로 두고 덮어쓰지 않는다.
 
-## 라우팅 적용 함정
+## 실행 중 적용
 
-- 도구 schema·CLI·Router·worker·runner·scoped agent·활동 observer의 제한이 모두 일치해야 한다. 상위 기본값을 바꾸고 내부 900 검사나 observer를 남기면 긴 작업이 여전히 실패하거나 표시가 먼저 끝난다.
-- 0을 `None` process wait와 deadline 없음으로 전달한다. JSON에 Infinity/NaN 같은 대체값을 쓰지 않는다. 비유한·음수·bool은 입력 오류이다.
-- 양수의 primary/fallback은 하나의 전체 deadline을 공유한다. 기존 정리 grace는 실행 예산 재시작이나 자동 재실행 승인이 아니다. 종료·route identity·semantic GO는 별도로 확인한다.
-- 에이전트는 보통 호출 `timeout`을 생략한다. 작업이 작거나 읽기 전용이라는 이유로 180/300/600/900의 임의 짧은 override를 넣으면 프로필의 넉넉한 기본값을 무효화한다.
+- 일반적으로 `delegate_task`의 `total_timeout_seconds`는 생략한다. 실제 외부 마감이 있으면 그 작업에만 적용할 **초** 값을 지정한다. `0`은 해당 작업의 플러그인 전체 시간 제한만 끈다. `ask_advisor`는 도구 자체가 자문 호출에 300초를 명시한다.
+- 각 자식은 시작할 때 예산을 고정한다. Hermes가 등록한 실행 시간부터 계산하며 큐 대기는 제외한다. 진행 신호·추가 지시·예비 모델 전환으로 시계가 다시 시작되지 않는다.
+- 만료 시 플러그인은 정확한 부모가 소유한 자식에 native 중지를 요청한다. 중지 요청 수락은 실제 종료 확인이 아니다. 공유 Hermes 프로세스를 강제 종료하거나 작업을 재실행하지 않는다.
 
-현재 배포/실행 상태와 실제 검증은 코드·설치 hash·테스트·신규 작업 evidence로 확인한다. 이 문서 자체는 실행 성공의 증거가 아니다.
+관련: [[task-slots]], [[native-delegation]], [[index]].

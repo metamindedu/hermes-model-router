@@ -29,8 +29,7 @@ def mapping(row):
     # from the canonical flag, and "skills.disabled_unavailable" when it cannot be read.
     skill_enabled = None if "skills.disabled_unavailable" in drift else bool(routing["enabled"]) != ("skills.disabled" in drift)
     out = {"models": copy.deepcopy(row["models"]), "actual_models": copy.deepcopy(row.get("actual_models") or {}),
-           "routing": {"enabled": bool(routing["enabled"]), "heavy": routing.get("heavy"), "light": routing.get("light"),
-                       "slots": routing.get("slots"), "skill_enabled": skill_enabled}}
+           "routing": {"enabled": bool(routing["enabled"]), "slots": copy.deepcopy(routing["slots"]), "skill_enabled": skill_enabled}}
     native = (row.get("fallbacks") or {}).get("native")
     if native:
         out["native_fallback"] = {"enabled": native.get("enabled"), "chain": native.get("chain", []), "actual_chain": native.get("actual_chain", [])}
@@ -53,7 +52,7 @@ def model_body(status, source="p1", targets=("p1",)):
     return {
         "expected_revision": status["revision"], "profile": source, "save_scope": "models",
         "models": copy.deepcopy(row["models"]), "model_targets": list(targets),
-        "routing": {key: value for key, value in copy.deepcopy(row["routing"]).items() if key != "fallback"},
+        "routing": copy.deepcopy(row["routing"]),
         "routing_profiles": [item["name"] for item in status["profiles"] if item["routing"]["enabled"]],
         "routing_targets": [],
     }
@@ -72,7 +71,7 @@ def test_an_external_actual_model_change_refuses_the_save_and_writes_nothing(tmp
         service.preview(copy.deepcopy(request))
     assert cli.calls == [] and service.store_path.read_bytes() == store
     # Changed between preview and apply: apply refuses before the first write.
-    cli.values["p2"]["model.default"] = "heavy2"
+    cli.values["p2"]["model.default"] = "main-model2"
     plan = service.preview(copy.deepcopy(request))["plan_id"]
     cli.values["p1"]["model.default"] = "changed-after-preview"
     with pytest.raises(RevisionConflict, match=r"EXTERNAL_CHANGE profile=p1 field=actual_models\.main"):
@@ -110,7 +109,7 @@ def test_expectations_must_cover_every_written_profile_and_field(tmp_path, monke
     # Routing writes need the routing the page saw.
     routing = model_body(status)
     routing.update(save_scope="routing", model_targets=[], routing_targets=["p1"])
-    routing["routing"]["light"] = {"follow": "custom", "custom": {"provider": "deepseek", "model": "routed-light", "reasoning": "low"}}
+    routing["routing"]["slots"] = {"code-simple": {"follow": "custom", "custom": {"provider": "deepseek", "model": "routed-coder", "reasoning": "low"}}}
     routing["expected"] = []
     with pytest.raises(ValueError, match="expected must cover routing of p1"):
         service.preview(copy.deepcopy(routing))
@@ -163,7 +162,7 @@ def test_a_whole_page_save_guards_its_conversation_fallback_and_the_standalone_s
     assert service.apply(service.preview(copy.deepcopy(proposal))["plan_id"])["status"] == "applied"
     assert fake.values["default"]["fallback_providers"] == [{"provider": "xiaomi", "model": "native-spare"}]
     with pytest.raises(ValueError, match="conversation fallback only"):
-        service.fallback_preview({**standalone, "updates": [{"profile": "default", "routing_fallback": {"enabled": False, "heavy": None, "light": None}}]})
+        service.fallback_preview({**standalone, "updates": [{"profile": "default", "delegation_fallback": {"mode": "off", "chain": []}}]})
 
 
 def test_the_conflict_reaches_the_cli_bridge_as_a_structured_payload(tmp_path, monkeypatch):
@@ -253,7 +252,7 @@ def test_apply_refuses_when_the_store_changed_for_a_profile_the_save_did_not_tar
             request["expected"] = [frozen(status, "p1", "models", "actual_models")]
         plan = service.preview(copy.deepcopy(request))["plan_id"]
         data = json.loads(service.store_path.read_text(encoding="utf-8"))
-        data["profiles"]["p2"]["routing"]["fallback"]["heavy"] = {"provider": "spare", "model": f"kept-{with_expected}", "reasoning": "high"}
+        data["profiles"]["p2"]["routing"]["slots"]["design"] = {"follow": "custom", "custom": {"provider": "spare", "model": f"kept-{with_expected}", "reasoning": "high"}}
         service.store_path.write_text(json.dumps(data), encoding="utf-8")  # same revision
         changed = service.store_path.read_bytes()
         with pytest.raises(RevisionConflict, match="settings changed since preview"):
@@ -285,7 +284,7 @@ def test_expected_is_bounded_by_the_profiles_not_a_fixed_count(tmp_path, monkeyp
     assert len(status["profiles"]) == 71
     routing = model_body(status)
     routing.update(save_scope="routing", model_targets=[], routing_targets=["p1"])
-    routing["routing"]["light"] = {"follow": "custom", "custom": {"provider": "deepseek", "model": "many", "reasoning": "low"}}
+    routing["routing"]["slots"] = {"code-simple": {"follow": "custom", "custom": {"provider": "deepseek", "model": "many", "reasoning": "low"}}}
     routing["expected"] = [frozen(status, name, "routing") for name in names]
     assert service.apply(service.preview(copy.deepcopy(routing))["plan_id"])["status"] == "applied"
 
@@ -421,8 +420,7 @@ def test_no_plan_materialises_an_entry_for_an_untargeted_profile(tmp_path, monke
         status = service.status()
         request = combined_body(service)
         request["routing_targets"] = ["default"]
-        request["routing"].pop("fallback", None)
-        request["routing"]["light"] = {"follow": "custom", "custom": {"provider": "deepseek", "model": f"light-{scope}", "reasoning": "low"}}
+        request["routing"]["slots"] = {"code-simple": {"follow": "custom", "custom": {"provider": "deepseek", "model": f"coder-{scope}", "reasoning": "low"}}}
         if scope == "routing":
             request["save_scope"] = "routing"
         if scope == "combined":
@@ -436,10 +434,9 @@ def test_no_plan_materialises_an_entry_for_an_untargeted_profile(tmp_path, monke
     status = service.status()
     request = combined_body(service)
     request.update(save_scope="routing", routing_targets=["p1"])
-    request["routing"].pop("fallback", None)
-    request["routing"]["light"] = {"follow": "custom", "custom": {"provider": "deepseek", "model": "for-p1", "reasoning": "low"}}
+    request["routing"]["slots"] = {"code-simple": {"follow": "custom", "custom": {"provider": "deepseek", "model": "for-p1", "reasoning": "low"}}}
     service.apply(service.preview(request)["plan_id"])
-    assert json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]["p1"]["routing"]["light"]["custom"]["model"] == "for-p1"
+    assert json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]["p1"]["routing"]["slots"]["code-simple"]["custom"]["model"] == "for-p1"
 
 
 def test_apply_re_checks_the_store_right_before_replacing_it(tmp_path, monkeypatch):
@@ -452,13 +449,13 @@ def test_apply_re_checks_the_store_right_before_replacing_it(tmp_path, monkeypat
     def backup_then_change(self, profile, stamp):
         original_backup(self, profile, stamp)
         data = json.loads(self.store_path.read_text(encoding="utf-8"))
-        data["profiles"]["p2"]["routing"]["fallback"]["heavy"] = {"provider": "spare", "model": "during-apply", "reasoning": "high"}
+        data["profiles"]["p2"]["routing"]["slots"]["design"] = {"follow": "custom", "custom": {"provider": "spare", "model": "during-apply", "reasoning": "high"}}
         self.store_path.write_text(json.dumps(data), encoding="utf-8")
     monkeypatch.setattr(Service, "_backup_config", backup_then_change)
     with pytest.raises(RevisionConflict, match="during apply; nothing was written"):
         service.apply(plan)
     stored = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
-    assert stored["p2"]["routing"]["fallback"]["heavy"]["model"] == "during-apply"
+    assert stored["p2"]["routing"]["slots"]["design"]["custom"]["model"] == "during-apply"
     assert stored["p1"]["models"]["delegation"]["model"] != "edit"
     assert cli.calls == []
 
@@ -500,14 +497,14 @@ def test_a_routing_copy_with_a_noop_target_without_a_store_entry_applies(tmp_pat
     request.update(save_scope="routing", routing_targets=["default", "p1"])
     # default's routing is the submitted one (NOOP); p1's differs.
     data = json.loads(service.store_path.read_text(encoding="utf-8"))
-    data["profiles"]["p1"]["routing"]["light"] = {"follow": "custom", "custom": {"provider": "deepseek", "model": "p1-own", "reasoning": "low"}}
+    data["profiles"]["p1"]["routing"]["slots"] = {"code-simple": {"follow": "custom", "custom": {"provider": "deepseek", "model": "p1-own", "reasoning": "low"}}}
     service.store_path.write_text(json.dumps(data), encoding="utf-8")
     status = service.status()
     request["expected"] = [frozen(status, row["name"], "routing") for row in status["profiles"]]
     receipt = service.apply(service.preview(copy.deepcopy(request))["plan_id"])
     assert receipt["status"] == "applied", receipt
     stored = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
-    assert "default" not in stored and stored["p1"]["routing"]["light"] == request["routing"]["light"]
+    assert "default" not in stored and stored["p1"]["routing"]["slots"] == request["routing"]["slots"]
 
 
 def test_a_spare_model_save_with_a_noop_target_without_a_store_entry_applies(tmp_path, monkeypatch):
@@ -524,16 +521,14 @@ def test_a_spare_model_save_with_a_noop_target_without_a_store_entry_applies(tmp
 
 
 def test_a_timeout_save_with_a_noop_target_without_a_store_entry_applies(tmp_path, monkeypatch):
-    from test_role_timeouts import _package
     service, cli = setup(tmp_path, monkeypatch)
-    for name in ("p1", "p2"):
-        (_package(service._profile_home(name)) / "routing.py").write_text("ROUTED_ROLE_TIMEOUTS_SUPPORTED = True\n", encoding="utf-8")
+    monkeypatch.setattr(Service, "_timeout_enforcement_available", lambda self, profile: True)
     _drop_entry(service, "p2")
     status = service.status()
     request = model_body(status, targets=())
     request.update(save_scope="timeouts", timeout_updates=[
-        {"profile": "p1", "expected_revision": 0, "delegate_total_seconds": 120, "routed_light_total_seconds": 1800, "routed_heavy_total_seconds": 7200},
-        {"profile": "p2", "expected_revision": 0, "delegate_total_seconds": 0, "routed_light_total_seconds": 3600, "routed_heavy_total_seconds": 3600}])
+        {"profile": "p1", "expected_revision": 0, "delegate_total_seconds": 120, "slot_seconds": {"code-simple": 1800, "verify-complex": 10800}},
+        {"profile": "p2", "expected_revision": 0, "delegate_total_seconds": 0, "slot_seconds": {}}])
     receipt = service.apply(service.preview(copy.deepcopy(request))["plan_id"])
     assert receipt["status"] == "applied", receipt
     assert "p2" not in json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
@@ -542,10 +537,6 @@ def test_a_timeout_save_with_a_noop_target_without_a_store_entry_applies(tmp_pat
 def test_an_untargeted_entry_is_kept_byte_for_byte(tmp_path, monkeypatch):
     service, cli = setup(tmp_path, monkeypatch)
     data = json.loads(service.store_path.read_text(encoding="utf-8"))
-    for name in ("p2", "default"):
-        data["profiles"][name].pop("delegation_fallback", None)
-        data["profiles"][name]["fallback_consent"].pop("delegation", None)
-    service.store_path.write_text(json.dumps(data), encoding="utf-8")
     untouched = copy.deepcopy(data["profiles"]["p2"])
     for scope in ("models", None):
         status = service.status()
@@ -556,7 +547,6 @@ def test_an_untargeted_entry_is_kept_byte_for_byte(tmp_path, monkeypatch):
         assert service.apply(service.preview(copy.deepcopy(request))["plan_id"])["status"] == "applied"
         stored = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
         assert stored["p2"] == untouched, scope
-        assert "delegation_fallback" not in stored["default"], scope
     status = service.status()
     service.apply(service.fallback_preview({"expected_revision": status["revision"],
         "updates": [{"profile": "p1", "native_fallback": {"enabled": False, "chain": []}}], "confirmations": []})["plan_id"])
@@ -587,41 +577,6 @@ def test_the_native_method_needs_both_routing_switches_like_the_page_rule(fixtur
             native_service.preview(service, request)
 
 
-def _drop_retired_keys(service, *names):
-    data = json.loads(service.store_path.read_text(encoding="utf-8"))
-    for name in names:
-        data["profiles"][name].pop("delegation_fallback", None)
-        data["profiles"][name]["fallback_consent"].pop("delegation", None)
-    service.store_path.write_text(json.dumps(data), encoding="utf-8")
-    return data
-
-
-def test_a_changed_target_keeps_absent_retired_keys_absent(tmp_path, monkeypatch):
-    service, fake, _ = combined_setup(tmp_path, monkeypatch)
-    _drop_retired_keys(service, "default")
-    status = service.status()
-    request = {"expected_revision": status["revision"], "confirmations": [confirmation("native", "default")],
-               "updates": [{"profile": "default", "native_fallback": {"enabled": True, "chain": [{"provider": "xiaomi", "model": "native-spare"}]}}]}
-    assert service.apply(service.fallback_preview(request)["plan_id"])["status"] == "applied"
-    entry = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]["default"]
-    assert entry["native_fallback"]["chain"] == [{"provider": "xiaomi", "model": "native-spare"}]
-    assert entry["fallback_consent"]["native"] is not None
-    assert "delegation_fallback" not in entry and "delegation" not in entry["fallback_consent"]
-
-
-def test_a_model_save_keeps_absent_retired_keys_absent_on_its_target(tmp_path, monkeypatch):
-    service2, cli = setup(tmp_path, monkeypatch)
-    _drop_retired_keys(service2, "p1")
-    status = service2.status()
-    body = model_body(status)
-    body["models"]["delegation"]["model"] = "changed"
-    assert service2.apply(service2.preview(body)["plan_id"])["status"] == "applied"
-    entry = json.loads(service2.store_path.read_text(encoding="utf-8"))["profiles"]["p1"]
-    assert entry["models"]["delegation"]["model"] == "changed"
-    assert "delegation_fallback" not in entry and "delegation" not in entry["fallback_consent"]
-    assert find_profile(service2.status(), "p1")["models"]["delegation"]["model"] == "changed"
-
-
 def test_the_store_is_re_checked_after_the_new_payload_is_synced(tmp_path, monkeypatch):
     import os as os_module
     service, cli = setup(tmp_path, monkeypatch)
@@ -636,14 +591,14 @@ def test_the_store_is_re_checked_after_the_new_payload_is_synced(tmp_path, monke
         if pending and not changed:
             changed.append(True)
             data = json.loads(service.store_path.read_text(encoding="utf-8"))
-            data["profiles"]["p2"]["routing"]["light"] = {"follow": "custom", "custom": {"provider": "deepseek", "model": "elsewhere", "reasoning": "low"}}
+            data["profiles"]["p2"]["routing"]["slots"] = {"code-simple": {"follow": "custom", "custom": {"provider": "deepseek", "model": "elsewhere", "reasoning": "low"}}}
             service.store_path.write_text(json.dumps(data), encoding="utf-8")
     monkeypatch.setattr(os_module, "fsync", fsync_then_change)
     with pytest.raises(RevisionConflict, match="during apply; nothing was written"):
         service.apply(plan)
     assert changed
     stored = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
-    assert stored["p2"]["routing"]["light"]["custom"]["model"] == "elsewhere"
+    assert stored["p2"]["routing"]["slots"]["code-simple"]["custom"]["model"] == "elsewhere"
     assert stored["p1"]["models"]["delegation"]["model"] != "edit"
     assert cli.calls == []
     assert not list(service.store_path.parent.glob(f".{service.store_path.name}.*.tmp")), "the temporary file is removed"

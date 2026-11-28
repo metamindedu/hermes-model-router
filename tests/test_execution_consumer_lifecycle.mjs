@@ -21,7 +21,7 @@ async function harness(){
  const gateway={connectionState:'open',sessionWire:'canonical',onState(fn){gatewayListeners.add(fn);fn('open');return()=>gatewayListeners.delete(fn)},async request(method,params){
   f.calls.push(method);assert.equal(params.profile,'observer');const parent=params.session_id
   if(method==='plugin.model-router.execution.list'){
-   const result={schema:1,origin_profile:'observer',conversation_id:parent,rows:Array.from({length:f.rows},(_,i)=>({id:parent+':'+i,execution_mode:'native',conversation_id:parent,parent_session_id:parent,task_index:i,subagent_id:'sa-'+i,delegation_id:'unit-'+parent,async_unit_id:'unit-'+parent,native_call_delegation_id:'call-'+parent,status:'queued',requested:{kind:'model',role:'heavy'},observed:{kind:'unknown'}}))}
+   const result={schema:1,origin_profile:'observer',conversation_id:parent,rows:Array.from({length:f.rows},(_,i)=>({id:parent+':'+i,execution_mode:'native',conversation_id:parent,parent_session_id:parent,task_index:i,subagent_id:'sa-'+i,delegation_id:'unit-'+parent,async_unit_id:'unit-'+parent,native_call_delegation_id:'call-'+parent,status:'queued',requested:{kind:'model',profile:null,slot:'design'},observed:{kind:'unknown'}}))}
    return f.hold?new Promise(resolve=>{f.release=()=>resolve(result)}):result
   }
   if(method==='subagent.list')return {subagents:[]}

@@ -9,7 +9,7 @@ function api(){
  return new Function(...Object.keys(imports),code+'\nreturn {runInitialSetup,initialSetupEligible,cancelProfilePreparation,acknowledgeProfilePreparation}')( ...Object.values(imports))
 }
 const id=c=>c.repeat(64)
-function ready(state='ready'){return {schema:1,state,files:state==='missing'?'missing':'complete',python:state==='ready'?'enabled':'not_enabled',base_supported:state!=='missing',split_supported:state!=='missing',explicit_opt_out:false,managed_selection:false,version:state==='missing'?null:'0.6.0',identity:id(state==='missing'?'b':'a'),reason_codes:[]}}
+function ready(state='ready'){return {schema:1,state,files:state==='missing'?'missing':'complete',python:state==='ready'?'enabled':'not_enabled',base_supported:state!=='missing',explicit_opt_out:false,managed_selection:false,version:state==='missing'?null:'0.6.0',identity:id(state==='missing'?'b':'a'),reason_codes:[]}}
 function fixture(){return {revision:0,readiness_context:{schema:1,base_identity:id('a'),source_profile:'default',release:{catalog_name:'model-router',version:'0.6.0',ref:'b'.repeat(40)}},profiles:['default','p1','p2'].map((name,i)=>({name,readiness:ready(i===2?'missing':'ready'),native_delegation:{backend:i===0?'model-router':'default'},initial_setup:{schema:1,default_backend:'model-router-auto',action:i===0?'complete':i===2?'install':'select_backend',eligible:i!==0,backend_unset:i!==0,digest:id(['d','e','f'][i]),intent_digest:id(['a','b','c'][i]),reason_codes:[]}}))}}
 function environment(options={}){
  const module=api(),snapshot=fixture(),current=structuredClone(snapshot),writes=[],calls=[],plans=new Map(),values=new Map()

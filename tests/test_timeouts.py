@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
+from model_router.slots import BUILTIN_SLOTS, DEFAULT_SLOT_SECONDS
 from model_router.timeouts import (
     DEFAULT_DELEGATE_TOTAL_SECONDS,
-    DEFAULT_ROUTED_TOTAL_SECONDS,
     policy_values,
     read_timeouts,
-    routed_seconds,
+    slot_seconds,
     timeout_digest,
     timeout_status,
     validate_policy_values,
@@ -24,10 +24,10 @@ from model_router.timeouts import (
 
 def expected_defaults() -> dict[str, object]:
     return {
-        "schema": 1,
+        "schema": 3,
         "revision": 0,
         "delegate_total_seconds": 0.0,
-        "routed_total_seconds": 3600.0,
+        "slot_seconds": {},
     }
 
 
@@ -52,7 +52,7 @@ def test_defaults_are_independent_and_missing_read_is_read_only(tmp_path):
 
     assert value == expected_defaults()
     assert DEFAULT_DELEGATE_TOTAL_SECONDS == 0
-    assert DEFAULT_ROUTED_TOTAL_SECONDS == 3600
+    assert DEFAULT_SLOT_SECONDS == 7200
     assert timeout_digest(home) == "MISSING"
     assert not home.exists()
 
@@ -61,7 +61,7 @@ def test_profile_homes_are_isolated_and_use_the_exact_local_path(tmp_path):
     root = tmp_path / "hermes"
     claire = make_home(root, "claire")
     morgan = make_home(root, "morgan")
-    values = {"delegate_total_seconds": 7200, "routed_total_seconds": 86400.5}
+    values = {"delegate_total_seconds": 7200, "slot_seconds": {"design": 86400.5}}
 
     written = write_timeouts(
         claire,
@@ -71,10 +71,10 @@ def test_profile_homes_are_isolated_and_use_the_exact_local_path(tmp_path):
     )
 
     assert written == {
-        "schema": 1,
+        "schema": 3,
         "revision": 1,
         "delegate_total_seconds": 7200.0,
-        "routed_total_seconds": 86400.5,
+        "slot_seconds": {"design": 86400.5},
     }
     assert timeout_path(claire).is_file()
     assert not timeout_path(morgan).exists()
@@ -110,7 +110,8 @@ def test_read_and_digest_fail_closed_for_corrupt_or_unsupported_existing_files(t
 
     for payload in (
         b"{not-json",
-        b'{"schema":2,"revision":0,"delegate_total_seconds":0,"routed_total_seconds":3600}',
+        b'{"schema":2,"revision":0,"delegate_total_seconds":0,"routed_heavy_total_seconds":10800,"routed_light_total_seconds":5400}',
+        b'{"schema":1,"revision":0,"delegate_total_seconds":0,"routed_total_seconds":3600}',
     ):
         path.write_bytes(payload)
         with pytest.raises(RuntimeError):
@@ -124,7 +125,8 @@ def test_read_and_digest_fail_closed_for_corrupt_or_unsupported_existing_files(t
         assert status["warnings"]
         assert status["revision"] is None
         assert status["delegate_total_seconds"] is None
-        assert status["routed_total_seconds"] is None
+        assert status["slot_seconds"] is None
+        assert status["default_slot_seconds"] == 7200
         assert path.read_bytes() == before
 
 
@@ -133,11 +135,12 @@ def test_read_rejects_invalid_revision_and_value_schema(tmp_path):
     path = timeout_path(home)
     path.parent.mkdir(parents=True)
     for payload in (
-        {"schema": 1, "revision": True, "delegate_total_seconds": 0, "routed_total_seconds": 3600},
-        {"schema": 1, "revision": -1, "delegate_total_seconds": 0, "routed_total_seconds": 3600},
-        {"schema": 1, "revision": 0, "delegate_total_seconds": True, "routed_total_seconds": 3600},
-        {"schema": 1, "revision": 0, "delegate_total_seconds": 0, "routed_total_seconds": float("nan")},
-        {"schema": 1, "revision": 0, "delegate_total_seconds": 0, "routed_total_seconds": 3600, "extra": 1},
+        {"schema": 3, "revision": True, "delegate_total_seconds": 0, "slot_seconds": {}},
+        {"schema": 3, "revision": -1, "delegate_total_seconds": 0, "slot_seconds": {}},
+        {"schema": 3, "revision": 0, "delegate_total_seconds": True, "slot_seconds": {}},
+        {"schema": 3, "revision": 0, "delegate_total_seconds": 0, "slot_seconds": {"design": float("nan")}},
+        {"schema": 3, "revision": 0, "delegate_total_seconds": 0, "slot_seconds": {}, "extra": 1},
+        {"schema": 3, "revision": 0, "delegate_total_seconds": 0},
     ):
         path.write_text(json.dumps(payload), encoding="utf-8")
         with pytest.raises(RuntimeError):
@@ -159,7 +162,7 @@ def test_timeout_digest_is_sha256_of_exact_valid_file_bytes(tmp_path):
     home = make_home(tmp_path)
     path = timeout_path(home)
     path.parent.mkdir(parents=True)
-    payload = b'{"schema":1,"revision":0,"delegate_total_seconds":0,"routed_total_seconds":3600}\n'
+    payload = b'{"schema":3,"revision":0,"delegate_total_seconds":0,"slot_seconds":{"design":3600}}\n'
     path.write_bytes(payload)
 
     digest = timeout_digest(home)
@@ -172,7 +175,7 @@ def test_stale_digest_or_revision_rejects_write_without_overwrite(tmp_path):
     home = make_home(tmp_path)
     initial = write_timeouts(
         home,
-        {"delegate_total_seconds": 0, "routed_total_seconds": 7200},
+        {"delegate_total_seconds": 0, "slot_seconds": {"design": 7200}},
         expected_digest="MISSING",
         expected_revision=0,
     )
@@ -183,14 +186,14 @@ def test_stale_digest_or_revision_rejects_write_without_overwrite(tmp_path):
     with pytest.raises(RuntimeError):
         write_timeouts(
             home,
-            {"delegate_total_seconds": 30, "routed_total_seconds": 7200},
+            {"delegate_total_seconds": 30, "slot_seconds": {"design": 7200}},
             expected_digest="MISSING",
             expected_revision=initial["revision"],
         )
     with pytest.raises(RuntimeError):
         write_timeouts(
             home,
-            {"delegate_total_seconds": 30, "routed_total_seconds": 7200},
+            {"delegate_total_seconds": 30, "slot_seconds": {"design": 7200}},
             expected_digest=current_digest,
             expected_revision=0,
         )
@@ -200,7 +203,7 @@ def test_stale_digest_or_revision_rejects_write_without_overwrite(tmp_path):
 
 def test_changed_write_increments_revision_and_returns_exact_readback(tmp_path):
     home = make_home(tmp_path)
-    values = {"delegate_total_seconds": 3600, "routed_total_seconds": 7200.25}
+    values = {"delegate_total_seconds": 3600, "slot_seconds": {"design": 7200.25}}
 
     result = write_timeouts(home, values, expected_digest="MISSING", expected_revision=0)
 
@@ -208,14 +211,14 @@ def test_changed_write_increments_revision_and_returns_exact_readback(tmp_path):
     assert result == read_timeouts(home)
     assert timeout_digest(home) == hashlib.sha256(timeout_path(home).read_bytes()).hexdigest()
     assert result["delegate_total_seconds"] == 3600.0
-    assert result["routed_total_seconds"] == 7200.25
+    assert result["slot_seconds"] == {"design": 7200.25}
 
 
 def test_noop_preserves_existing_revision_and_exact_file_bytes(tmp_path):
     home = make_home(tmp_path)
     first = write_timeouts(
         home,
-        {"delegate_total_seconds": 0, "routed_total_seconds": 7200},
+        {"delegate_total_seconds": 0, "slot_seconds": {"design": 7200}},
         expected_digest="MISSING",
         expected_revision=0,
     )
@@ -224,7 +227,7 @@ def test_noop_preserves_existing_revision_and_exact_file_bytes(tmp_path):
 
     result = write_timeouts(
         home,
-        {"delegate_total_seconds": 0.0, "routed_total_seconds": 7200.0},
+        {"delegate_total_seconds": 0.0, "slot_seconds": {"design": 7200.0}},
         expected_digest=timeout_digest(home),
         expected_revision=first["revision"],
     )
@@ -238,7 +241,7 @@ def test_noop_on_missing_defaults_does_not_create_timeout_file(tmp_path):
 
     result = write_timeouts(
         home,
-        {"delegate_total_seconds": 0, "routed_total_seconds": 3600},
+        {"delegate_total_seconds": 0, "slot_seconds": {}},
         expected_digest="MISSING",
         expected_revision=0,
     )
@@ -252,10 +255,15 @@ def test_noop_on_missing_defaults_does_not_create_timeout_file(tmp_path):
     [
         {},
         {"delegate_total_seconds": 0},
-        {"delegate_total_seconds": 0, "routed_total_seconds": 1, "extra": 3},
-        {"delegate_total_seconds": True, "routed_total_seconds": 1},
-        {"delegate_total_seconds": 0, "routed_total_seconds": math.inf},
-        {"delegate_total_seconds": -1, "routed_total_seconds": 1},
+        {"delegate_total_seconds": 0, "slot_seconds": {"design": 1}, "extra": 3},
+        {"delegate_total_seconds": 0, "routed_total_seconds": 1.0},
+        {"delegate_total_seconds": 0, "slot_seconds": {"heavy": 1}},
+        {"delegate_total_seconds": 0, "slot_seconds": {"custom:x": 1}},
+        {"delegate_total_seconds": 0, "slot_seconds": {"design": True}},
+        {"delegate_total_seconds": 0, "slot_seconds": [1]},
+        {"delegate_total_seconds": True, "slot_seconds": {"design": 1}},
+        {"delegate_total_seconds": 0, "slot_seconds": {"design": math.inf}},
+        {"delegate_total_seconds": -1, "slot_seconds": {"design": 1}},
     ],
 )
 def test_write_requires_exact_valid_timeout_fields(tmp_path, values):
@@ -290,7 +298,7 @@ def test_existing_ancestor_symlink_is_rejected_without_touching_target(tmp_path)
     with pytest.raises(RuntimeError):
         write_timeouts(
             home,
-            {"delegate_total_seconds": 10, "routed_total_seconds": 3600},
+            {"delegate_total_seconds": 10, "slot_seconds": {"design": 3600}},
             expected_digest="MISSING",
             expected_revision=0,
         )
@@ -336,14 +344,14 @@ def test_foreign_profile_write_does_not_modify_other_profile_file(tmp_path):
     root = tmp_path / "hermes"
     current = make_home(root, "claire")
     foreign = make_home(root, "morgan")
-    foreign_payload = b'{"schema":1,"revision":9,"delegate_total_seconds":4,"routed_total_seconds":8}\n'
+    foreign_payload = b'{"schema":3,"revision":9,"delegate_total_seconds":4,"slot_seconds":{"design":8}}\n'
     foreign_path = timeout_path(foreign)
     foreign_path.parent.mkdir(parents=True)
     foreign_path.write_bytes(foreign_payload)
 
     write_timeouts(
         current,
-        {"delegate_total_seconds": 15, "routed_total_seconds": 3600},
+        {"delegate_total_seconds": 15, "slot_seconds": {"design": 3600}},
         expected_digest="MISSING",
         expected_revision=0,
     )
@@ -352,134 +360,61 @@ def test_foreign_profile_write_does_not_modify_other_profile_file(tmp_path):
     assert read_timeouts(foreign)["revision"] == 9
 
 
-def test_schema1_read_projects_one_routed_budget_to_both_roles_without_rewriting(tmp_path):
+def test_slot_without_its_own_limit_gets_the_two_hour_default(tmp_path):
     home = make_home(tmp_path)
-    path = timeout_path(home)
-    path.parent.mkdir(parents=True)
-    payload = b'{"schema":1,"revision":7,"delegate_total_seconds":12.5,"routed_total_seconds":91.25}\n'
-    path.write_bytes(payload)
-
     state = read_timeouts(home)
-
-    assert state == {
-        "schema": 1, "revision": 7,
-        "delegate_total_seconds": 12.5, "routed_total_seconds": 91.25,
-    }
-    assert policy_values(state) == {
-        "delegate_total_seconds": 12.5,
-        "routed_light_total_seconds": 91.25,
-        "routed_heavy_total_seconds": 91.25,
-    }
-    assert routed_seconds(state, "light") == routed_seconds(state, "heavy") == 91.25
-    assert path.read_bytes() == payload
-
-
-def test_schema2_preserves_distinct_light_and_heavy_budgets(tmp_path):
-    home = make_home(tmp_path)
-    path = timeout_path(home)
-    path.parent.mkdir(parents=True)
-    payload = (b'{"schema":2,"revision":3,"delegate_total_seconds":8,'
-               b'"routed_light_total_seconds":11.5,"routed_heavy_total_seconds":97}\n')
-    path.write_bytes(payload)
-
-    state = read_timeouts(home)
-
-    assert state == {
-        "schema": 2, "revision": 3, "delegate_total_seconds": 8.0,
-        "routed_light_total_seconds": 11.5, "routed_heavy_total_seconds": 97.0,
-    }
-    assert policy_values(state) == {
-        "delegate_total_seconds": 8.0,
-        "routed_light_total_seconds": 11.5,
-        "routed_heavy_total_seconds": 97.0,
-    }
-    assert routed_seconds(state, "light") == 11.5
-    assert routed_seconds(state, "heavy") == 97.0
-    assert path.read_bytes() == payload
-    with pytest.raises(ValueError, match="distinct"):
-        policy_values(state, split=False)
-
-
-def test_new_split_write_migrates_only_when_semantically_changed_and_never_downgrades(tmp_path):
-    home = make_home(tmp_path)
-    path = timeout_path(home)
-    legacy_payload = b'{"schema":1,"revision":4,"delegate_total_seconds":0,"routed_total_seconds":3600}\n'
-    path.parent.mkdir(parents=True)
-    path.write_bytes(legacy_payload)
-    inherited = {
-        "delegate_total_seconds": 0, "routed_light_total_seconds": 3600,
-        "routed_heavy_total_seconds": 3600,
-    }
-
-    noop = write_timeouts(home, inherited, expected_digest=timeout_digest(home), expected_revision=4)
-    assert noop["schema"] == 1 and noop["revision"] == 4
-    assert path.read_bytes() == legacy_payload
-
-    changed = {**inherited, "routed_heavy_total_seconds": 5400}
-    written = write_timeouts(home, changed, expected_digest=timeout_digest(home), expected_revision=4)
-    assert written == {"schema": 2, "revision": 5, **changed}
-    split_payload = path.read_bytes()
-    with pytest.raises(RuntimeError, match="legacy timeout updates"):
-        write_timeouts(
-            home,
-            {"delegate_total_seconds": 0, "routed_total_seconds": 3600},
-            expected_digest=timeout_digest(home), expected_revision=5,
-        )
-    assert path.read_bytes() == split_payload
-
-
-@pytest.mark.parametrize("values", [
-    {"delegate_total_seconds": 1, "routed_total_seconds": 2, "routed_light_total_seconds": 2},
-    {"delegate_total_seconds": 1, "routed_light_total_seconds": 2},
-    {"delegate_total_seconds": 1, "routed_light_total_seconds": 2,
-     "routed_heavy_total_seconds": 3, "routed_total_seconds": 2},
-    {"delegate_total_seconds": True, "routed_light_total_seconds": 2, "routed_heavy_total_seconds": 3},
-    {"delegate_total_seconds": 1, "routed_light_total_seconds": float("inf"), "routed_heavy_total_seconds": 3},
-    {"delegate_total_seconds": 1, "routed_light_total_seconds": 2, "routed_heavy_total_seconds": -1},
-    {"delegate_total_seconds": 10**10000, "routed_light_total_seconds": 2, "routed_heavy_total_seconds": 3},
-])
-def test_split_policy_validator_rejects_mixed_partial_boolean_nonfinite_negative_and_overflow(values):
-    with pytest.raises(ValueError):
-        validate_policy_values(values)
-
-
-def test_schema2_stale_cas_does_not_overwrite_bytes(tmp_path):
-    home = make_home(tmp_path)
-    first = write_timeouts(
+    assert all(slot_seconds(state, slot) == 7200 for slot in BUILTIN_SLOTS)
+    assert slot_seconds(state, "custom:frontend") == 7200
+    written = write_timeouts(
         home,
-        {"delegate_total_seconds": 1, "routed_light_total_seconds": 2, "routed_heavy_total_seconds": 3},
-        expected_digest="MISSING", expected_revision=0,
+        {"delegate_total_seconds": 0, "slot_seconds": {"verify-complex": 10800, "code-simple": 0, "custom:3d": 600}},
+        expected_digest="MISSING",
+        expected_revision=0,
     )
-    path = timeout_path(home)
-    before = path.read_bytes()
+    assert slot_seconds(written, "verify-complex") == 10800
+    assert slot_seconds(written, "code-simple") == 0  # zero means no limit, never the default
+    assert slot_seconds(written, "custom:3d") == 600
+    assert slot_seconds(written, "design") == 7200
+    # Stored in slot order: built-ins first, then custom ids.
+    assert list(written["slot_seconds"]) == ["code-simple", "verify-complex", "custom:3d"]
 
-    with pytest.raises(RuntimeError, match="changed"):
-        write_timeouts(
-            home,
-            {"delegate_total_seconds": 4, "routed_light_total_seconds": 5, "routed_heavy_total_seconds": 6},
-            expected_digest="MISSING", expected_revision=first["revision"],
-        )
 
-    assert path.read_bytes() == before
+def test_status_reports_only_own_limits_and_the_default(tmp_path):
+    home = make_home(tmp_path)
+    write_timeouts(home, {"delegate_total_seconds": 60, "slot_seconds": {"design": 900}}, expected_digest="MISSING", expected_revision=0)
+    status = timeout_status(home)
+    assert status["schema"] == 3
+    assert status["slot_seconds"] == {"design": 900.0}
+    assert status["default_slot_seconds"] == 7200
+    assert status["editable"] is True and status["warnings"] == []
+    assert set(status) == {"schema", "revision", "delegate_total_seconds", "slot_seconds", "default_slot_seconds", "editable", "warnings"}
 
 
 @pytest.mark.parametrize("payload", [
-    {"schema": 2, "revision": True, "delegate_total_seconds": 0,
-     "routed_light_total_seconds": 1, "routed_heavy_total_seconds": 2},
-    {"schema": 2, "revision": 0, "delegate_total_seconds": 0,
-     "routed_light_total_seconds": True, "routed_heavy_total_seconds": 2},
-    {"schema": 2, "revision": 0, "delegate_total_seconds": 0,
-     "routed_light_total_seconds": 1, "routed_heavy_total_seconds": float("nan")},
-    {"schema": 2, "revision": 0, "delegate_total_seconds": 0,
-     "routed_light_total_seconds": 1, "routed_heavy_total_seconds": 10**400},
-    {"schema": 2, "revision": 0, "delegate_total_seconds": 0,
-     "routed_light_total_seconds": 1, "routed_heavy_total_seconds": 2, "routed_total_seconds": 3},
+    {"schema": 1, "revision": 0, "delegate_total_seconds": 0, "routed_total_seconds": 3600},
+    {"schema": 2, "revision": 0, "delegate_total_seconds": 0, "routed_heavy_total_seconds": 10800, "routed_light_total_seconds": 5400},
+    {"schema": 3, "revision": 0, "delegate_total_seconds": 0, "slot_seconds": {"heavy": 1}},
+    {"schema": 3, "revision": 0, "delegate_total_seconds": 0, "slot_seconds": {"design": -1}},
+    {"schema": 3, "revision": 0, "delegate_total_seconds": 0, "slot_seconds": {"design": "1"}},
 ])
-def test_schema2_documents_reject_malformed_boolean_nonfinite_overflow_and_extra_fields(tmp_path, payload):
+def test_earlier_schemas_and_unknown_slots_are_refused_without_rewriting(tmp_path, payload):
     home = make_home(tmp_path)
     path = timeout_path(home)
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
-
+    before = path.read_bytes()
     with pytest.raises(RuntimeError):
         read_timeouts(home)
+    status = timeout_status(home)
+    assert status["editable"] is False and "timeouts_invalid" in status["warnings"]
+    assert path.read_bytes() == before
+
+
+def test_policy_values_round_trip_and_validator_orders_slots():
+    values = validate_policy_values({"delegate_total_seconds": 5, "slot_seconds": {"custom:b2": 1, "advise": 2, "design": 3}})
+    assert values == {"delegate_total_seconds": 5.0, "slot_seconds": {"design": 3.0, "advise": 2.0, "custom:b2": 1.0}}
+    assert list(values["slot_seconds"]) == ["design", "advise", "custom:b2"]
+    document = {"schema": 3, "revision": 4, **values}
+    assert policy_values(document) == values
+    with pytest.raises(ValueError):
+        policy_values({**document, "schema": 2})

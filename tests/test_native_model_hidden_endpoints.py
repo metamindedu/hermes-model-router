@@ -168,7 +168,7 @@ def test_legacy_save_never_carries_an_inline_credential_to_another_provider(svc)
     status = service.status()
     models = copy.deepcopy(row(status)["models"])
     models["delegation"] = route("zai", "page-delegation", "low")
-    models["main"] = route("openai-codex", "heavy0", "high")
+    models["main"] = route("openai-codex", "main-model0", "high")
     with pytest.raises(ValueError, match=CHANGE_IN_HERMES):
         service.preview(legacy_body(status, models, expected=False))
     assert fake.values["default"]["delegation.api_key"] == "PRIVATE-KEY-MARKER" and fake.calls == []

@@ -55,34 +55,20 @@ def test_models_scope_ignores_dirty_routing_draft_and_membership(tmp_path, monke
     assert all(key != "skills.disabled" for _name, key, _value in cli.calls)
 
 
-def test_routing_scope_ignores_dirty_models_and_refuses_a_changed_nested_fallback(tmp_path, monkeypatch):
+def test_routing_scope_ignores_dirty_models_and_preserves_fallbacks_and_limits(tmp_path, monkeypatch):
     service, cli, body = setup(tmp_path, monkeypatch)
     before = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
     timeout_bytes = {}
     for name in ("default", "p1", "p2"):
         home = service._profile_home(name)
-        write_timeouts(home, {"delegate_total_seconds": 0, "routed_total_seconds": 3601},
+        write_timeouts(home, {"delegate_total_seconds": 0, "slot_seconds": {"design": 3601}},
                        expected_digest=timeout_digest(home), expected_revision=0)
         timeout_bytes[name] = (home / "plugin-data/model-router/timeouts.json").read_bytes()
 
     body.update(save_scope="routing", routing_targets=["p2"])
     body["models"] = {"dirty": "unrelated model draft"}
-    body["routing"]["heavy"] = {"follow": "custom", "custom": route("operator", "routing-only-heavy", "high")}
-    body["routing"]["light"] = {"follow": "custom", "custom": route("operator", "routing-only-light", "low")}
-    changed = copy.deepcopy(body)
-    changed["routing"]["fallback"] = {
-        "enabled": True,
-        "heavy": route("spare", "must-not-copy-heavy", "high"),
-        "light": route("spare", "must-not-copy-light", "low"),
-    }
-    # A changed routing.fallback is refused in this scope too; this endpoint never writes it.
-    try:
-        service.preview(changed)
-    except ValueError as error:
-        assert "fallback_preview" in str(error)
-    else:
-        raise AssertionError("a changed routing.fallback must be refused in the routing scope")
-
+    body["routing"]["slots"]["design"] = {"follow": "custom", "custom": route("operator", "routing-only-design", "high")}
+    body["routing"]["slots"]["code-simple"] = {"follow": "custom", "custom": route("operator", "routing-only-code", "low")}
     preview = service.preview(body)
     receipt = service.apply(preview["plan_id"])
 
@@ -90,10 +76,11 @@ def test_routing_scope_ignores_dirty_models_and_refuses_a_changed_nested_fallbac
     after = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
     for name in before:
         assert after[name]["models"] == before[name]["models"]
-        assert after[name]["routing"]["fallback"] == before[name]["routing"]["fallback"]
+        assert after[name]["native_fallback"] == before[name]["native_fallback"]
+        assert after[name]["delegation_fallback"] == before[name]["delegation_fallback"]
         assert after[name]["fallback_consent"] == before[name]["fallback_consent"]
-    assert after["p2"]["routing"]["heavy"] == body["routing"]["heavy"]
-    assert after["p2"]["routing"]["light"] == body["routing"]["light"]
+    assert after["p2"]["routing"]["slots"]["design"] == body["routing"]["slots"]["design"]
+    assert after["p2"]["routing"]["slots"]["code-simple"] == body["routing"]["slots"]["code-simple"]
     assert after["p1"]["routing"] == before["p1"]["routing"]
     assert {name: (service._profile_home(name) / "plugin-data/model-router/timeouts.json").read_bytes()
             for name in timeout_bytes} == timeout_bytes
@@ -128,60 +115,37 @@ def test_legacy_no_scope_does_not_overwrite_an_external_model_edit_without_targe
     assert cli.calls == []
 
 
-def _store_routing_fallback(service, name):
-    data = json.loads(service.store_path.read_text(encoding="utf-8"))
-    data["profiles"][name]["routing"]["fallback"] = {
-        "enabled": True, "heavy": route("spare", "kept-heavy", "high"), "light": route("spare", "kept-light", "low")}
-    service.store_path.write_text(json.dumps(data), encoding="utf-8")
-    return copy.deepcopy(data["profiles"][name]["routing"]["fallback"])
-
-
-def test_omitted_routing_fallback_keeps_the_stored_value_in_every_scope(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scope", [None, "routing"])
+def test_routing_save_refuses_retired_fallback_even_when_disabled(tmp_path, monkeypatch, scope):
     service, cli, body = setup(tmp_path, monkeypatch)
-    kept = _store_routing_fallback(service, "p1")
-    # Whole-page (no scope): a model and routing copy without routing.fallback.
-    whole = copy.deepcopy(body)
-    del whole["routing"]["fallback"]
-    whole["models"]["title"] = route("operator", "new-title", "none")
-    whole["model_targets"] = ["p1", "p2"]
-    whole["routing"]["light"] = {"follow": "custom", "custom": route("operator", "copied-light", "low")}
-    whole["routing_targets"] = ["p1", "p2"]
-    assert service.apply(service.preview(whole)["plan_id"])["status"] == "applied"
+    before = service.store_path.read_bytes()
+    if scope:
+        body["save_scope"] = scope
+    body["routing"]["fallback"] = {"enabled": False, "heavy": None, "light": None}
+    with pytest.raises(ValueError, match="routing must define enabled and slots"):
+        service.preview(body)
+    assert service.store_path.read_bytes() == before and not cli.calls
+
+
+def test_whole_page_copy_does_not_copy_other_targets_fallbacks(tmp_path, monkeypatch):
+    service, cli, body = setup(tmp_path, monkeypatch)
+    # p1 already owns an explicit delegation opt-out. A model/slot copy must not propagate it.
+    store = json.loads(service.store_path.read_text(encoding="utf-8"))
+    store["profiles"]["p1"]["delegation_fallback"] = {"mode": "off", "chain": []}
+    service.store_path.write_text(json.dumps(store), encoding="utf-8")
+    body["models"]["title"] = route("operator", "new-title", "none")
+    body["routing"]["slots"]["code-simple"] = {"follow": "custom", "custom": route("operator", "copied-code", "low")}
+    body.update(model_targets=["p1", "p2"], routing_targets=["p1", "p2"])
+    assert service.apply(service.preview(body)["plan_id"])["status"] == "applied"
     after = json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
-    assert after["p1"]["routing"]["fallback"] == kept
-    assert after["p2"]["routing"]["light"]["custom"]["model"] == "copied-light"
-    assert after["p2"]["routing"]["fallback"] == {"enabled": False, "heavy": None, "light": None}
-    # Scoped saves without it are accepted too.
-    for scope in ("models", "routing"):
-        status = service.status()
-        scoped = copy.deepcopy(body)
-        scoped.update(expected_revision=status["revision"], save_scope=scope, model_targets=[], routing_targets=[])
-        scoped["routing"] = copy.deepcopy(find_profile(status, "p1")["routing"])
-        del scoped["routing"]["fallback"]
-        service.apply(service.preview(scoped)["plan_id"])
-        assert json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]["p1"]["routing"]["fallback"] == kept
+    for name in ("p1", "p2"):
+        assert after[name]["models"]["title"] == body["models"]["title"]
+        assert after[name]["routing"]["slots"] == body["routing"]["slots"]
+        for field in ("native_fallback", "delegation_fallback", "fallback_consent"):
+            assert after[name][field] == store["profiles"][name][field]
 
 
-def test_an_older_client_that_sends_routing_fallback_must_still_send_it_unchanged(tmp_path, monkeypatch):
-    service, cli, body = setup(tmp_path, monkeypatch)
-    kept = _store_routing_fallback(service, "p1")
-    for scope in (None, "routing", "models", "timeouts"):
-        old = copy.deepcopy(body)
-        if scope is not None:
-            old["save_scope"] = scope
-        old["routing"]["fallback"] = kept
-        assert service.preview(old)["changes"] == [], scope
-        old["routing"]["fallback"] = {"enabled": False, "heavy": None, "light": None}
-        try:
-            service.preview(old)
-        except ValueError as error:
-            assert "fallback_preview" in str(error), scope
-        else:
-            raise AssertionError(f"a changed routing.fallback must be refused in scope {scope}")
-
-
-
-def test_an_older_timeout_save_compares_routing_fallback_without_resolving_models(tmp_path, monkeypatch):
+def test_timeout_scope_does_not_require_resolvable_models_or_create_profile_entry(tmp_path, monkeypatch):
     # Only p1 is set up; p2 has no stored entry (as for a profile created afterwards) and its main
     # model is not configured.
     root, cli = setup_home(tmp_path, monkeypatch)
@@ -197,7 +161,7 @@ def test_an_older_timeout_save_compares_routing_fallback_without_resolving_model
     status = service.status()
     p1 = find_profile(status, "p1")
     initial = service._default_routing()
-    old = {
+    proposal = {
         "expected_revision": status["revision"], "profile": "p2", "save_scope": "timeouts",
         "models": copy.deepcopy(p1["models"]), "model_targets": [],
         "routing": copy.deepcopy(initial), "routing_targets": [],
@@ -205,7 +169,7 @@ def test_an_older_timeout_save_compares_routing_fallback_without_resolving_model
         "timeout_updates": [],
     }
     assert "p2" not in json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]
-    assert service.preview(copy.deepcopy(old))["changes"] == []
-    old["routing"]["fallback"] = {"enabled": True, "heavy": route("spare", "h", "high"), "light": route("spare", "l", "low")}
-    with pytest.raises(ValueError, match="fallback_preview"):
-        service.preview(old)
+    plan = service.preview(proposal)
+    assert plan["changes"] == []
+    assert service.apply(plan["plan_id"])["status"] == "no_change"
+    assert "p2" not in json.loads(service.store_path.read_text(encoding="utf-8"))["profiles"]

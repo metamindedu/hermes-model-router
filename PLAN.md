@@ -1,5 +1,17 @@
 # Model Router implementation contract
 
+## 2026-11-28: v0.18 removes Heavy/Light; per-slot runtime limits default to two hours
+
+User decision (verbatim):
+
+> 슬롯별 실행 시간 제한을 입력하지 않으면 2시간을 기본값으로 적용하게 해. 그리고 이제 Heavy/Light 구분은 의미가 없으므로 흔적까지 모두 지우는 게 어떨까? 이전 버전 호환도 필요 없어. 진행해.
+
+- A slot follows Main or pins its own model; an unset slot runs on Main. Each slot has its own total limit, default 7200 seconds when absent. Zero disables only that slot's plugin total. Ordinary/profile delegation keeps its separate limit, default zero. The page edits minutes; the optional native per-task override uses seconds.
+- Settings schema 5 stores only `routing: {enabled, slots}` for routing and `{id, label, description}` for custom definitions. Timeout schema 3 uses `delegate_total_seconds` and `slot_seconds`. Native continuation blocks use schema 2 with one exact-chain consent per built-in slot and backend. There is no fresh-task spare-model retry or in-plugin compatibility reader.
+- The config-only `coding_route` tool replaces process-job access. Retire start/status/join, worker and joining, `routing.py`, `processes`, `scoped_agent`, `runtime_tracking`, `attempt_observer`, `task_presentation`, `public_progress`, `background_output`, `lib/run_routed_agent.py`, `lib/routing_cache.py` and `lib/template-cache.json`. Native delegation and independently granted full-profile jobs keep their own lifecycle. The bundled policy (2.0.0) names required purposes rather than model groups.
+- The one-time operator migration keeps effective v0.17 slot models. A direct or inherited link to delegation becomes an explicit model; unused group routes, disabled rerun spares, empty rerun consent and the former custom-slot grouping field are dropped. Runtime limits are reset: every slot starts on the two-hour default and the ordinary delegation limit is kept. User decision (2026-11-28): "모든 슬롯을 2시간 기본값으로 초기화해."
+- Install files in all profiles, dry-run `scripts/migrate_to_v018.py` under Hermes's Python, then use `--apply` only after a refusal-free review. Convert all-off two-role native blocks to all-off per-slot blocks; refuse active routing spares, existing routing consent, active two-role chains or unknown formats without writing. Keep the original once as `<file>.pre-v018`; disclose no model names, routes or secrets. The operator restarts Desktop and the gateway, not the agent.
+
 ## 2026-11-20: Adopted bounded ledger-read exception; phantom-row fix; v0.13.2 commit, install, deploy and catalog submission
 
 User decision in this session (default PM): the user explicitly adopted the bounded read exception ("1. 허락할게") and authorized fixing the phantom-row bug together with installation, deployment and catalog submission ("2. 같이 고치고 설치 및 배포 후 카탈로그에도 제출해").

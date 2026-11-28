@@ -34,8 +34,8 @@ def real(tmp_path, monkeypatch):
                     ignore=shutil.ignore_patterns('.git', 'tests', '__pycache__', '.hermes-catalog.json', '.hermes'))
     (home / 'config.yaml').write_text(json.dumps({
         'plugins': {'enabled': ['model-router']},
-        'model': {'provider': 'openrouter', 'default': 'fixture-heavy'},
-        'delegation': {'backend': 'model-router', 'provider': 'openrouter', 'model': 'fixture-light'},
+        'model': {'provider': 'openrouter', 'default': 'fixture-main'},
+        'delegation': {'backend': 'model-router', 'provider': 'openrouter', 'model': 'fixture-delegate'},
         'agent': {'reasoning_effort': 'high'},
     }), encoding='utf-8')
     monkeypatch.setenv('HERMES_HOME', str(home))
@@ -105,7 +105,7 @@ def test_real_child_is_bound_read_only_and_answers_in_the_same_call(real, monkey
     with bind_subagent_parent(real.parent):
         reply = _ask({'question': 'Which index should I add?', 'context': 'Query is slow.'})
     assert reply['status'] == 'ok', reply
-    assert 'use the index' in reply['advice'] and reply['route']['model'] == 'fixture-heavy'
+    assert 'use the index' in reply['advice'] and reply['route']['model'] == 'fixture-main'
     assert len(children) == 1 and isinstance(children[0], AIAgent)
     assert verdicts.pop('read_file') is None and verdicts.pop('task_id_is_subagent_id') is True
     assert verdicts.pop('registry_binds') is True

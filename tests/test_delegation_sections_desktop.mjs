@@ -14,10 +14,9 @@ function api() {
     {}, ...names.map(n => ['jsx', 'jsxs'].includes(n) ? ((type, props) => ({ type, props })) : n))
 }
 const a = api()
-const off = () => ({ heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } })
 const slots = () => Object.fromEntries(['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise'].map(id => [id, { mode: 'off', chain: [] }]))
 const dto = (name, backend, overrides = {}) => ({ schema: 1, supported: true, editable: true, backend, digest: name[0].repeat(64), auto_supported: true,
-  policy: off(), auto_policy: off(), slot_policy: slots(), auto_slot_policy: slots(), policy_schema: 0, auto_policy_schema: 0, slot_policy_supported: true,
+  slot_policy: slots(), auto_slot_policy: slots(), policy_schema: 0, auto_policy_schema: 0, slot_policy_supported: true,
   profile_routes: { profiles: [{ name: 'other', description: `stored by ${name}` }], default: null },
   role_intro_inheritance: { schema: 1, supported: true }, warnings: [], ...overrides })
 const rows = backends => Object.entries(backends).map(([name, backend]) => ({ name, routing: { enabled: true }, native_delegation: dto(name, backend) }))
@@ -55,7 +54,7 @@ test('the native part sends the drafted method and each target stored allow-list
 
 test('the profiles part sends the drafted allow-list and each target stored method and spare models', () => {
   const list = rows({ claire: 'model-router-profiles', other: 'model-router-auto' })
-  list[1].native_delegation.auto_policy.heavy = { mode: 'custom', chain: [{ provider: 'own', model: 'own-spare' }] }
+  list[1].native_delegation.auto_slot_policy.design = { mode: 'custom', chain: [{ provider: 'own', model: 'own-spare' }] }
   const draft = a.copyNativeDelegationDraft(list[0].native_delegation)
   draft.backend = 'model-router'
   draft.slotPolicy.design = { mode: 'custom', chain: [{ provider: 'draft', model: 'draft-spare' }] }
@@ -143,19 +142,19 @@ test('the method save does not validate an allow-list it does not send, so a del
 test('save coverage is computed field by field from the bodies actually sent to every target', () => {
   const slotsA = { design: { follow: 'main', custom: null } }
   const spare = { design: { mode: 'custom', chain: [{ provider: 's', model: 'm' }] } }
-  const view = { profile: 'claire', models: { main: 'm1' }, routing: { heavy: 'h', light: 'l' }, slots: slotsA, reenable: [],
+  const view = { profile: 'claire', models: { main: 'm1' }, routing: { enabled: true, slots: slotsA }, slots: slotsA, reenable: [],
     nativeFallback: { enabled: true, chain: [] },
     native: { backend: 'model-router', slotPolicy: spare, autoSlotPolicy: null, descriptionEdits: {},
       profile_routes: { profiles: [{ name: 'other', description: 'd' }], default: 'other' } } }
   const has = (sent, key) => a.submittedEditCoverage(view, sent).has(key)
   // Store saves: models only in the models scope with targets; slots only when the body carries them.
-  const models = { operation: '/preview', body: { save_scope: 'models', profile: 'claire', models: { main: 'm1' }, model_targets: ['claire'], routing: { heavy: 'h', light: 'l', slots: slotsA }, routing_profiles: [] } }
+  const models = { operation: '/preview', body: { save_scope: 'models', profile: 'claire', models: { main: 'm1' }, model_targets: ['claire'], routing: { enabled: true, slots: slotsA }, routing_profiles: [] } }
   assert.equal(has([models], 'models'), true)
   assert.equal(has([models], 'routing.slots'), false, 'a models-scope body never writes slots')
   assert.equal(has([{ ...models, body: { ...models.body, model_targets: [] } }], 'models'), false)
-  const routing = { operation: '/preview', body: { save_scope: 'routing', profile: 'claire', models: {}, model_targets: [], routing: { heavy: 'h', light: 'l', slots: slotsA }, routing_targets: ['claire'], routing_profiles: [] } }
+  const routing = { operation: '/preview', body: { save_scope: 'routing', profile: 'claire', models: {}, model_targets: [], routing: { enabled: true, slots: slotsA }, routing_targets: ['claire'], routing_profiles: [] } }
   assert.equal(has([routing], 'routing.slots'), true)
-  assert.equal(has([{ ...routing, body: { ...routing.body, routing: { heavy: 'h', light: 'l' } } }], 'routing.slots'), false)
+  assert.equal(has([{ ...routing, body: { ...routing.body, routing: { enabled: true } } }], 'routing.slots'), false)
   // Native method save: the spare models count only when every update carries the drafted ones.
   const native = updates => ({ operation: '/delegation-preview', part: 'native', body: { updates } })
   assert.equal(has([native([{ profile: 'claire', backend: 'model-router' }])], 'native.backend'), true)
@@ -184,7 +183,7 @@ test('save coverage is computed field by field from the bodies actually sent to 
   assert.equal(has([{ operation: '/fallback-preview', body: { updates: [{ profile: 'claire', native_fallback: { enabled: false, chain: [] } }] } }], 'fallback:native'), false)
   // Since v0.12.1 the page sends them in the model section's combined store plan (no save_scope); the
   // same plan also covers the section's pending copy of them.
-  const combined = updates => ({ operation: '/preview', body: { profile: 'claire', models: { main: 'm1' }, model_targets: [], routing: { heavy: 'h', light: 'l' }, routing_targets: [], routing_profiles: [], fallback_updates: updates } })
+  const combined = updates => ({ operation: '/preview', body: { profile: 'claire', models: { main: 'm1' }, model_targets: [], routing: { enabled: true }, routing_targets: [], routing_profiles: [], fallback_updates: updates } })
   const drafted = { enabled: true, chain: [] }
   for (const key of ['fallback:native', 'copy.fallback']) {
     assert.equal(has([combined([{ profile: 'claire', native_fallback: drafted }, { profile: 'other', native_fallback: drafted }])], key), true, key)

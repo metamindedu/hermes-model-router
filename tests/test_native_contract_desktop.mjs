@@ -20,7 +20,6 @@ const a = api()
 const FIXTURE = new URL('./fixtures/native_delegation_contract.json', import.meta.url)
 // The profiles of the Python fixture in tests/test_native_service.py.
 const NAMES = ['default', 'p1', 'p2']
-const offRoles = () => ({ heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } })
 const offSlots = () => Object.fromEntries(a.TASK_SLOTS.map(slot => [slot.id, { mode: 'off', chain: [] }]))
 
 // The status DTO the real service reports for a seed; the Python side checks it field by field, so a
@@ -29,7 +28,7 @@ function dtoFor(name, seed) {
   const routes = seed.routes ? structuredClone(seed.routes) : { profiles: [], default: null }
   return { schema: 1, supported: true, editable: true, backend: seed.backend, digest: `digest:${name}`,
     role_intro_inheritance: { schema: 1, supported: true }, auto_supported: true,
-    policy: offRoles(), auto_policy: offRoles(), slot_policy: offSlots(), auto_slot_policy: offSlots(),
+    slot_policy: offSlots(), auto_slot_policy: offSlots(),
     policy_schema: seed.slot ? 2 : 0, auto_policy_schema: seed.autoSlot ? 2 : 0, slot_policy_supported: true,
     profile_routes: routes,
     warnings: routes.profiles.some(entry => !NAMES.includes(entry.name)) ? ['profile_target_missing_remove_from_allowlist'] : [] }
@@ -113,12 +112,12 @@ const EXPECTATION_FIXTURE = new URL('./fixtures/page_expectation_contract.json',
 const route = (provider, model, reasoning) => ({ provider, model, reasoning })
 const sampleRow = () => ({
   name: 'p1',
-  models: { main: route('openai-codex', 'stored-main', 'high'), delegation: route('deepseek', 'stored-light', 'low'),
+  models: { main: route('openai-codex', 'stored-main', 'high'), delegation: route('deepseek', 'stored-delegate', 'low'),
     compression: route('openai-codex', 'stored-main', 'high'), title: route('openai-codex', 'stored-main', 'high') },
-  actual_models: { main: route('openai-codex', 'actual-main', 'high'), delegation: route('deepseek', 'stored-light', 'low'),
+  actual_models: { main: route('openai-codex', 'actual-main', 'high'), delegation: route('deepseek', 'stored-delegate', 'low'),
     compression: route('openai-codex', 'actual-main', 'high'), title: route('openai-codex', 'actual-main', 'high') },
-  routing: { enabled: true, heavy: { follow: 'main', custom: null }, light: { follow: 'custom', custom: route('deepseek', 'routed', 'low') },
-    fallback: { enabled: false, heavy: null, light: null }, slots: { design: { follow: 'main', custom: null } } },
+  // v0.18.0 routing: {enabled, slots}, the slots holding only stored declarations.
+  routing: { enabled: true, slots: { design: { follow: 'main', custom: null }, 'code-simple': { follow: 'custom', custom: route('deepseek', 'routed', 'low') } } },
   fallbacks: { native: { managed: true, editable: true, enabled: true, chain: [{ provider: 'xiaomi', model: 'spare' }],
     actual_chain: [{ provider: 'xiaomi', model: 'spare' }], drift: false, warnings: [], consent: null } },
   // The compression and title-generation spare models (auxiliary.<task>.fallback_chain), since v0.13.0.

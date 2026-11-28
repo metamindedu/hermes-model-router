@@ -16,14 +16,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .delegation_reports import DelegationRouteReports
-from .slots import PURPOSE_SLOTS, is_custom_slot
+from .slots import BUILTIN_SLOTS, PURPOSE_SLOTS, is_custom_slot
 
 _SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}\Z", re.ASCII)
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+/-]{0,127}(?:\[[A-Za-z0-9._-]{1,32}\])?\Z", re.ASCII)
 _PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z", re.ASCII)
-_PURPOSES = {'implementation': 'light', 'mechanical': 'light', 'preliminary-review': 'light',
-             'plan': 'heavy', 'semantic-final': 'heavy', 'independent-review': 'heavy', 'computer-use': 'light',
-             'advise': 'heavy'}
 _BACKENDS = {'model-router', 'model-router-auto', 'model-router-profiles'}
 # The fixed goal prefix of every ask_advisor child (advise_guard.GOAL_MARKER, kept in step by a test).
 _ADVISOR_GOAL = re.compile(r"Advisor consultation [0-9a-f]{12}\. ")
@@ -46,18 +43,16 @@ def _safe(value):
 
 
 def _requested(task, custom=None):
-    """The requested execution of one task. ``custom``: defined custom slots, id -> (tier, label)."""
+    """The requested execution of one task. ``custom``: defined custom slots, id -> label."""
     task = task if isinstance(task, dict) else {}
     custom = custom or {}
     raw_purpose = task.get('purpose')
     if isinstance(raw_purpose, str) and raw_purpose in custom:
-        tier, label = custom[raw_purpose]
-        profile_given = 'profile' in task
-        if task.get('execution') in (None, 'model') and not profile_given:
-            return {'kind': 'model', 'role': tier, 'profile': None, 'purpose': raw_purpose, 'slot': raw_purpose,
-                    'slot_label': label}
-        return {'kind': 'unknown', 'role': None, 'profile': None, 'purpose': None, 'slot': None}
-    purpose = raw_purpose if isinstance(raw_purpose, str) and raw_purpose in _PURPOSES else None
+        if task.get('execution') in (None, 'model') and 'profile' not in task:
+            return {'kind': 'model', 'profile': None, 'purpose': raw_purpose, 'slot': raw_purpose,
+                    'slot_label': custom[raw_purpose]}
+        return {'kind': 'unknown', 'profile': None, 'purpose': None, 'slot': None}
+    purpose = raw_purpose if isinstance(raw_purpose, str) and raw_purpose in PURPOSE_SLOTS else None
     profile = task.get('profile')
     profile = profile if isinstance(profile, str) and _PROFILE.fullmatch(profile) else None
     execution = task.get('execution')
@@ -66,13 +61,12 @@ def _requested(task, custom=None):
         kind = 'model'
     elif execution in (None, 'profile') and profile and 'purpose' not in task:
         kind = 'profile'
-    return {'kind': kind, 'role': _PURPOSES[purpose] if kind == 'model' and purpose else None,
-            'profile': profile if kind == 'profile' else None, 'purpose': purpose if kind == 'model' else None,
+    return {'kind': kind, 'profile': profile if kind == 'profile' else None, 'purpose': purpose if kind == 'model' else None,
             'slot': PURPOSE_SLOTS[purpose] if kind == 'model' and purpose else None}
 
 
 def _observed(entry):
-    out = {'kind': 'unknown', 'role': None, 'profile': None, 'backend': None,
+    out = {'kind': 'unknown', 'slot': None, 'profile': None, 'backend': None,
            'model': None, 'provider': None, 'evidence': 'unknown'}
     route = entry.get('route')
     if not isinstance(route, dict) or route.get('backend') not in _BACKENDS:
@@ -82,8 +76,16 @@ def _observed(entry):
     out['model'] = model if isinstance(model, str) and '..' not in model and _MODEL.fullmatch(model) else None
     out['provider'] = _safe(route.get('provider'))
     label = route.get('label')
-    if label in ('model:heavy', 'model:light'):
-        out['kind'], out['role'] = 'model', label[6:]
+    if route['backend'] == 'model-router-profiles':
+        # The profile backend reports the bare profile name (a name may equal a slot id).
+        if isinstance(label, str) and _PROFILE.fullmatch(label):
+            out['kind'], out['profile'] = 'profile', label
+        out['evidence'] = 'runtime_reported'
+        return out
+    # model-router reports the slot id; model-router-auto prefixes it with its execution ('model:').
+    slot = label[6:] if isinstance(label, str) and label.startswith('model:') else label
+    if isinstance(slot, str) and (slot in BUILTIN_SLOTS or is_custom_slot(slot)):
+        out['kind'], out['slot'] = 'model', slot
     elif isinstance(label, str) and label.startswith('profile:') and _PROFILE.fullmatch(label[8:]):
         out['kind'], out['profile'] = 'profile', label[8:]
     out['evidence'] = 'runtime_reported'
@@ -115,7 +117,7 @@ def _set_status(row, status):
 # written to disk. A state of another schema, or one that fails validation, is discarded: rows then
 # read as unknown rather than being attributed to the wrong run.
 _HOLDER_MODULE = 'hermes_model_router_runtime_state'
-_STATE_SCHEMA = 'execution-roster/1'
+_STATE_SCHEMA = 'execution-roster/2'
 _HOLDER_LOCK = threading.Lock()
 _ROW_KEYS = frozenset({'id', 'execution_mode', 'requested', 'observed', 'conversation_id', 'parent_session_id',
                        'tool_call_id', 'task_index', 'subagent_id', 'delegation_id', 'async_unit_id',
@@ -773,7 +775,7 @@ class ExecutionRoster:
         try:
             from .service import Service
             stored = Service()._load_store()
-            return {item['id']: (item['tier'], item['label']) for item in ((stored or {}).get('custom_slots') or [])}
+            return {item['id']: item['label'] for item in ((stored or {}).get('custom_slots') or [])}
         except Exception:
             return {}
 

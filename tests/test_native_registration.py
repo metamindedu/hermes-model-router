@@ -35,7 +35,8 @@ assert entry is not None
 assert entry.check_fn()
 config = json.loads(entry.handler({'action': 'config'}))
 assert config['enabled'] is True
-assert config['heavy']['model'] == config['light']['model'] == 'fixture-shared'
+assert {route['model'] for route in config['slots'].values()} == {'fixture-shared'}
+assert config['slot_timeout_seconds']['design'] == 7200
 from pathlib import Path
 from tools.skills_tool import skill_view
 policy = manager.find_plugin_skill('model-router:adaptive-coding-orchestration')

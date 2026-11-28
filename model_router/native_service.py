@@ -203,7 +203,7 @@ def _plain(snapshot, profile, names):
         declared_names = [row.get("name") for row in declared if isinstance(row, dict)] if isinstance(declared, list) else []
         profiles = ns.validate_profiles_block(profiles, declared_names)
     auto_policy = ns.read_policy(profile, snapshot.raw(ns.KEY_AUTO_POLICY), backend="model-router-auto")
-    # Each policy is a view: stored schema, the two-role form and the per-slot form.
+    # Each policy is a view: the stored schema (0 none, 2 per slot) and the per-slot form.
     return backend, policy, profiles, auto_policy
 
 
@@ -212,10 +212,9 @@ def status(service, profile: str) -> dict[str, Any]:
     role_code = _role_intro_code_signature(service, profile, code)
     result = {"schema": 1, "supported": code is not None, "editable": False, "backend": "unavailable",
               "role_intro_inheritance": {"schema": 1, "supported": role_code is not None, "code_identity": role_code, "activation": "new_session_or_supported_rebuild"},
-              "digest": "", "policy": ns.default_policy(),
-              "profile_routes": {"profiles": [], "default": None}, "auto_policy": ns.default_policy(), "auto_supported": False, "warnings": [],
-              # Spare models per task slot. A stored two-role block is shown by tier;
-              # policy_schema says which shape is stored (0 none, 1 two roles, 2 per slot).
+              "digest": "",
+              "profile_routes": {"profiles": [], "default": None}, "auto_supported": False, "warnings": [],
+              # Spare models per task slot; policy_schema says what is stored (0 none, 2 per slot).
               "slot_policy": ns.default_slot_policy(), "auto_slot_policy": ns.default_slot_policy(),
               "policy_schema": 0, "auto_policy_schema": 0, "slot_policy_supported": False}
     try:
@@ -226,7 +225,7 @@ def status(service, profile: str) -> dict[str, Any]:
         backend, policy, profiles, auto_policy = _plain(snapshot, profile, names)
         auto_code = _auto_code_signature(service, profile, code)
         from .service import _digest
-        result.update(backend=backend, policy=policy["policy"], profile_routes=profiles, auto_policy=auto_policy["policy"], auto_supported=auto_code is not None,
+        result.update(backend=backend, profile_routes=profiles, auto_supported=auto_code is not None,
                       slot_policy=policy["slot_policy"], auto_slot_policy=auto_policy["slot_policy"],
                       policy_schema=policy["schema"], auto_policy_schema=auto_policy["schema"],
                       slot_policy_supported=code is not None and service._slot_capable(profile),
@@ -277,16 +276,16 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
         names = inventory(service)
         records, changes, seen = [], [], set()
         required = {"profile", "expected_digest", "allow_profile_access"} | (set() if partial else {"backend"})
-        optional = {"backend", "policy", "slot_policy", "allow_additional_cost", "profile_routes"} | (
+        optional = {"backend", "slot_policy", "allow_additional_cost", "profile_routes"} | (
             {"slot_policy_patch", "profile_routes_patch"} if partial else set())
         for update in updates:
-            # At most one policy shape: the two roles an older page sends, or one entry per task slot.
+            # At most one policy form: the whole per-slot policy or a patch of some slots.
             # A part an update leaves out (the spare policy with its cost confirmation, or the
             # profile routes) is kept exactly as stored, including a key that is absent; an update
             # with neither is an explicit backend-only change. A partial update may also leave out
             # the backend (the stored one is kept), but must carry something to write.
             keys = set(update) if isinstance(update, dict) else set()
-            policy_keys = keys & {"policy", "slot_policy", "slot_policy_patch"}
+            policy_keys = keys & {"slot_policy", "slot_policy_patch"}
             route_keys = keys & {"profile_routes", "profile_routes_patch"}
             if (not isinstance(update, dict) or not required <= keys or keys - required - optional or
                     len(policy_keys) > 1 or len(route_keys) > 1 or ("allow_additional_cost" in keys) != bool(policy_keys) or
@@ -310,7 +309,7 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                 # model patch needs a method that uses slot models.
                 if not isinstance(backend, str) or backend not in ns.BACKENDS:
                     raise ValueError(f"{profile}: the stored delegation method is not supported; send the method explicitly")
-                # Any spare-model part (a patch, or a full per-slot or two-role policy) needs a kept
+                # Any spare-model part (a patch or a full per-slot policy) needs a kept
                 # method that uses slot models; an explicit backend keeps the earlier rules unchanged.
                 if policy_keys and backend not in {"model-router", "model-router-auto"}:
                     raise ValueError(f"{profile}: slot spare models need a slot-model delegation method")
@@ -326,14 +325,10 @@ def preview(service, body: dict[str, Any]) -> dict[str, Any]:
                 policy = None
                 if "slot_policy_patch" in update and dto["slot_policy_supported"] is not True:
                     raise ValueError("task slots are unsupported by this installed profile; update it first")
-            elif "slot_policy" in update:
+            else:
                 if dto["slot_policy_supported"] is not True:
                     raise ValueError("task slots are unsupported by this installed profile; update it first")
                 policy = ns.build_slot_policy_block(profile, update["slot_policy"], update["allow_additional_cost"], backend=policy_backend)
-            else:
-                if dto["auto_policy_schema" if backend == "model-router-auto" else "policy_schema"] == ns.SLOT_SCHEMA:
-                    raise ValueError("spare models are stored per task slot; a two-role policy cannot replace them")
-                policy = ns.build_policy_block(profile, update["policy"], update["allow_additional_cost"], backend=policy_backend)
             profiles = None
             if route_keys:
                 # A patch is merged into this target's stored routes; the result is validated and
@@ -679,8 +674,7 @@ def _initial_observation(service, profile, readiness=None):
         routes = service.native_route_config(profile)
         if routes.get('enabled') is not True:
             raise ValueError('initial setup routing unavailable')
-        _route(routes['heavy']); _route(routes['light'])
-        for slot_route in (routes.get('slots') or {}).values():
+        for slot_route in routes['slots'].values():
             _route(slot_route)  # what purposes actually run on
         action, reason = 'complete', 'already_selected'
     else:
@@ -709,7 +703,7 @@ def _initial_observation(service, profile, readiness=None):
             action, reason = 'manual', 'different_package_source'
         elif package_code is None or source_package_code is None or package_code != source_package_code:
             action, reason = 'manual', 'different_package_code'
-        elif ready.get('state') == 'disabled' and ready.get('files') == 'complete' and ready.get('base_supported') is True and ready.get('split_supported') is True:
+        elif ready.get('state') == 'disabled' and ready.get('files') == 'complete' and ready.get('base_supported') is True:
             action, reason = 'enable', 'package_not_enabled'
         elif ready.get('state') == 'ready' and auto_code is None:
             action, reason = 'manual', 'automatic_routing_unavailable'
@@ -717,8 +711,7 @@ def _initial_observation(service, profile, readiness=None):
             routes = service.native_route_config(profile)
             if routes.get('enabled') is not True:
                 raise ValueError('initial setup routing unavailable')
-            _route(routes['heavy']); _route(routes['light'])
-            for slot_route in (routes.get('slots') or {}).values():
+            for slot_route in routes['slots'].values():
                 _route(slot_route)  # what purposes actually run on
             action, reason = 'select_backend', 'backend_unset'
     if action in ('install', 'enable') and not _initial_native_enable_preserves_tools(raw):

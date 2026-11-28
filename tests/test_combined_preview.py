@@ -29,17 +29,16 @@ def body(service):
 
 def scopes():
     return {"native_fallback": {"enabled": True, "chain": [{"provider": "xiaomi", "model": "native-spare"}]},
-            "routing_fallback": {"enabled": True, "heavy": route("xiaomi", "heavy-spare"), "light": route("deepseek", "light-spare")},
             "delegation_fallback": {"mode": "custom", "chain": [{"provider": "deepseek", "model": "delegate-spare"}]}}
 
 
 def attach(proposal, name="default"):
     proposal["fallback_updates"] = [{"profile": name, **scopes()}]
-    proposal["fallback_confirmations"] = [confirmation(scope, name) for scope in ("native", "routing", "delegation")]
+    proposal["fallback_confirmations"] = [confirmation(scope, name) for scope in ("native", "delegation")]
     return proposal
 
 
-def test_one_preview_contains_models_and_three_scopes_and_one_apply_persists_all(tmp_path, monkeypatch):
+def test_one_preview_contains_models_and_both_scopes_and_one_apply_persists_all(tmp_path, monkeypatch):
     service, fake, _ = setup(tmp_path, monkeypatch)
     proposal = attach(body(service))
     proposal["model_targets"] = ["default"]
@@ -51,14 +50,13 @@ def test_one_preview_contains_models_and_three_scopes_and_one_apply_persists_all
     assert initial == fake.values and initial_store == service.store_path.read_bytes()
     assert fake.calls == []
     fields = {change["field"] for change in preview["changes"]}
-    assert {"models.main", "models.delegation", "native_fallback", "routing.fallback", "delegation_fallback"} <= fields
+    assert {"models.main", "models.delegation", "native_fallback", "delegation_fallback"} <= fields
     assert len(list((service.store_path.parent / "plans").glob("*.json"))) == 1
     receipt = Service(service.root, writer=fake.write).apply(preview["plan_id"])
     assert receipt["status"] == "applied" and receipt["revision"] == proposal["expected_revision"] + 1
     stored = json.loads(service.store_path.read_text())["profiles"]["default"]
     assert stored["models"] == proposal["models"]
     assert stored["native_fallback"] == scopes()["native_fallback"]
-    assert stored["routing"]["fallback"] == scopes()["routing_fallback"]
     assert stored["delegation_fallback"] == scopes()["delegation_fallback"]
     assert fake.values["default"]["model.default"] == "new-primary"
     assert fake.values["default"]["fallback_providers"] == scopes()["native_fallback"]["chain"]
@@ -99,17 +97,14 @@ def test_unchanged_fallbacks_are_not_adopted_by_general_save(tmp_path, monkeypat
     assert not any("fallback" in key for _, key, _ in fake.calls)
 
 
-@pytest.mark.parametrize("key,scope", [("native_fallback", "native"), ("routing_fallback", "routing")])
+@pytest.mark.parametrize("key,scope", [("native_fallback", "native")])
 def test_combined_validation_uses_new_primary_not_old_model(tmp_path, monkeypatch, key, scope):
     service, fake, _ = setup(tmp_path, monkeypatch)
     proposal = body(service)
     proposal["model_targets"] = ["default"]
     proposal["models"]["main"] = route("xiaomi", "collision")
     value = scopes()[key]
-    if scope == "native":
-        value["chain"] = [{"provider": "xiaomi", "model": "collision"}]
-    else:
-        value["heavy"] = route("xiaomi", "collision")
+    value["chain"] = [{"provider": "xiaomi", "model": "collision"}]
     proposal["fallback_updates"] = [{"profile": "default", key: value}]
     proposal["fallback_confirmations"] = [confirmation(scope)]
     with pytest.raises(ValueError, match="differ"):
@@ -211,47 +206,4 @@ def test_combined_apply_through_real_hermes_cli_in_isolated_home(tmp_path, monke
     final = service.status()["profiles"][0]
     assert final["fallbacks"]["native"]["drift"] is False
     assert final["fallbacks"]["delegation"]["drift"] is False
-    assert service.routing_config("default")["fallback"] == scopes()["routing_fallback"]
     assert final["models"] == proposal["models"]
-
-
-@pytest.mark.parametrize("kind", ["model", "custom", "other-scope"])
-def test_retained_routing_spare_conflicts_rejected_at_backend(tmp_path, monkeypatch, kind):
-    service, fake, _ = setup(tmp_path, monkeypatch)
-    fallback = scopes()["routing_fallback"]
-    service.apply(service.fallback_preview({
-        "expected_revision": service.status()["revision"],
-        "updates": [{"profile": "default", "routing_fallback": fallback}],
-        "confirmations": [confirmation("routing")],
-    })["plan_id"])
-    fake.calls.clear()
-    proposal = body(service)
-    if kind == "custom":
-        proposal["routing"]["heavy"] = {"follow": "custom", "custom": copy.deepcopy(fallback["heavy"])}
-    else:
-        proposal["model_targets"] = ["default"]
-        proposal["models"]["main"] = copy.deepcopy(fallback["heavy"])
-    if kind == "other-scope":
-        proposal["fallback_updates"] = [{"profile": "default", "delegation_fallback": scopes()["delegation_fallback"]}]
-        proposal["fallback_confirmations"] = [confirmation("delegation")]
-    before = service.store_path.read_bytes(), copy.deepcopy(fake.values)
-    with pytest.raises(ValueError, match="final primary"):
-        service.preview(proposal)
-    assert fake.calls == [] and before == (service.store_path.read_bytes(), fake.values)
-
-
-def test_retained_routing_spare_and_approval_preserved_on_nonconflicting_model_save(tmp_path, monkeypatch):
-    service, fake, _ = setup(tmp_path, monkeypatch)
-    service.apply(service.fallback_preview({
-        "expected_revision": service.status()["revision"],
-        "updates": [{"profile": "default", "routing_fallback": scopes()["routing_fallback"]}],
-        "confirmations": [confirmation("routing")],
-    })["plan_id"])
-    before = json.loads(service.store_path.read_text())["profiles"]["default"]
-    proposal = body(service)
-    proposal["model_targets"] = ["default"]
-    proposal["models"]["main"]["model"] = "new-nonconflicting-main"
-    assert service.apply(service.preview(proposal)["plan_id"])["status"] == "applied"
-    after = json.loads(service.store_path.read_text())["profiles"]["default"]
-    assert after["routing"]["fallback"] == before["routing"]["fallback"]
-    assert after["fallback_consent"] == before["fallback_consent"]

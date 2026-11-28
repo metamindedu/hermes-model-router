@@ -30,26 +30,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -130,26 +110,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -230,26 +190,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -367,26 +307,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -467,26 +387,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -567,26 +467,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -827,26 +707,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -932,26 +792,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1032,26 +872,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1249,26 +1069,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1354,26 +1154,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1454,26 +1234,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1614,26 +1374,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1719,26 +1459,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -1819,26 +1539,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2023,26 +1723,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2128,26 +1808,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2233,26 +1893,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2404,26 +2044,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2511,26 +2131,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",
@@ -2611,26 +2211,6 @@
             "supported": true
           },
           "auto_supported": true,
-          "policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
-          "auto_policy": {
-            "heavy": {
-              "mode": "off",
-              "chain": []
-            },
-            "light": {
-              "mode": "off",
-              "chain": []
-            }
-          },
           "slot_policy": {
             "design": {
               "mode": "off",

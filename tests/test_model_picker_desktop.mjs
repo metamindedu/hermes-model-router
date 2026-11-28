@@ -17,21 +17,21 @@ const models = {
   compression: route('openai-codex', 'gpt-6-luna-900k', 'medium'),
   title: route('openai-codex', 'gpt-6-luna', 'none')
 }
-const routing = { enabled: true, heavy: { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') }, light: { follow: 'delegation', custom: null },
-  fallback: { enabled: false, heavy: null, light: null } }
+const routing = { enabled: true, slots: {} }
 const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
-const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex', 'advise'].includes(id) ? 'heavy' : 'light']))
+// Three slots have a model of their own (and so a picker); the others follow the main model.
+const ownModelSlots = ['design', 'verify-complex', 'advise']
 const offSlots = () => Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }]))
-const declarations = () => Object.fromEntries(slotIds.map(id => [id, slotTiers[id] === 'heavy'
-  ? { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') } : { follow: 'delegation', custom: null }]))
+const declarations = () => Object.fromEntries(slotIds.map(id => [id, ownModelSlots.includes(id)
+  ? { follow: 'custom', custom: route('operator', 'independent-slot-model', 'high') } : { follow: 'main', custom: null }]))
 const fixture = () => ({ revision: 7, current_profile: 'claire', recent_apply: null,
   readiness_context: { schema: 1, base_identity: 'd'.repeat(64), source_profile: 'claire', release: null },
-  slot_capabilities: { schema: 1, slots: slotIds, tiers: slotTiers, purposes: {}, follows: ['main', 'delegation', 'custom'], blocking_profiles: [] },
+  slot_capabilities: { schema: 1, slots: slotIds, purposes: {}, follows: ['main', 'custom'], blocking_profiles: [] },
   profiles: ['default', 'claire', 'other'].map(name => ({ name, models: structuredClone(models), actual_models: structuredClone(models),
     routing: { ...structuredClone(routing), enabled: name === 'claire' }, drift: [],
     slots: { schema: 1, capable: true, stored: [], declarations: declarations() },
     native_delegation: { schema: 1, supported: true, editable: true, backend: 'model-router', digest: 'a'.repeat(64),
-      policy: { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } }, profile_routes: { profiles: [], default: null },
+      profile_routes: { profiles: [], default: null },
       slot_policy: offSlots(), auto_slot_policy: offSlots(), policy_schema: 0, auto_policy_schema: 0, slot_policy_supported: true,
       role_intro_inheritance: { schema: 1, supported: true, code_identity: 'e'.repeat(64), activation: 'new_session_or_supported_rebuild' }, warnings: [] },
     role_intro: { schema: 1, state: 'available', default_description: `Role of ${name}`, default_source: 'profile_metadata', description_auto: false, digest: 'f'.repeat(64) } })) })
@@ -317,7 +317,7 @@ test('a catalog choice fills the draft only and is saved through the existing pr
   assert.match(text(h.picker('model-main-picker').trigger), /deepseek-flash/)
   assert.equal(h.byId('model-compression-model').props.value, models.compression.model, 'other roles are untouched')
   assert.throws(() => h.byId('model-delegation-model'), 'the delegation model is not edited on this page')
-  h.picker('slot-design-picker').menu.props.controller.setOptions({ effort: 'max' }, { isActive: true, provider: 'operator', model: 'independent-heavy' })
+  h.picker('slot-design-picker').menu.props.controller.setOptions({ effort: 'max' }, { isActive: true, provider: 'operator', model: 'independent-slot-model' })
   h.render()
   assert.equal(h.selectValue('slot-design-reasoning'), 'max')
   h.select('model-title-reasoning', 'low')
@@ -329,9 +329,9 @@ test('a catalog choice fills the draft only and is saved through the existing pr
   assert.deepEqual(payload.models.main, route('deepseek', 'deepseek-flash', 'medium'))
   assert.deepEqual(payload.models.title, route('openai-codex', 'gpt-6-luna', 'low'))
   assert.equal(Object.hasOwn(payload.models, 'delegation'), false, 'the delegation model is never sent')
-  assert.deepEqual(payload.routing.slots.design.custom, route('operator', 'independent-heavy', 'max'), 'the slot level chosen in the menu is saved with it')
+  assert.deepEqual(payload.routing.slots.design.custom, route('operator', 'independent-slot-model', 'max'), 'the slot level chosen in the menu is saved with it')
   assert.deepEqual(payload.routing.slots['verify-complex'], declarations()['verify-complex'])
-  assert.deepEqual(payload.routing.heavy, routing.heavy, 'the tier pair is sent back as loaded')
+  assert.deepEqual(Object.keys(payload.routing).sort(), ['enabled', 'slots'])
 })
 
 test('the menu opens only while enabled and closes through the host close context', () => {

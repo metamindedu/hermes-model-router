@@ -23,7 +23,6 @@ CHECKER = {'follow': 'custom', 'custom': route('operator', 'checker', 'low')}
 def store(tmp_path, monkeypatch):
     root, cli = setup_home(tmp_path, monkeypatch)
     monkeypatch.setattr(Service, '_timeout_enforcement_available', lambda self, profile: True)
-    monkeypatch.setattr(Service, '_timeout_role_enforcement_available', lambda self, profile: True)
     service = Service(root=root, writer=cli.writer)
     service.initialize(['default', 'p1', 'p2'])
     return service, cli
@@ -87,7 +86,7 @@ def test_a_sibling_slot_changed_elsewhere_does_not_block_and_is_kept(tmp_path, m
     stored = json.loads(service.store_path.read_text(encoding='utf-8'))['profiles']
     assert stored['p2']['routing']['slots'] == {'design': DESIGN, **elsewhere}
     assert stored['p1']['routing']['slots'] == {'design': DESIGN}
-    assert 'slots' not in stored['default']['routing'], 'an untargeted profile stays absent'
+    assert stored['default']['routing']['slots'] == {}, 'an untargeted profile keeps its own (empty) slots'
 
 
 def test_a_submitted_slot_changed_elsewhere_refuses_with_a_structured_conflict(tmp_path, monkeypatch):
@@ -119,65 +118,30 @@ def test_a_partial_routing_expectation_must_cover_every_written_slot(tmp_path, m
         item['routing']['slots'].pop('verify-simple')
     with pytest.raises(ValueError, match='expected must cover routing.slots of p1'):
         service.preview(body)
-    # Heavy/Light in a narrowed expectation are not a partial shape: refused as malformed.
+    # An unknown key in a narrowed expectation is refused as malformed.
     body = partial_slot_body(service, {'design': DESIGN})
-    body['expected'][0]['routing']['heavy'] = None
+    body['expected'][0]['routing']['extra'] = None
     with pytest.raises(ValueError, match='malformed'):
         service.preview(body)
 
 
-def test_heavy_light_are_optional_only_with_the_marker(tmp_path, monkeypatch):
+def test_a_partial_routing_body_has_only_enabled_and_slots(tmp_path, monkeypatch):
     service, _ = store(tmp_path, monkeypatch)
-    body = partial_slot_body(service, {'design': DESIGN})
-    legacy = copy.deepcopy(body)
+    for extra in ({'heavy': DESIGN}, {'fallback': {'enabled': False, 'heavy': None, 'light': None}}):
+        body = partial_slot_body(service, {'design': DESIGN})
+        body['routing'].update(extra)
+        with pytest.raises(ValueError, match='routing must define enabled'):
+            service.preview(body)
+    # Without the marker a routing body is a full one: every slot it names replaces the stored map.
+    legacy = partial_slot_body(service, {'design': DESIGN})
     legacy.pop('partial_save_schema')
+    with pytest.raises(ValueError, match='malformed'):
+        service.preview(copy.deepcopy(legacy))  # a narrowed expectation with null slots is partial-only
     for item in legacy['expected']:
         item['routing'] = mapping(find_profile(service.status(), item['profile']))['routing']
-    with pytest.raises(ValueError, match='routing must define enabled, heavy, light, and fallback'):
-        service.preview(legacy)
-    # A sent Heavy needs the full routing expectation of every routing target (a narrowed one never
-    # compares Heavy/Light); with it, Heavy is written to every routing target.
-    heavy = {'follow': 'custom', 'custom': route('operator', 'heavy-model', 'high')}
-    body['routing']['heavy'] = heavy
-    with pytest.raises(ValueError, match='expected must cover routing.heavy and routing.light of p1'):
-        service.preview(copy.deepcopy(body))
-    full_expectations(service, body)
-    assert service.apply(service.preview(body)['plan_id'])['status'] == 'applied'
+    assert service.apply(service.preview(legacy)['plan_id'])['status'] == 'applied'
     stored = json.loads(service.store_path.read_text(encoding='utf-8'))['profiles']
-    assert stored['p1']['routing']['heavy'] == stored['p2']['routing']['heavy'] == heavy
-    assert stored['default']['routing']['heavy'] != heavy
-
-
-def full_expectations(service, body):
-    status = service.status()
-    for item in body['expected']:
-        item['routing'] = mapping(find_profile(status, item['profile']))['routing']
-
-
-def test_a_partial_heavy_write_never_overwrites_a_heavy_changed_elsewhere(tmp_path, monkeypatch):
-    # Review repro: the page froze a narrowed expectation, Heavy was hand-edited at the same revision.
-    service, _ = store(tmp_path, monkeypatch)
-    full_slot_save(service, 'p2', {'verify-simple': CHECKER})
-    body = partial_slot_body(service, {'design': DESIGN})
-    body['routing']['heavy'] = {'follow': 'custom', 'custom': route('operator', 'page-heavy', 'high')}
-    data = json.loads(service.store_path.read_text(encoding='utf-8'))
-    data['profiles']['p2']['routing']['heavy'] = {'follow': 'custom', 'custom': route('operator', 'hand-edited', 'high')}
-    service.store_path.write_text(json.dumps(data), encoding='utf-8')
-    before = service.store_path.read_bytes()
-    with pytest.raises(ValueError, match='expected must cover routing.heavy'):
-        service.preview(copy.deepcopy(body))
-    # With the full expectation frozen before the hand edit, the same write is a structured conflict.
-    status_before_edit = copy.deepcopy(body)
-    for item in status_before_edit['expected']:
-        row = mapping(find_profile(service.status(), item['profile']))['routing']
-        if item['profile'] == 'p2':
-            row['heavy'] = {'follow': 'main', 'custom': None}
-        item['routing'] = row
-    with pytest.raises(ExternalChange) as caught:
-        service.preview(status_before_edit)
-    assert (caught.value.profile, caught.value.field) == ('p2', 'routing')
-    assert service.store_path.read_bytes() == before
-    assert not list((service.store_path.parent / 'plans').glob('*.json'))
+    assert stored['p1']['routing']['slots'] == stored['p2']['routing']['slots'] == {'design': DESIGN}
 
 
 def test_an_empty_partial_slot_map_is_refused(tmp_path, monkeypatch):
@@ -195,26 +159,26 @@ def test_a_legacy_body_still_replaces_the_slot_map(tmp_path, monkeypatch):
     assert json.loads(service.store_path.read_text(encoding='utf-8'))['profiles']['p1']['routing']['slots'] == {'design': DESIGN}
 
 
-def test_a_partial_timeout_subset_merges_per_target_and_is_strict_without_the_marker(tmp_path, monkeypatch):
+def test_a_partial_timeout_patch_merges_per_target_and_is_strict_without_the_marker(tmp_path, monkeypatch):
     service, _ = store(tmp_path, monkeypatch)
-    for name, values in (('p1', (60, 1800, 7200)), ('p2', (30, 4000, 5000))):
-        write_timeouts(service._profile_home(name), dict(zip(('delegate_total_seconds', 'routed_light_total_seconds', 'routed_heavy_total_seconds'), values)),
-                       expected_digest='MISSING', expected_revision=0)
+    for name, values in (('p1', {'delegate_total_seconds': 60, 'slot_seconds': {'code-simple': 1800, 'verify-complex': 7200}}),
+                         ('p2', {'delegate_total_seconds': 30, 'slot_seconds': {'code-simple': 4000}})):
+        write_timeouts(service._profile_home(name), values, expected_digest='MISSING', expected_revision=0)
     status = service.status()
     row = find_profile(status, 'p1')
     body = {'expected_revision': status['revision'], 'profile': 'p1', 'save_scope': 'timeouts', 'models': copy.deepcopy(row['models']),
             'model_targets': [], 'routing': {'enabled': True}, 'routing_targets': [], 'routing_profiles': ['default', 'p1', 'p2'],
-            'timeout_updates': [{'profile': 'p1', 'expected_revision': 1, 'routed_heavy_total_seconds': 900},
-                                {'profile': 'p2', 'expected_revision': 1, 'routed_heavy_total_seconds': 900}]}
+            'timeout_updates': [{'profile': 'p1', 'expected_revision': 1, 'slot_seconds': {'verify-complex': 900}},
+                                {'profile': 'p2', 'expected_revision': 1, 'slot_seconds': {'verify-complex': 900}}]}
     legacy = copy.deepcopy(body)
     legacy['routing'] = copy.deepcopy(row['routing'])
     with pytest.raises(ValueError):
-        service.preview(legacy)  # a subset is not a valid earlier timeout update
+        service.preview(legacy)  # a patch is not a full timeout update
     body['partial_save_schema'] = 1
     assert service.apply(service.preview(body)['plan_id'])['status'] == 'applied'
-    assert read_timeouts(service._profile_home('p1'))['routed_light_total_seconds'] == 1800
-    assert read_timeouts(service._profile_home('p2'))['routed_light_total_seconds'] == 4000
-    assert read_timeouts(service._profile_home('p2'))['routed_heavy_total_seconds'] == 900
+    assert read_timeouts(service._profile_home('p1'))['slot_seconds'] == {'code-simple': 1800, 'verify-complex': 900}
+    assert read_timeouts(service._profile_home('p2'))['slot_seconds'] == {'code-simple': 4000, 'verify-complex': 900}
+    assert read_timeouts(service._profile_home('p2'))['delegate_total_seconds'] == 30
     # The per-target revision compare-and-set is unchanged.
     status = service.status()
     body.update(expected_revision=status['revision'], timeout_updates=[{'profile': 'p2', 'expected_revision': 1, 'delegate_total_seconds': 5}])
@@ -273,17 +237,6 @@ def test_slot_patch_cost_confirmation_matches_the_submitted_slots(fixture):
     missing = {'partial_save_schema': 1, 'expected_revision': 0, 'updates': [native_update(service, 'p1', slot_policy_patch={'design': SPARE})]}
     with pytest.raises(ValueError, match='update fields'):
         service.delegation_preview(missing)
-    assert calls == []
-
-
-def test_a_two_role_target_refuses_a_slot_patch(fixture):
-    service, calls, _ = fixture
-    seed(service, 'p1', ns.KEY_BACKEND, 'model-router')
-    seed(service, 'p1', ns.KEY_POLICY, ns.build_policy_block('p1', ns.default_policy(), False, backend='model-router'))
-    request = {'partial_save_schema': 1, 'expected_revision': 0,
-               'updates': [native_update(service, 'p1', slot_policy_patch={'design': SPARE}, allow_additional_cost=True)]}
-    with pytest.raises(ValueError, match='per role'):
-        service.delegation_preview(request)
     assert calls == []
 
 
@@ -374,12 +327,11 @@ def test_an_omitted_method_must_be_a_supported_stored_one(fixture, monkeypatch):
     assert calls == []
 
 
-@pytest.mark.parametrize('shape', ['slot_policy', 'policy'])
+@pytest.mark.parametrize('shape', ['slot_policy'])
 def test_a_full_policy_without_a_method_needs_a_slot_model_method(fixture, shape):
     service, calls, _ = fixture
     seed(service, 'p1', ns.KEY_BACKEND, 'model-router-profiles')
-    value = {**ns.default_slot_policy(), 'design': SPARE} if shape == 'slot_policy' else {
-        'heavy': SPARE, 'light': {'mode': 'off', 'chain': []}}
+    value = {**ns.default_slot_policy(), 'design': SPARE}
     request = {'partial_save_schema': 1, 'expected_revision': 0,
                'updates': [native_update(service, 'p1', **{shape: value}, allow_additional_cost=True)]}
     with pytest.raises(ValueError, match='slot-model delegation method'):

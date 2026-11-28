@@ -1,12 +1,10 @@
-"""Task slots: which model a routed purpose runs on.
+"""Task slots: which model a routed purpose runs on, and for how long.
 
 Pure declarations and resolution. No filesystem access, configuration writes
 or provider calls; callers prove profile inventory and readiness separately.
 
-A slot is what the operator assigns a model to. A purpose is what the agent
-sends. Tier survives only as the internal grouping for what is not per slot:
-the two routed runtime limits, the watchdog role, the runtime label and the
-meaning of a slot that has never been set.
+A slot is what the operator assigns a model and a runtime limit to. A purpose
+is what the agent sends; each purpose names exactly one slot.
 """
 from __future__ import annotations
 
@@ -17,15 +15,6 @@ from typing import Any, Callable, Iterable, Mapping
 
 # Order is user-visible (settings page) and part of the tool schema.
 BUILTIN_SLOTS = ("design", "code-complex", "code-simple", "verify-simple", "verify-complex", "computer-use", "advise")
-SLOT_TIERS = {
-    "design": "heavy",
-    "code-complex": "light",
-    "code-simple": "light",
-    "verify-simple": "light",
-    "verify-complex": "heavy",
-    "computer-use": "light",
-    "advise": "heavy",
-}
 # Existing purposes keep their order; new ones are appended so a running
 # session's cached tool schema only ever grows at the end.
 PURPOSE_SLOTS = {
@@ -38,21 +27,17 @@ PURPOSE_SLOTS = {
     "computer-use": "computer-use",
     "advise": "advise",
 }
-PURPOSE_ROLES = {purpose: SLOT_TIERS[slot] for purpose, slot in PURPOSE_SLOTS.items()}
-TIERS = ("heavy", "light")
-# The model role a tier follows when its own declaration is not custom.
-TIER_FOLLOWS = {"heavy": "main", "light": "delegation"}
-FOLLOWS = ("main", "delegation", "custom")
-SLOTS_SUPPORTED = True
+FOLLOWS = ("main", "custom")
+# A slot that has never been set runs on the profile's main model.
+DEFAULT_FOLLOW = "main"
+# A slot without its own runtime limit stops after two hours (0 means no limit).
+DEFAULT_SLOT_SECONDS = 7200.0
 # The advisor answers one question for the agent that asked it. Its purpose is
 # dispatched only by the ask_advisor tool, whose child is read-only.
 ADVISE_SLOT = "advise"
 ADVISOR_PURPOSES = frozenset({"advise"})
-# Slot sets an earlier release persisted. A stored per-slot block with one of
-# these key sets is complete: the slots added since then are simply off there.
-LEGACY_SLOT_SETS = (frozenset(BUILTIN_SLOTS[:6]),)
-# Operator-added slots: defined once for every profile (label, one-line scope description, tier),
-# each profile picks its model like a built-in slot. The slot id is also the purpose the agent sends.
+# Operator-added slots: defined once for every profile (label, one-line scope description); each
+# profile picks its model and runtime limit like a built-in slot. The slot id is also the purpose.
 CUSTOM_PREFIX = "custom:"
 CUSTOM_SLOT_LIMIT = 4
 CUSTOM_LABEL_LIMIT = 24
@@ -80,8 +65,8 @@ def validate_custom_slots(value: Any) -> list[dict[str, str]]:
         raise ValueError(f"custom_slots must be a list of at most {CUSTOM_SLOT_LIMIT} slots")
     result, ids, labels = [], set(), set()
     for item in value:
-        if not isinstance(item, dict) or set(item) != {"id", "label", "description", "tier"}:
-            raise ValueError("each custom slot defines id, label, description and tier")
+        if not isinstance(item, dict) or set(item) != {"id", "label", "description"}:
+            raise ValueError("each custom slot defines id, label and description")
         slot = item["id"]
         if not is_custom_slot(slot) or slot in ids:
             raise ValueError("custom slot id must be custom: plus 2-32 lowercase letters, digits or hyphens, used once")
@@ -89,20 +74,14 @@ def validate_custom_slots(value: Any) -> list[dict[str, str]]:
         if label.casefold() in labels:
             raise ValueError("custom slot labels must differ")
         description = _custom_text(item["description"], CUSTOM_DESCRIPTION_LIMIT, "description")
-        if item["tier"] not in TIERS:
-            raise ValueError("custom slot tier must be heavy or light")
         ids.add(slot)
         labels.add(label.casefold())
-        result.append({"id": slot, "label": label, "description": description, "tier": item["tier"]})
+        result.append({"id": slot, "label": label, "description": description})
     return result
 
 
-def slot_tiers(definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, str]:
-    """Every slot's tier: the built-ins, then the defined custom slots in order."""
-    return {**SLOT_TIERS, **{item["id"]: item["tier"] for item in definitions}}
-
-
 def slot_ids(definitions: Iterable[Mapping[str, Any]] = ()) -> tuple[str, ...]:
+    """Every slot: the built-ins, then the defined custom slots in order."""
     return (*BUILTIN_SLOTS, *(item["id"] for item in definitions))
 
 
@@ -111,23 +90,11 @@ def purpose_slots(definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, st
     return {**PURPOSE_SLOTS, **{item["id"]: item["id"] for item in definitions}}
 
 
-def purpose_roles(definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, str]:
-    tiers = slot_tiers(definitions)
-    return {purpose: tiers[slot] for purpose, slot in purpose_slots(definitions).items()}
-
-
-def complete_slot_keys(mapping: Any, filler: Callable[[str], Any]) -> dict[str, Any]:
-    """Every built-in slot of a stored per-slot mapping, in slot order.
-
-    A mapping saved by an earlier release lacks the slots added since; those are
-    filled with ``filler(slot)``. Any other key set is refused, never guessed.
-    """
-    if not isinstance(mapping, dict):
-        raise ValueError("per-slot mapping must be an object")
-    keys = frozenset(mapping)
-    if keys != frozenset(BUILTIN_SLOTS) and keys not in LEGACY_SLOT_SETS:
+def require_builtin_keys(mapping: Any) -> dict[str, Any]:
+    """A per-slot mapping that names exactly every built-in slot, in slot order."""
+    if not isinstance(mapping, dict) or frozenset(mapping) != frozenset(BUILTIN_SLOTS):
         raise ValueError("per-slot mapping must name every task slot")
-    return {slot: mapping[slot] if slot in mapping else filler(slot) for slot in BUILTIN_SLOTS}
+    return {slot: mapping[slot] for slot in BUILTIN_SLOTS}
 
 
 def validate_slots(value: Any, route: Callable[[Any], dict[str, str]],
@@ -158,7 +125,7 @@ def validate_slots(value: Any, route: Callable[[Any], dict[str, str]],
             raise ValueError(f"routing.slots.{slot} must define follow and custom")
         follow = item["follow"]
         if not isinstance(follow, str) or follow not in FOLLOWS:
-            raise ValueError(f"routing.slots.{slot}.follow must be main, delegation or custom")
+            raise ValueError(f"routing.slots.{slot}.follow must be main or custom")
         custom = None if item["custom"] is None else route(item["custom"])
         if follow == "custom" and custom is None:
             raise ValueError(f"routing.slots.{slot}.custom is required when following custom")
@@ -168,21 +135,14 @@ def validate_slots(value: Any, route: Callable[[Any], dict[str, str]],
     return result
 
 
-def tier_route(routing: Mapping[str, Any], models: Mapping[str, Any], tier: str) -> Any:
-    """The tier's own declaration, exactly as resolved before slots existed."""
-    declaration = routing[tier]
-    return models[TIER_FOLLOWS[tier]] if declaration["follow"] == TIER_FOLLOWS[tier] else declaration["custom"]
-
-
 def slot_route(routing: Mapping[str, Any], models: Mapping[str, Any], slot: str,
-               tiers: Mapping[str, str] | None = None) -> Any:
-    """Resolve one slot to its route declaration (not validated here). ``tiers`` adds custom slots."""
-    tiers = SLOT_TIERS if tiers is None else tiers
-    if slot not in tiers:
+               known: Iterable[str] | None = None) -> Any:
+    """Resolve one slot to its route declaration (not validated here). ``known`` adds custom slots."""
+    if slot not in (BUILTIN_SLOTS if known is None else tuple(known)):
         raise ValueError("unknown slot")
     declaration = (routing.get("slots") or {}).get(slot)
     if declaration is None:
-        return tier_route(routing, models, tiers[slot])
+        return models[DEFAULT_FOLLOW]
     if declaration["follow"] == "custom":
         return declaration["custom"]
     return models[declaration["follow"]]
@@ -190,28 +150,16 @@ def slot_route(routing: Mapping[str, Any], models: Mapping[str, Any], slot: str,
 
 def resolved_slots(routing: Mapping[str, Any], models: Mapping[str, Any],
                    definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
-    tiers = slot_tiers(definitions)
-    return {slot: copy.deepcopy(slot_route(routing, models, slot, tiers)) for slot in tiers}
+    known = slot_ids(definitions)
+    return {slot: copy.deepcopy(slot_route(routing, models, slot, known)) for slot in known}
 
 
 def effective_declarations(routing: Mapping[str, Any],
                            definitions: Iterable[Mapping[str, Any]] = ()) -> dict[str, dict[str, Any]]:
-    """Every built-in slot as an explicit declaration, for display and editing.
+    """Every slot as an explicit declaration, for display and editing.
 
-    A never-set slot is shown as what it currently resolves through: its tier's
-    live link or the tier's custom route. Nothing is persisted by this view.
+    A never-set slot is shown as following the main model. Nothing is persisted by this view.
     """
     stored = routing.get("slots") or {}
-    tiers = slot_tiers(definitions)
-    result = {}
-    for slot in tiers:
-        if slot in stored:
-            result[slot] = copy.deepcopy(stored[slot])
-            continue
-        tier = tiers[slot]
-        declaration = routing[tier]
-        if declaration["follow"] == TIER_FOLLOWS[tier]:
-            result[slot] = {"follow": TIER_FOLLOWS[tier], "custom": None}
-        else:
-            result[slot] = {"follow": "custom", "custom": copy.deepcopy(declaration["custom"])}
-    return result
+    return {slot: copy.deepcopy(stored[slot]) if slot in stored else {"follow": DEFAULT_FOLLOW, "custom": None}
+            for slot in slot_ids(definitions)}

@@ -25,29 +25,28 @@ const models = {
   title: route('', '', '')
 }
 const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
-const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex', 'advise'].includes(id) ? 'heavy' : 'light']))
 // Invented operator-added slots (one with a long label/description for layout).
 const customSlots = [
-  { id: 'custom:3d-graphics', label: '3D·그래픽', description: 'Blender Python·Three.js/WebGL·셰이더 코드와 렌더 결과 검수', tier: 'heavy' },
-  { id: 'custom:ko-writing-long-identifier', label: '한국어 글쓰기·윤문 전문 슬롯 이름', description: '자연스러운 한국어 원고 작성과 윤문, 번역투 제거, 지정한 문체 적용까지 맡기는 아주 긴 설명 문장으로 줄바꿈을 확인합니다', tier: 'light' }
+  { id: 'custom:3d-graphics', label: '3D·그래픽', description: 'Blender Python·Three.js/WebGL·셰이더 코드와 렌더 결과 검수' },
+  { id: 'custom:ko-writing-long-identifier', label: '한국어 글쓰기·윤문 전문 슬롯 이름', description: '자연스러운 한국어 원고 작성과 윤문, 번역투 제거, 지정한 문체 적용까지 맡기는 아주 긴 설명 문장으로 줄바꿈을 확인합니다' }
 ]
 const declarations = Object.fromEntries([...slotIds, ...customSlots.map(item => item.id)].map(id => [id, id === 'design' || id === 'custom:3d-graphics'
   ? { follow: 'custom', custom: route('sample-lab', 'sample-pro-reasoner', 'high') }
-  : { follow: (slotTiers[id] || customSlots.find(item => item.id === id)?.tier) === 'heavy' ? 'main' : 'delegation', custom: null }]))
+  : { follow: 'main', custom: null }]))
 const slotPolicy = Object.fromEntries(slotIds.map(id => [id, id === 'code-complex'
   ? { mode: 'custom', chain: [{ provider: 'sample-lab', model: 'sample-flash' }] }
   : { mode: 'off', chain: [] }]))
 const profile = name => ({ name, models: structuredClone(models), actual_models: structuredClone(models),
   slots: { schema: 1, capable: true, stored: ['design'], declarations: structuredClone(declarations) },
-  routing: { enabled: name !== 'writer', heavy: { follow: 'custom', custom: route('sample-lab', 'sample-pro-reasoner', 'legacy-level') }, light: { follow: 'delegation', custom: null }, fallback: { enabled: false, heavy: null, light: null } },
+  routing: { enabled: name !== 'writer', slots: { design: structuredClone(declarations.design) } },
   drift: [],
   native_delegation: { schema: 1, supported: true, editable: true, backend: 'model-router', digest: 'a'.repeat(64),
     slot_policy_supported: true, policy_schema: 2, auto_policy_schema: 0, slot_policy: structuredClone(slotPolicy), auto_slot_policy: Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }])),
-    auto_supported: true, policy: { heavy: { mode: 'custom', chain: [{ provider: 'sample-lab', model: 'sample-pro-reasoner' }] }, light: { mode: 'off', chain: [] } },
+    auto_supported: true,
     profile_routes: { profiles: [], default: null }, role_intro_inheritance: { schema: 1, supported: true, code_identity: 'e'.repeat(64), activation: 'new_session_or_supported_rebuild' }, warnings: [] },
   role_intro: { schema: 1, state: 'available', default_description: 'Invented role text', default_source: 'profile_metadata', description_auto: false, digest: 'f'.repeat(64) } })
 const status = { revision: 7, current_profile: 'default', recent_apply: null,
-  slot_capabilities: { schema: 1, slots: slotIds, tiers: slotTiers, purposes: { plan: 'design', implementation: 'code-complex', mechanical: 'code-simple', 'preliminary-review': 'verify-simple', 'semantic-final': 'verify-complex', 'independent-review': 'verify-complex', 'computer-use': 'computer-use', advise: 'advise' }, follows: ['main', 'delegation', 'custom'], blocking_profiles: [],
+  slot_capabilities: { schema: 1, slots: slotIds, purposes: { plan: 'design', implementation: 'code-complex', mechanical: 'code-simple', 'preliminary-review': 'verify-simple', 'semantic-final': 'verify-complex', 'independent-review': 'verify-complex', 'computer-use': 'computer-use', advise: 'advise' }, follows: ['main', 'custom'], blocking_profiles: [],
     custom_slots_supported: true, custom_slot_limit: 4, custom_slots: structuredClone(customSlots) },
   readiness_context: { schema: 1, base_identity: 'd'.repeat(64), source_profile: 'default', release: null },
   profiles: ['default', 'writer', LONG].map(profile) }

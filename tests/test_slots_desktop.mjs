@@ -6,11 +6,11 @@ const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'u
 const strip = code => code.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '')
   .replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '')
   .replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
-const api = new Function('DesktopSDK', `${strip(source)}\nreturn { copyProfileDraft, slotFollowDeclaration, slotRoutingForSave, copyNativeDelegationDraft, readPagedStatus, STATUS_CHANGED_MESSAGE, STATUS_PAGE_LIMIT, TASK_SLOTS }`)({})
+const api = new Function('DesktopSDK', `${strip(source)}\nreturn { copyProfileDraft, slotFollowDeclaration, slotRoutingForSave, copyNativeDelegationDraft, readPagedStatus, STATUS_CHANGED_MESSAGE, STATUS_PAGE_LIMIT, TASK_SLOTS, SLOT_FOLLOWS, SLOT_FOLLOW_OPTIONS }`)({})
 const ids = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
 const model = { provider: 'fixture', model: 'example', reasoning: 'high' }
 const slots = Object.fromEntries(ids.map(id => [id, { follow: 'main', custom: null }]))
-const routing = { enabled: true, heavy: { follow: 'main', custom: null }, light: { follow: 'delegation', custom: null }, fallback: { enabled: false, heavy: null, light: null } }
+const routing = { enabled: true, slots: { design: { follow: 'custom', custom: model } } }
 
 test('a spare model ID may end in one bracketed variant tag, nothing looser', () => {
   const start = source.indexOf('const nativePolicyEntryError')
@@ -84,41 +84,56 @@ test('slot draft seeding clones all declarations independently of loaded status'
   const row = { models: { main: model }, routing, slots: { declarations: slots } }
   const draft = api.copyProfileDraft(row)
   assert.deepEqual(draft.slots, slots)
-  draft.slots.design.follow = 'delegation'
+  assert.deepEqual(draft.routing, routing)
+  draft.slots.design.follow = 'custom'
+  draft.routing.slots.design.custom.model = 'changed'
   assert.equal(row.slots.declarations.design.follow, 'main')
+  assert.equal(row.routing.slots.design.custom.model, 'example')
 })
 
-test('slot basis switching prefills followed model and clears custom when switching away', () => {
+test('a slot follows the main model or a model set here, nothing else', () => {
+  assert.deepEqual(api.SLOT_FOLLOWS, ['main', 'custom'])
+  assert.deepEqual(api.SLOT_FOLLOW_OPTIONS.map(option => option.value), ['main', 'custom'])
   const custom = api.slotFollowDeclaration({ follow: 'main', custom: null }, 'custom', { main: model })
   assert.deepEqual(custom, { follow: 'custom', custom: model })
   assert.notEqual(custom.custom, model)
-  assert.deepEqual(api.slotFollowDeclaration(custom, 'delegation', { main: model }), { follow: 'delegation', custom: null })
+  assert.deepEqual(api.slotFollowDeclaration(custom, 'main', { main: model }), { follow: 'main', custom: null })
+  for (const follow of ['delegation', 'other', '']) assert.throws(() => api.slotFollowDeclaration(custom, follow, { main: model }), /invalid slot basis/)
 })
 
-test('slot routing projection preserves legacy routes and omits slots when blocked', () => {
-  const draft = { routing: { ...routing, slots: { design: slots.design } }, slots }
-  const enabled = api.slotRoutingForSave(draft, true)
-  assert.deepEqual(enabled.slots, slots)
-  assert.deepEqual(enabled.heavy, routing.heavy)
-  assert.deepEqual(enabled.light, routing.light)
-  assert.equal(Object.hasOwn(api.slotRoutingForSave(draft, false), 'slots'), false)
+test('the routing a save sends is {enabled, slots} only', () => {
+  const draft = { routing, slots }
+  // full form: the drafted declarations while editable, otherwise the stored slots as loaded
+  assert.deepEqual(api.slotRoutingForSave(draft, true), { enabled: true, slots })
+  assert.deepEqual(api.slotRoutingForSave(draft, false), { enabled: true, slots: routing.slots })
+  assert.deepEqual(api.slotRoutingForSave({ routing: { enabled: false } }, false), { enabled: false, slots: {} })
+  // partial form: only the named slots, none leaves the key out
+  assert.deepEqual(api.slotRoutingForSave(draft, true, ['code-simple']), { enabled: true, slots: { 'code-simple': slots['code-simple'] } })
+  assert.deepEqual(api.slotRoutingForSave(draft, true, []), { enabled: true })
+  assert.deepEqual(api.slotRoutingForSave(draft, false, ['design']), { enabled: true })
+  const sent = api.slotRoutingForSave(draft, true)
+  sent.slots.design.follow = 'custom'
+  assert.equal(slots.design.follow, 'main', 'a copy, never the draft itself')
 })
 
-test('native slot policy drafts are cloned separately from legacy policies', () => {
+test('native spare-model drafts are per slot only', () => {
   const policy = Object.fromEntries(ids.map(id => [id, { mode: 'off', chain: [] }]))
-  const dto = { schema: 1, supported: true, digest: 'fake', backend: 'default', policy: { heavy: {}, light: {} }, profile_routes: {}, slot_policy: policy, auto_slot_policy: policy }
+  const dto = { schema: 1, supported: true, digest: 'fake', backend: 'model-router', profile_routes: { profiles: [], default: null }, slot_policy: policy, auto_slot_policy: policy, policy_schema: 2 }
   const draft = api.copyNativeDelegationDraft(dto)
+  assert.deepEqual(Object.keys(draft).sort(), ['allowProfileAccess', 'autoSlotPolicy', 'backend', 'descriptionEdits', 'expectedDigest', 'profile_routes', 'slotPolicy'])
   draft.slotPolicy.design.mode = 'custom'
   assert.equal(dto.slot_policy.design.mode, 'off')
   assert.equal(draft.autoSlotPolicy.design.mode, 'off')
 })
 
-test('the advisor slot is the last, Heavy, and labelled with its own fixed limit', () => {
+test('the advisor slot is the last and labelled with its own fixed limit; a slot has only its own fields', () => {
   assert.deepEqual(api.TASK_SLOTS.map(slot => slot.id), ids)
+  for (const slot of api.TASK_SLOTS) assert.deepEqual(Object.keys(slot).filter(key => !['id', 'label', 'description', 'limitLabel', 'fixedLimit'].includes(key)), [], slot.id)
   const advise = api.TASK_SLOTS.at(-1)
-  assert.equal(advise.tier, 'heavy')
   assert.equal(advise.limitLabel, '5분 고정 제한')
+  assert.equal(advise.fixedLimit, true)
   assert.match(advise.description, /ask_advisor/)
-  assert.ok(api.TASK_SLOTS.slice(0, -1).every(slot => slot.limitLabel === undefined))
-  assert.match(source, /children: slot\.limitLabel \|\| \(slot\.tier === 'heavy' \? '긴 작업 제한' : '짧은 작업 제한'\)/)
+  assert.ok(api.TASK_SLOTS.slice(0, -1).every(slot => slot.limitLabel === undefined && slot.fixedLimit === undefined))
+  // A card's badge is the slot's own saved limit (or the 2-hour default), from the time-limit section.
+  assert.match(source, /const limit = slot\.limitLabel \|\| slots\.limitText\?\.\(slot\.id\) \|\| ''/)
 })

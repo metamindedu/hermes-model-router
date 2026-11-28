@@ -118,7 +118,7 @@ def test_actual_native_producers_settle_exact_row_without_retaining_content(
     assert rows[0]['delegation_id'] == 'deleg-native'
     assert rows[0]['child_session_id'] == 'child-native-stored'
     assert rows[0]['duration_seconds'] == 2.5
-    assert rows[0]['observed']['evidence'] == 'unknown', 'leaf is not a Heavy identity'
+    assert rows[0]['observed']['evidence'] == 'unknown', 'leaf is not a model identity'
     assert 'PRIVATE_' not in json.dumps(rows)
     assert not list(home.iterdir()), 'Passive observers must not write profile files'
 

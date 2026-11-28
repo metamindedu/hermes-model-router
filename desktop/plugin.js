@@ -154,24 +154,25 @@ export function scopeFingerprint(connectionId, profile, gateway) {
   return JSON.stringify([connectionId || 'local', profile || 'default', gateway || 'idle'])
 }
 
-const TIMEOUT_MINUTE_KEYS = ['delegate_total_minutes', 'routed_light_total_minutes', 'routed_heavy_total_minutes']
+// Runtime limits (status `timeouts`, schema 3): the ordinary delegation limit and one limit per task
+// slot. `slot_seconds` holds only the slots that have their own limit; every other slot runs with
+// `default_slot_seconds` (2 hours). 0 means no limit. The page edits minutes; a blank slot field is
+// "no own limit", so the default applies.
+export const TIMEOUT_SCHEMA = 3
 
 function validSeconds(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
 }
+const plainObject = value => Boolean(value && typeof value === 'object' && !Array.isArray(value))
+// A built-in slot or a well-formed custom slot id (a stored limit of a custom slot that is no longer
+// defined is still a valid stored value; the page simply does not edit or copy it).
+const timeoutSlotKey = id => typeof id === 'string' && (TASK_SLOTS.some(slot => slot.id === id) || CUSTOM_SLOT_ID.test(id))
 
 function validTimeoutSettingsShape(timeouts) {
-  if (!timeouts || typeof timeouts !== 'object' || Array.isArray(timeouts) ||
-    !Number.isInteger(timeouts.revision) || timeouts.revision < 0 || typeof timeouts.editable !== 'boolean') return false
-  if (timeouts.schema === 1) {
-    return validSeconds(timeouts.delegate_total_seconds) && validSeconds(timeouts.routed_total_seconds) &&
-      !Object.hasOwn(timeouts, 'routed_light_total_seconds') && !Object.hasOwn(timeouts, 'routed_heavy_total_seconds')
-  }
-  if (timeouts.schema === 2) {
-    return validSeconds(timeouts.delegate_total_seconds) && validSeconds(timeouts.routed_light_total_seconds) &&
-      validSeconds(timeouts.routed_heavy_total_seconds) && !Object.hasOwn(timeouts, 'routed_total_seconds')
-  }
-  return false
+  return Boolean(plainObject(timeouts) && timeouts.schema === TIMEOUT_SCHEMA &&
+    Number.isInteger(timeouts.revision) && timeouts.revision >= 0 && typeof timeouts.editable === 'boolean' &&
+    validSeconds(timeouts.delegate_total_seconds) && validSeconds(timeouts.default_slot_seconds) &&
+    plainObject(timeouts.slot_seconds) && Object.entries(timeouts.slot_seconds).every(([id, seconds]) => timeoutSlotKey(id) && validSeconds(seconds)))
 }
 
 export function validTimeoutsDto(timeouts) {
@@ -179,35 +180,15 @@ export function validTimeoutsDto(timeouts) {
     timeouts.warnings.every(warning => typeof warning === 'string'))
 }
 
-export function splitRoutingSupported(timeouts) {
-  return Boolean(validTimeoutsDto(timeouts) && timeouts.split_routing_supported === true)
-}
-
-export function projectTimeoutSeconds(timeouts) {
-  if (!validTimeoutSettingsShape(timeouts)) return null
-  if (timeouts.schema === 1) return {
-    delegate_total_seconds: timeouts.delegate_total_seconds,
-    routed_light_total_seconds: timeouts.routed_total_seconds,
-    routed_heavy_total_seconds: timeouts.routed_total_seconds
-  }
-  return {
-    delegate_total_seconds: timeouts.delegate_total_seconds,
-    routed_light_total_seconds: timeouts.routed_light_total_seconds,
-    routed_heavy_total_seconds: timeouts.routed_heavy_total_seconds
-  }
-}
-
 function copyTimeoutSettingsShape(timeouts) {
   if (!validTimeoutSettingsShape(timeouts)) return null
   return {
     schema: timeouts.schema,
     revision: timeouts.revision,
-    delegate_total_seconds: timeouts.delegate_total_seconds,
-    ...(timeouts.schema === 1
-      ? { routed_total_seconds: timeouts.routed_total_seconds }
-      : { routed_light_total_seconds: timeouts.routed_light_total_seconds, routed_heavy_total_seconds: timeouts.routed_heavy_total_seconds }),
     editable: timeouts.editable,
-    split_routing_supported: timeouts.split_routing_supported === true
+    delegate_total_seconds: timeouts.delegate_total_seconds,
+    slot_seconds: { ...timeouts.slot_seconds },
+    default_slot_seconds: timeouts.default_slot_seconds
   }
 }
 
@@ -217,43 +198,41 @@ function copyTimeoutSettings(timeouts) {
 }
 
 export function copyTimeoutBaseline(timeouts) {
-  const settings = copyTimeoutSettings(timeouts)
-  const projected = projectTimeoutSeconds(settings)
-  return settings && projected ? {
-    schema: settings.schema,
-    revision: settings.revision,
-    editable: settings.editable,
-    split_routing_supported: settings.split_routing_supported,
-    delegate_total_seconds: settings.delegate_total_seconds,
-    ...(settings.schema === 1 ? { routed_total_seconds: settings.routed_total_seconds } : {}),
-    routed_light_total_seconds: projected.routed_light_total_seconds,
-    routed_heavy_total_seconds: projected.routed_heavy_total_seconds
-  } : null
+  return validTimeoutsDto(timeouts) ? copyTimeoutSettingsShape(timeouts) : null
 }
 
 function copyTimeoutBaselineShape(timeouts) {
   return copyTimeoutBaseline(timeouts)
 }
 
+// The draft edits minutes: `delegate_total_minutes`, and `slot_minutes` with an entry for every slot
+// that has its own limit (an entry typed blank is "no own limit").
 function timeoutDraftFromSettings(timeouts) {
   if (!validTimeoutsDto(timeouts)) return null
-  const projected = projectTimeoutSeconds(timeouts)
-  if (!projected) return null
   return {
     schema: timeouts.schema,
     revision: timeouts.revision,
     editable: timeouts.editable,
-    split_routing_supported: timeouts.split_routing_supported === true,
-    delegate_total_minutes: projected.delegate_total_seconds / 60,
-    routed_light_total_minutes: projected.routed_light_total_seconds / 60,
-    routed_heavy_total_minutes: projected.routed_heavy_total_seconds / 60
+    default_slot_seconds: timeouts.default_slot_seconds,
+    delegate_total_minutes: timeouts.delegate_total_seconds / 60,
+    slot_minutes: Object.fromEntries(Object.entries(timeouts.slot_seconds).map(([id, seconds]) => [id, seconds / 60]))
   }
+}
+
+// A duration in words: '2시간', '90분' is '1시간 30분', 0 is '제한 없음'.
+export function timeoutDurationText(seconds) {
+  if (!validSeconds(seconds)) return '확인할 수 없음'
+  if (seconds === 0) return '제한 없음'
+  const minutes = seconds / 60
+  if (!Number.isInteger(minutes)) return `${Number(minutes.toFixed(2))}분`
+  const hours = Math.floor(minutes / 60), rest = minutes % 60
+  return hours ? `${hours}시간${rest ? ` ${rest}분` : ''}` : `${minutes}분`
 }
 
 export function eligibleTimeoutTargets(profiles) {
   return (Array.isArray(profiles) ? profiles : [])
     .filter(row => typeof row?.name === 'string' && row.name.length > 0 &&
-      splitRoutingSupported(row.timeouts) && row.timeouts.editable === true)
+      validTimeoutsDto(row.timeouts) && row.timeouts.editable === true)
     .map(row => row.name)
 }
 
@@ -273,7 +252,7 @@ export function pageExpectation(row) {
   const native = row.fallbacks?.native
   const auxiliary = auxiliaryExpectation(row)
   return deepClone({ models: row.models, actual_models: row.actual_models || {},
-    routing: { enabled: Boolean(row.routing.enabled), heavy: row.routing.heavy ?? null, light: row.routing.light ?? null, slots: row.routing.slots ?? null,
+    routing: { enabled: Boolean(row.routing.enabled), slots: plainObject(row.routing.slots) ? row.routing.slots : {},
       skill_enabled: routingSkillEnabled(row) },
     ...(native ? { native_fallback: { enabled: native.enabled ?? null, chain: native.chain ?? [], actual_chain: native.actual_chain ?? [] } } : {}),
     ...(auxiliary ? { auxiliary_fallback: auxiliary } : {}) })
@@ -490,7 +469,7 @@ export function pageExpectationsFor(operation, body, frozen, liveNames = []) {
   const modelRoles = operation === '/preview' && body?.model_settings_schema === MODEL_SETTINGS_SCHEMA && body?.models && typeof body.models === 'object'
     ? Object.keys(body.models).filter(role => PAGE_MODEL_ROLES.includes(role)) : null
   // A partial save: the routing expectation is the switch plus only the slots the body writes (each the
-  // stored declaration the page froze, null when not stored); Heavy/Light are not written or compared.
+  // stored declaration the page froze, null when not stored).
   const partialSlots = operation === '/preview' && body?.partial_save_schema === PARTIAL_SAVE_SCHEMA
     ? Object.keys(body?.routing?.slots && typeof body.routing.slots === 'object' ? body.routing.slots : {}) : null
   const fieldValue = (value, field, tasks) => field === 'auxiliary_fallback' && tasks
@@ -539,8 +518,8 @@ export function externalChangeStepMessage(conflict, label) {
 // `modelCheck` ({roles, targets}) is given on a Hermes-native service: then only the roles a pending
 // save holds are compared, for the loaded profile and each model target, and such an item ({models:
 // true}) blocks only the model write. Without it every model role of the loaded profile is compared.
-// `routingCheck` ({slots}) is given for a partial save: Heavy/Light are not written and only the slots
-// the save writes are compared (a sibling slot changed elsewhere never blocks it).
+// `routingCheck` ({slots}) is given for a partial save: only the slots the save writes are compared (a
+// sibling slot changed elsewhere never blocks it).
 export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations, modelCheck = null, routingCheck = null) {
   const items = []
   const same = (live, loaded) => sameValue(live ?? null, loaded ?? null)
@@ -554,10 +533,7 @@ export function pageLiveDrift(rows, selected, frozenProfiles, frozenExpectations
     if (routingCheck) {
       const ids = Array.isArray(routingCheck.slots) ? routingCheck.slots : []
       if (ids.some(id => !same(current.slots?.declarations?.[id], frozen.slots?.[id]))) items.push({ profile: selected, part: '작업 슬롯 모델' })
-    } else {
-      if (!same(current.routing?.heavy, frozen.routing?.heavy) || !same(current.routing?.light, frozen.routing?.light)) items.push({ profile: selected, part: '작업 라우팅' })
-      if (!same(current.slots?.declarations, frozen.slots)) items.push({ profile: selected, part: '작업 슬롯 모델' })
-    }
+    } else if (!same(current.slots?.declarations, frozen.slots)) items.push({ profile: selected, part: '작업 슬롯 모델' })
   }
   for (const row of list) {
     const base = frozenProfiles?.[row.name]
@@ -609,27 +585,47 @@ export function parseTimeoutMinutes(value) {
   const parsed = Number(value.trim())
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
 }
+// A slot field left blank (or never set) has no own limit: the slot runs with the default.
+const timeoutBlank = value => value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+// The slots the time-limit section edits: the built-ins, then the defined custom slots.
+const timeoutSlotIds = () => taskSlots().map(slot => slot.id)
 
-function timeoutBaselineSeconds(baseline, minuteKey) {
-  if (minuteKey === 'delegate_total_minutes') return baseline?.delegate_total_seconds
-  if (baseline?.schema === 1) return baseline.routed_total_seconds
-  return minuteKey === 'routed_light_total_minutes'
-    ? baseline?.routed_light_total_seconds
-    : baseline?.routed_heavy_total_seconds
+// One drafted field in seconds: a number, `null` for a blank slot field (no own limit), or `undefined`
+// when the typed value is not a valid number of minutes. Minutes equal to the loaded value keep the
+// loaded seconds exactly.
+function timeoutFieldSeconds(value, loadedSeconds, blankAllowed) {
+  if (blankAllowed && timeoutBlank(value)) return null
+  const minutes = parseTimeoutMinutes(value)
+  if (minutes === null) return undefined
+  const seconds = validSeconds(loadedSeconds) && minutes === loadedSeconds / 60 ? loadedSeconds : minutes * 60
+  return validSeconds(seconds) ? seconds : undefined
 }
 
-function timeoutBaselineMinute(baseline, minuteKey) {
-  const seconds = timeoutBaselineSeconds(baseline, minuteKey)
-  return validSeconds(seconds) ? seconds / 60 : null
+// Field ids of the time-limit draft: 'delegate_total_seconds' and 'slot:' plus the slot id.
+export const TIMEOUT_DELEGATE_FIELD = 'delegate_total_seconds'
+export const timeoutSlotField = id => `slot:${id}`
+const timeoutFieldSlot = field => typeof field === 'string' && field.startsWith('slot:') ? field.slice('slot:'.length) : null
+
+// Every field of the draft with its drafted and its loaded seconds (`null`: no own limit).
+function timeoutDraftFields(timeouts, baseline) {
+  if (!timeouts || !baseline) return []
+  const drafted = plainObject(timeouts.slot_minutes) ? timeouts.slot_minutes : {}
+  const loaded = plainObject(baseline.slot_seconds) ? baseline.slot_seconds : {}
+  return [
+    [TIMEOUT_DELEGATE_FIELD, timeoutFieldSeconds(timeouts.delegate_total_minutes, baseline.delegate_total_seconds, false), baseline.delegate_total_seconds],
+    ...timeoutSlotIds().map(id => [timeoutSlotField(id), timeoutFieldSeconds(drafted[id], loaded[id], true),
+      Object.prototype.hasOwnProperty.call(loaded, id) ? loaded[id] : null])
+  ]
+}
+
+// The fields whose drafted value differs from the loaded one (a partial timeout save sends only
+// these; an unreadable value counts as changed and is refused by the payload helpers).
+export function changedTimeoutFields(timeouts, baseline) {
+  return timeoutDraftFields(timeouts, baseline).filter(([, drafted, loaded]) => drafted === undefined || drafted !== loaded).map(([field]) => field)
 }
 
 export function timeoutDraftChanged(timeouts, baseline) {
-  if (!timeouts || !baseline) return false
-  return TIMEOUT_MINUTE_KEYS.some(key => {
-    const value = parseTimeoutMinutes(timeouts[key])
-    const original = timeoutBaselineMinute(baseline, key)
-    return value === null || original === null || value !== original
-  })
+  return changedTimeoutFields(timeouts, baseline).length > 0
 }
 
 export function timeoutRevisionMatches(baseline, currentTimeouts) {
@@ -637,67 +633,72 @@ export function timeoutRevisionMatches(baseline, currentTimeouts) {
     currentTimeouts.revision === baseline.revision)
 }
 
+// The drafted values in the full form: {delegate_total_seconds, slot_seconds} with only the slots that
+// have their own limit, or null when a value is not a valid number of minutes.
 function timeoutPayloadValues(timeouts, baseline) {
-  if (!timeouts || !baseline) return null
-  const values = {}
-  for (const key of TIMEOUT_MINUTE_KEYS) {
-    const minutes = parseTimeoutMinutes(timeouts[key])
-    const secondsKey = key === 'delegate_total_minutes'
-      ? 'delegate_total_seconds'
-      : key === 'routed_light_total_minutes' ? 'routed_light_total_seconds' : 'routed_heavy_total_seconds'
-    if (minutes === null) return null
-    const sourceSeconds = timeoutBaselineSeconds(baseline, key)
-    const baselineMinutes = validSeconds(sourceSeconds) ? sourceSeconds / 60 : null
-    const seconds = minutes === baselineMinutes ? sourceSeconds : minutes * 60
-    if (!validSeconds(seconds)) return null
-    values[secondsKey] = seconds
+  const fields = timeoutDraftFields(timeouts, baseline)
+  if (!fields.length || fields.some(([, drafted]) => drafted === undefined)) return null
+  const slotSeconds = {}
+  for (const [field, drafted] of fields) {
+    const id = timeoutFieldSlot(field)
+    if (id && drafted !== null) slotSeconds[id] = drafted
   }
-  return values
+  return { delegate_total_seconds: fields[0][1], slot_seconds: slotSeconds }
 }
 
-const TIMEOUT_SECONDS_KEYS = { delegate_total_minutes: 'delegate_total_seconds', routed_light_total_minutes: 'routed_light_total_seconds', routed_heavy_total_minutes: 'routed_heavy_total_seconds' }
-// The split seconds fields whose drafted minutes differ from the loaded ones (a partial timeout save
-// sends only these; an unreadable value counts as changed and is refused by the payload helpers).
-export function changedTimeoutFields(timeouts, baseline) {
-  if (!timeouts || !baseline) return []
-  return TIMEOUT_MINUTE_KEYS.filter(key => {
-    const value = parseTimeoutMinutes(timeouts[key])
-    const original = timeoutBaselineMinute(baseline, key)
-    return value === null || original === null || value !== original
-  }).map(key => TIMEOUT_SECONDS_KEYS[key])
+// The values one update carries. Without the partial marker: the full form (every slot without its own
+// limit is left out). With it, `slot_seconds` is a patch merged over each target's own limits, where
+// `null` removes a slot's own limit: `fields` sends only those fields; a copy of everything
+// (`fields` null) names every slot, `null` for each slot without its own limit.
+function timeoutUpdateValues(timeouts, baseline, fields, partial) {
+  const values = timeoutPayloadValues(timeouts, baseline)
+  if (!values) return null
+  if (!partial) return values
+  const drafted = new Map(timeoutDraftFields(timeouts, baseline))
+  const send = Array.isArray(fields) ? fields : [TIMEOUT_DELEGATE_FIELD, ...timeoutSlotIds().map(timeoutSlotField)]
+  const slots = send.map(timeoutFieldSlot).filter(Boolean)
+  return {
+    ...(send.includes(TIMEOUT_DELEGATE_FIELD) ? { delegate_total_seconds: values.delegate_total_seconds } : {}),
+    ...(slots.length ? { slot_seconds: Object.fromEntries(slots.map(id => [id, drafted.get(timeoutSlotField(id))])) } : {})
+  }
 }
-const pickTimeoutFields = (values, fields) => Array.isArray(fields) ? Object.fromEntries(fields.filter(key => Object.prototype.hasOwnProperty.call(values, key)).map(key => [key, values[key]])) : values
-const TIMEOUT_FIELD_LABELS = { delegate_total_seconds: '일반 위임', routed_light_total_seconds: '짧은 작업', routed_heavy_total_seconds: '긴 작업' }
-export const timeoutFieldLabels = fields => fields.map(key => TIMEOUT_FIELD_LABELS[key] || key).join('·')
+
+// The time-limit fields one update carries, in the field ids of changedTimeoutFields.
+export function timeoutUpdateFields(update) {
+  const slots = plainObject(update?.slot_seconds) ? Object.keys(update.slot_seconds) : []
+  return [...(update && Object.prototype.hasOwnProperty.call(update, TIMEOUT_DELEGATE_FIELD) ? [TIMEOUT_DELEGATE_FIELD] : []), ...slots.map(timeoutSlotField)]
+}
+export const timeoutFieldLabels = fields => fields.map(field => field === TIMEOUT_DELEGATE_FIELD ? '일반 위임'
+  : taskSlots().find(slot => slot.id === timeoutFieldSlot(field))?.label || timeoutFieldSlot(field) || field).join('·')
 
 function timeoutUpdateError() {
-  return '각 시간 제한을 0 이상의 유한한 분 단위 숫자로 입력하세요. 입력값을 초 단위로 변환할 수 없는 경우 저장할 수 없습니다.'
+  return '각 시간 제한을 0 이상의 분 단위 숫자로 입력하세요. 슬롯 제한은 비워 두면 기본값을 씁니다. 입력값을 초 단위로 변환할 수 없으면 저장할 수 없습니다.'
 }
 
-// `fields` (a partial save) limits each update to those seconds fields; null sends all three.
-export function buildTimeoutUpdate(profile, timeouts, baseline, currentTimeouts, fields = null) {
+// `fields` (a partial save) limits each update to those fields; null sends every value. `partial`: the
+// body carries the partial marker (see timeoutUpdateValues).
+export function buildTimeoutUpdate(profile, timeouts, baseline, currentTimeouts, fields = null, partial = false) {
   const changed = timeoutDraftChanged(timeouts, baseline)
   if (!changed) return { changed: false, update: null, error: '' }
   if (!baseline || !timeouts || typeof profile !== 'string' || !profile) {
     return { changed: true, update: null, error: '시간 제한 편집 상태를 확인할 수 없습니다. 상태를 새로고침하세요.' }
   }
-  if (timeouts.editable !== true || timeouts.split_routing_supported !== true || baseline.editable !== true || baseline.split_routing_supported !== true) {
-    return { changed: true, update: null, error: '역할별 시간 제한 지원이 확인되지 않아 현재 시간 제한은 읽기 전용입니다.' }
+  if (timeouts.editable !== true || baseline.editable !== true) {
+    return { changed: true, update: null, error: '이 프로필의 시간 제한은 지금 바꿀 수 없어 읽기 전용입니다.' }
   }
-  if (timeouts.revision !== baseline.revision || !timeoutRevisionMatches(baseline, currentTimeouts) ||
-    currentTimeouts.editable !== true || currentTimeouts.split_routing_supported !== true) {
-    return { changed: true, update: null, error: '시간 제한 revision 또는 역할별 지원 상태가 바뀌었거나 편집할 수 없습니다. 상태를 새로고침한 뒤 다시 편집하세요.' }
+  if (timeouts.revision !== baseline.revision || !timeoutRevisionMatches(baseline, currentTimeouts) || currentTimeouts.editable !== true) {
+    return { changed: true, update: null, error: '시간 제한 revision 또는 편집 가능 여부가 바뀌었습니다. 상태를 새로고침한 뒤 다시 편집하세요.' }
   }
-  const values = timeoutPayloadValues(timeouts, baseline)
+  const values = timeoutUpdateValues(timeouts, baseline, fields, partial)
   if (!values) return { changed: true, update: null, error: timeoutUpdateError() }
   return {
     changed: true,
-    update: { profile, expected_revision: baseline.revision, ...pickTimeoutFields(values, fields) },
+    update: { profile, expected_revision: baseline.revision, ...values },
     error: ''
   }
 }
 
-export function buildTimeoutUpdates(sourceProfile, timeouts, targetNames, baselinesByProfile, currentByProfile, fields = null) {
+export function buildTimeoutUpdates(sourceProfile, timeouts, targetNames, baselinesByProfile, currentByProfile, fields = null, partial = false) {
   const targets = uniqueProfileNames(targetNames)
   if (!sourceProfile || !timeouts || typeof timeouts !== 'object') {
     return { updates: [], errors: ['시간 제한 편집 상태를 확인할 수 없습니다. 상태를 새로고침하세요.'] }
@@ -708,11 +709,10 @@ export function buildTimeoutUpdates(sourceProfile, timeouts, targetNames, baseli
   const sourceBaseline = baselinesByProfile?.[sourceProfile]
   const sourceCurrent = currentByProfile?.[sourceProfile]
   if (!sourceBaseline || !validTimeoutsDto(sourceCurrent) || sourceBaseline.editable !== true ||
-    sourceBaseline.split_routing_supported !== true || sourceCurrent.editable !== true ||
-    sourceCurrent.split_routing_supported !== true || !timeoutRevisionMatches(sourceBaseline, sourceCurrent)) {
-    return { updates: [], errors: [`시간 제한 원본 프로필 ${sourceProfile}의 역할별 지원 또는 불러온 revision을 확인할 수 없습니다. 상태를 새로고침하세요.`] }
+    sourceCurrent.editable !== true || !timeoutRevisionMatches(sourceBaseline, sourceCurrent)) {
+    return { updates: [], errors: [`시간 제한 원본 프로필 ${sourceProfile}의 편집 가능 여부 또는 불러온 revision을 확인할 수 없습니다. 상태를 새로고침하세요.`] }
   }
-  const values = timeoutPayloadValues(timeouts, sourceBaseline)
+  const values = timeoutUpdateValues(timeouts, sourceBaseline, fields, partial)
   if (!values) return { updates: [], errors: [timeoutUpdateError()] }
   const updates = []
   const errors = []
@@ -720,12 +720,11 @@ export function buildTimeoutUpdates(sourceProfile, timeouts, targetNames, baseli
     const baseline = baselinesByProfile?.[profile]
     const current = currentByProfile?.[profile]
     if (!baseline || !validTimeoutsDto(current) || !validTimeoutSettingsShape(baseline) ||
-      baseline.editable !== true || baseline.split_routing_supported !== true || current.editable !== true ||
-      current.split_routing_supported !== true || !timeoutRevisionMatches(baseline, current)) {
-      errors.push(`${profile} 프로필의 역할별 시간 제한 지원, revision 또는 편집 권한을 확인할 수 없습니다. 상태를 새로고침하세요.`)
+      baseline.editable !== true || current.editable !== true || !timeoutRevisionMatches(baseline, current)) {
+      errors.push(`${profile} 프로필의 시간 제한 revision 또는 편집 권한을 확인할 수 없습니다. 상태를 새로고침하세요.`)
       continue
     }
-    updates.push({ profile, expected_revision: baseline.revision, ...pickTimeoutFields(values, fields) })
+    updates.push({ profile, expected_revision: baseline.revision, ...deepClone(values) })
   }
   return { updates: errors.length ? [] : updates, errors }
 }
@@ -741,38 +740,37 @@ export function copyProfileDraft(profile) {
   })
 }
 
-// Slot helpers keep the original role routes and stored routing declarations intact.
+// What a slot's model follows: the profile's main model, or a model set here.
+export const SLOT_FOLLOWS = Object.freeze(['main', 'custom'])
 export function slotFollowDeclaration(declaration, follow, models) {
-  if (!['main', 'delegation', 'custom'].includes(follow)) throw new Error('invalid slot basis')
+  if (!SLOT_FOLLOWS.includes(follow)) throw new Error('invalid slot basis')
   if (follow !== 'custom') return { follow, custom: null }
   const route = declaration?.follow === 'custom' ? declaration.custom : models?.[declaration?.follow]
   return { follow, custom: deepClone(route || { provider: '', model: '', reasoning: '' }) }
 }
 
-// `slotIds` (a partial save) narrows the slot map to those slots; none leaves the key out.
+// The routing a save sends: {enabled, slots}. `slotIds` (a partial save) narrows the slot map to those
+// slots, and none leaves the key out. A full save always names the complete slot map: the drafted
+// declarations while the slot cards are editable, otherwise the stored slots as loaded.
 export function slotRoutingForSave(draft, editable, slotIds = null) {
-  const routing = deepClone(draft.routing)
-  delete routing.slots
-  if (editable && draft.slots) {
-    if (!Array.isArray(slotIds)) routing.slots = deepClone(draft.slots)
-    else {
-      const slots = Object.fromEntries(slotIds.filter(id => draft.slots[id]).map(id => [id, deepClone(draft.slots[id])]))
-      if (Object.keys(slots).length) routing.slots = slots
-    }
-  }
+  const routing = { enabled: Boolean(draft?.routing?.enabled) }
+  if (Array.isArray(slotIds)) {
+    const slots = editable && draft.slots ? Object.fromEntries(slotIds.filter(id => draft.slots[id]).map(id => [id, deepClone(draft.slots[id])])) : {}
+    if (Object.keys(slots).length) routing.slots = slots
+  } else routing.slots = deepClone(editable && draft.slots ? draft.slots : plainObject(draft?.routing?.slots) ? draft.routing.slots : {})
   return routing
 }
 
-// A slot is what the operator assigns a model to; tier only names which of the
-// two routed runtime limits applies. Order and ids mirror the backend.
+// A slot is what the operator assigns a model and a runtime limit to. Order and ids mirror the
+// backend. The advisor's runtime limit is fixed by its tool (`fixedLimit`), not by the slot setting.
 export const TASK_SLOTS = [
-  { id: 'design', tier: 'heavy', label: '설계', description: '계획을 세우고 구조를 정하는 작업' },
-  { id: 'code-complex', tier: 'light', label: '코드 · 복잡', description: '여러 파일에 걸친 구현과 까다로운 수정' },
-  { id: 'code-simple', tier: 'light', label: '코드 · 간단', description: '정해진 패턴의 수정과 테스트·빌드 같은 반복 작업' },
-  { id: 'verify-simple', tier: 'light', label: '검증 · 간단', description: '예비 검토와 가벼운 확인' },
-  { id: 'verify-complex', tier: 'heavy', label: '검증 · 복잡', description: '최종 의미 검토와 독립 검수' },
-  { id: 'computer-use', tier: 'light', label: '컴퓨터 유즈', description: '브라우저나 데스크톱 화면을 직접 조작하는 작업' },
-  { id: 'advise', tier: 'heavy', label: '조언', description: '작업 중 판단이 막힐 때 읽기 전용으로 조언만 하는 작업 (ask_advisor 도구)', limitLabel: '5분 고정 제한' }
+  { id: 'design', label: '설계', description: '계획을 세우고 구조를 정하는 작업' },
+  { id: 'code-complex', label: '코드 · 복잡', description: '여러 파일에 걸친 구현과 까다로운 수정' },
+  { id: 'code-simple', label: '코드 · 간단', description: '정해진 패턴의 수정과 테스트·빌드 같은 반복 작업' },
+  { id: 'verify-simple', label: '검증 · 간단', description: '예비 검토와 가벼운 확인' },
+  { id: 'verify-complex', label: '검증 · 복잡', description: '최종 의미 검토와 독립 검수' },
+  { id: 'computer-use', label: '컴퓨터 유즈', description: '브라우저나 데스크톱 화면을 직접 조작하는 작업' },
+  { id: 'advise', label: '조언', description: '작업 중 판단이 막힐 때 읽기 전용으로 조언만 하는 작업 (ask_advisor 도구)', limitLabel: '5분 고정 제한', fixedLimit: true }
 ].map(slot => Object.freeze(slot))
 // Operator-added slots (status `slot_capabilities.custom_slots`), defined once for every profile and
 // shown after the built-ins. Each profile picks its model on the slot card like a built-in slot; they
@@ -787,41 +785,27 @@ let customTaskSlots = Object.freeze([])
 export function customSlotDefinitions(status) {
   const list = status?.slot_capabilities?.custom_slots
   if (!Array.isArray(list) || list.length > CUSTOM_SLOT_LIMIT) return []
-  const valid = list.every(item => item && CUSTOM_SLOT_ID.test(item.id) && ['heavy', 'light'].includes(item.tier) &&
+  const valid = list.every(item => item && CUSTOM_SLOT_ID.test(item.id) &&
     typeof item.label === 'string' && textLength(item.label) <= 24 && CUSTOM_SLOT_TEXT.test(item.label) &&
     typeof item.description === 'string' && textLength(item.description) <= 120 && CUSTOM_SLOT_TEXT.test(item.description))
   return valid && new Set(list.map(item => item.id)).size === list.length
-    ? list.map(item => ({ id: item.id, label: item.label, description: item.description, tier: item.tier })) : []
+    ? list.map(item => ({ id: item.id, label: item.label, description: item.description })) : []
 }
 export function setCustomTaskSlots(status) {
   const next = customSlotDefinitions(status)
-  if (!sameValue(next, customTaskSlots.map(slot => ({ id: slot.id, label: slot.label, description: slot.description, tier: slot.tier })))) {
+  if (!sameValue(next, customTaskSlots.map(slot => ({ id: slot.id, label: slot.label, description: slot.description })))) {
     customTaskSlots = Object.freeze(next.map(item => Object.freeze({ ...item, custom: true })))
   }
   return customTaskSlots
 }
 // The built-in slots, then the defined custom slots. Spare models stay built-in only (TASK_SLOTS).
 export function taskSlots() { return [...TASK_SLOTS, ...customTaskSlots] }
-// What a slot's model can be set to here. 'delegation' (the slot follows the profile's delegation.model)
-// is no longer offered: a slot stored that way is shown with that value as the disabled current
-// option, never switched silently and never copied to another profile (see slotFollowOptions and
-// slotsCopyable).
+// What a slot's model can be set to here. A slot never set runs on the profile's main model and is
+// shown that way.
 export const SLOT_FOLLOW_OPTIONS = [
   { value: 'main', label: '기본 대화 모델과 같게' },
   { value: 'custom', label: '직접 지정' }
 ]
-export const LEGACY_SLOT_FOLLOW = 'delegation'
-export const legacySlotFollowLabel = models => `작업 위임 모델(${models?.delegation?.model || '확인할 수 없음'})과 같게 · 이전 설정`
-export function slotFollowOptions(declaration, models) {
-  return declaration?.follow === LEGACY_SLOT_FOLLOW
-    ? [{ value: LEGACY_SLOT_FOLLOW, label: legacySlotFollowLabel(models), disabled: true }, ...SLOT_FOLLOW_OPTIONS]
-    : SLOT_FOLLOW_OPTIONS
-}
-// Slot models are copied to other profiles only when no slot still follows the delegation model:
-// copied, such a slot would follow each target's own (hidden) delegation.model.
-export function slotsCopyable(slots) {
-  return !taskSlots().some(slot => slots?.[slot.id]?.follow === LEGACY_SLOT_FOLLOW)
-}
 
 // What the loaded profile's installed plugin can do with slots. `available`
 // shows the cards; `editable` is false while another installed profile could
@@ -830,7 +814,7 @@ export function slotSupport(status, row) {
   const capabilities = status?.slot_capabilities
   const declarations = row?.slots?.declarations
   const available = capabilities?.schema === 1 && row?.slots?.schema === 1 && row.slots.capable === true &&
-    Boolean(declarations) && taskSlots().every(slot => ['main', 'delegation', 'custom'].includes(declarations[slot.id]?.follow))
+    Boolean(declarations) && taskSlots().every(slot => SLOT_FOLLOWS.includes(declarations[slot.id]?.follow))
   const blocking = available && Array.isArray(capabilities.blocking_profiles) ? capabilities.blocking_profiles.filter(name => typeof name === 'string') : []
   return { available, editable: available && blocking.length === 0, blocking }
 }
@@ -843,7 +827,7 @@ export function slotResolvedRoute(declaration, models) {
 export function slotDraftError(slots) {
   for (const slot of taskSlots()) {
     const declaration = slots?.[slot.id]
-    if (!declaration || !['main', 'delegation', 'custom'].includes(declaration.follow)) return `${slot.label}: 모델 기준을 선택하세요.`
+    if (!declaration || !SLOT_FOLLOWS.includes(declaration.follow)) return `${slot.label}: 모델 기준을 선택하세요.`
     if (declaration.follow !== 'custom') continue
     const route = declaration.custom
     if (!route || !String(route.provider || '').trim() || !String(route.model || '').trim()) return `${slot.label}: 모델을 선택하세요.`
@@ -868,20 +852,11 @@ export const COPY_ALL_HINT = '체크하지 않으면 바꾼 값만 저장합니�
 export function editedSlotIds(draftSlots, frozenSlots) {
   return taskSlots().map(slot => slot.id).filter(id => draftSlots?.[id] && !sameValue(draftSlots[id], frozenSlots?.[id] ?? null))
 }
-// The stored slots a partial save keeps on one target (service.py _merge_partial_slots): on a profile
-// other than the loaded one, a submitted slot stored there as following the delegation model.
-export function partialSlotSkips(row, slotIds, origin) {
-  if (!row || row.name === origin) return []
-  const stored = row.routing?.slots && typeof row.routing.slots === 'object' ? row.routing.slots : {}
-  return (Array.isArray(slotIds) ? slotIds : []).filter(id => stored[id]?.follow === LEGACY_SLOT_FOLLOW)
-}
-// What a target's stored slots become after a partial save (mirror of service.py _merge_partial_slots).
-export function mergePartialSlots(stored, submitted, keepLegacy) {
+// What a target's stored slots become after a partial save (mirror of service.py _merge_partial_slots):
+// every submitted slot replaces that target's declaration; the others stay as stored, absent ones absent.
+export function mergePartialSlots(stored, submitted) {
   const merged = stored && typeof stored === 'object' ? deepClone(stored) : {}
-  for (const [id, declaration] of Object.entries(submitted || {})) {
-    if (keepLegacy && merged[id]?.follow === LEGACY_SLOT_FOLLOW) continue
-    merged[id] = deepClone(declaration)
-  }
+  for (const [id, declaration] of Object.entries(submitted || {})) merged[id] = deepClone(declaration)
   // Built-ins in slot order, then custom ids (the service orders them the same way).
   const ids = [...TASK_SLOTS.map(slot => slot.id), ...Object.keys(merged).filter(id => CUSTOM_SLOT_ID.test(id)).sort()]
   return Object.fromEntries(ids.filter(id => merged[id]).map(id => [id, merged[id]]))
@@ -895,15 +870,14 @@ export function toggleName(names, name, checked) {
   return [...set]
 }
 
-// The retired routed-job fallback (`routing.fallback`) is never sent: the plugin keeps the stored
-// value when it is absent, and only fallback_preview could change it.
 // `modelRoles` (a Hermes-native service only) narrows a body that writes models to those roles and
 // opts in with `model_settings_schema`. A non-model save carries no incidental roles.
-// `partialSave` (a service with `partial_save_schema: 1`) adds the marker and sends the routing as
-// membership plus only the slots it writes: Heavy/Light are not edited on the page and are left out,
-// so each target keeps its own.
+// The routing is {enabled, slots}: a full body names the complete slot map to store on every routing
+// target (a slot left out is never set and runs on the main model). `partialSave` (a service with
+// `partial_save_schema: 1`) adds the marker and sends membership plus only the slots it writes,
+// merged over each target's own.
 export function buildPreviewBody(revision, profile, draft, modelTargets, routingProfiles, routingTargets, modelRoles = null, partialSave = false) {
-  const { fallback: _retiredFallback, ...routing } = deepClone(draft.routing) || {}
+  const routing = deepClone(draft.routing) || {}
   const targets = Array.isArray(modelTargets) ? [...modelTargets] : []
   const partial = Array.isArray(modelRoles)
   const models = pageModels(draft.models)
@@ -918,7 +892,7 @@ export function buildPreviewBody(revision, profile, draft, modelTargets, routing
     model_targets: targets,
     routing: partialSave
       ? { enabled, ...(routing.slots && Object.keys(routing.slots).length ? { slots: routing.slots } : {}) }
-      : { ...routing, enabled },
+      : { enabled, slots: plainObject(routing.slots) ? routing.slots : {} },
     routing_profiles: [...routingProfiles],
     ...(routingTargets === undefined ? {} : { routing_targets: [...routingTargets] })
   }
@@ -948,30 +922,10 @@ export function readableValue(value) {
   return String(value)
 }
 
-export const ROUTING_FALLBACK_PRESETS = freezeDeep([
-  {
-    id: 'openai-api',
-    name: 'OpenAI API 모델 조합',
-    description: 'Heavy와 Light는 다른 모델을 사용합니다. API 사용량에 따라 추가 비용이 발생할 수 있습니다.',
-    heavy: { provider: 'openai-api', model: 'gpt-6-astra', reasoning: 'max' },
-    light: { provider: 'openai-api', model: 'gpt-5.6-luna', reasoning: 'max' }
-  },
-  {
-    id: 'non-openai',
-    name: '비-OpenAI 모델 조합',
-    description: 'Heavy는 Xiaomi, Light는 DeepSeek를 사용합니다.',
-    heavy: { provider: 'xiaomi', model: 'mimo-v2.6-pro', reasoning: 'max' },
-    light: { provider: 'deepseek', model: 'deepseek-flash', reasoning: 'max' }
-  }
-])
-
 export const SUPPORTED_FALLBACK_CAPABILITIES = freezeDeep({
   native_trigger: 'hermes_runtime',
   native_execution: 'continue_conversation',
-  native_reasoning: 'profile_overrides',
-  routing_trigger: 'subscription_exhaustion_before_tools',
-  routing_execution: 'fresh_task',
-  routing_max_retries: 1
+  native_reasoning: 'profile_overrides'
 })
 
 export function fallbackCapabilitiesSupported(capabilities) {
@@ -989,18 +943,6 @@ export function copyNativeFallbackDraft(native) {
       model: typeof entry?.model === 'string' ? entry.model : ''
     }))
   }
-}
-
-export function copyRoutingFallbackDraft(routing) {
-  if (!routing || typeof routing.enabled !== 'boolean') return null
-  const copyRoute = route => route && typeof route === 'object'
-    ? {
-        provider: typeof route.provider === 'string' ? route.provider : '',
-        model: typeof route.model === 'string' ? route.model : '',
-        reasoning: typeof route.reasoning === 'string' ? route.reasoning : ''
-      }
-    : null
-  return { enabled: routing.enabled, heavy: copyRoute(routing.heavy), light: copyRoute(routing.light) }
 }
 
 export const DELEGATION_FALLBACK_MODES = freezeDeep([
@@ -1193,12 +1135,6 @@ export function auxiliaryFallbackUpdates(auxiliaryWrite, rows, projection = null
   return { updates: list, confirmations, errors }
 }
 
-export function applyRoutingFallbackPresetDraft(draft, presetId) {
-  const preset = ROUTING_FALLBACK_PRESETS.find(item => item.id === presetId)
-  if (!preset || !draft || typeof draft !== 'object') return null
-  return { ...deepClone(draft), heavy: deepClone(preset.heavy), light: deepClone(preset.light) }
-}
-
 export function reconcileFallbackTargets(selected, profileNames) {
   const available = uniqueProfileNames(profileNames)
   if (!Array.isArray(selected)) return null
@@ -1224,8 +1160,7 @@ export function fallbackConsentReady(consent, scope) {
     consent && consent.policy_version === 1 &&
     typeof consent.selection_digest === 'string' && consent.selection_digest.length > 0 &&
     consent.allow_additional_cost === true &&
-    (scope !== 'delegation' || consent.allow_task_rerun === false) &&
-    (scope !== 'routing' || consent.allow_task_rerun === true)
+    consent.allow_task_rerun === false
   )
 }
 
@@ -1237,13 +1172,6 @@ export function fallbackTargetNeedsConsent(scope, row, next) {
       { enabled: current.enabled === true, chain: current.chain || [] }, next
     )
     return !sameSelection || current.managed !== true || !fallbackConsentReady(current.consent, 'native')
-  }
-  if (scope === 'routing') {
-    const current = row.fallbacks?.routing
-    const sameSelection = current && sameValue(
-      { enabled: current.enabled === true, heavy: current.heavy ?? null, light: current.light ?? null }, next
-    )
-    return !sameSelection || !fallbackConsentReady(current?.consent, 'routing')
   }
   if (scope === 'delegation') {
     if (next.mode === 'off') return false
@@ -1302,44 +1230,11 @@ export function routeIdentity(route) {
     : ''
 }
 
-export function primaryRouteForFallback(row, role, projection = null) {
-  const isRoutingDraft = projection && (Array.isArray(projection.routing_targets)
-    ? projection.routing_targets.includes(row?.name)
-    : row?.name === projection.profile)
-  // A partial body leaves Heavy/Light out: each target then keeps its stored one (service.py).
-  const configured = (isRoutingDraft ? projection.routing?.[role] : undefined) ?? row?.routing?.[role]
-  if (configured?.follow === 'custom' && configured.custom) return configured.custom
-  const modelRole = role === 'heavy' ? 'main' : 'delegation'
-  // A model copy never changes a target's delegation role, so only the main model is projected.
-  if (modelRole === 'main' && projection?.model_targets?.includes(row?.name) && projectsRole(projection, 'main')) return projection.models?.[modelRole] || null
-  return row?.models?.[modelRole] || row?.actual_models?.[modelRole] || null
-}
-
-export function routingFallbackValidation(draft, targetRows = [], projection = null) {
-  if (!draft || typeof draft.enabled !== 'boolean') return '이전 작업 방식의 예비 모델 설정을 확인할 수 없습니다.'
-  if (!draft.enabled) return ''
-  for (const role of ['heavy', 'light']) {
-    const route = draft[role]
-    if (!route || ['provider', 'model', 'reasoning'].some(key => typeof route[key] !== 'string' || !route[key].trim())) {
-      return `${role === 'heavy' ? 'Heavy' : 'Light'} 대체 경로의 공급자·모델·추론 강도를 입력하세요.`
-    }
-  }
-  if (routeIdentity(draft.heavy) === routeIdentity(draft.light)) return 'Heavy와 Light 대체 모델은 서로 달라야 합니다.'
-  for (const row of targetRows) {
-    for (const role of ['heavy', 'light']) {
-        if (routeIdentity(draft[role]) && routeIdentity(draft[role]) === routeIdentity(primaryRouteForFallback(row, role, projection))) {
-        return `${row.name} 프로필의 ${role === 'heavy' ? 'Heavy' : 'Light'} 기본 경로와 대체 경로는 달라야 합니다.`
-      }
-    }
-  }
-  return ''
-}
-
-// Only the conversation scope is edited on the page. The other two are stored values the page
-// keeps reading (status, projected checks) but never writes; their titles say so.
+// Only the conversation scope is edited on the page. The delegation scope is a stored value the page
+// keeps reading but never writes; its title says so.
 export const PAGE_FALLBACK_SCOPES = freezeDeep(['native'])
 export function fallbackScopeTitle(scope) {
-  return ({ native: '대화 예비 모델', routing: '이전 작업 방식의 보관된 예비 모델', delegation: '이전 기본 위임 방식의 보관된 예비 모델' })[scope] || '예비 모델'
+  return ({ native: '대화 예비 모델', delegation: '이전 기본 위임 방식의 보관된 예비 모델' })[scope] || '예비 모델'
 }
 
 function fallbackValueForScope(scope, value) {
@@ -1347,11 +1242,6 @@ function fallbackValueForScope(scope, value) {
   if (scope === 'native') return {
     enabled: value.enabled === true,
     chain: (value.chain || []).map(({ provider, model }) => ({ provider, model }))
-  }
-  if (scope === 'routing') return {
-    enabled: value.enabled === true,
-    heavy: value.heavy ? deepClone(value.heavy) : null,
-    light: value.light ? deepClone(value.light) : null
   }
   return {
     mode: value.mode,
@@ -1362,8 +1252,7 @@ function fallbackValueForScope(scope, value) {
 function fallbackScopeEditable(scope, row) {
   if (scope === 'native') return row?.fallbacks?.native?.editable === true
   if (scope === 'delegation') return validDelegationFallbackState(row?.fallbacks?.delegation) && row.fallbacks.delegation.editable === true
-  const state = row?.fallbacks?.routing
-  return Boolean(state && state.editable !== false && state.readonly !== true)
+  return false
 }
 
 function fallbackScopeValidation(scope, value, rows, projection) {
@@ -1385,7 +1274,6 @@ function fallbackScopeValidation(scope, value, rows, projection) {
     }
     return ''
   }
-  if (scope === 'routing') return routingFallbackValidation(value, rows, projection)
   return delegationFallbackValidation(value)
 }
 
@@ -1393,14 +1281,14 @@ export function buildFallbackPreviewBody(revision, scope, targetNames, value, pr
   const byName = new Map((Array.isArray(profiles) ? profiles : []).map(row => [row.name, row]))
   const selected = uniqueProfileNames(targetNames).filter(name => byName.has(name))
   const scopeValue = fallbackValueForScope(scope, value)
-  const key = scope === 'native' ? 'native_fallback' : scope === 'routing' ? 'routing_fallback' : 'delegation_fallback'
+  const key = scope === 'native' ? 'native_fallback' : 'delegation_fallback'
   const updates = selected.map(profile => ({ profile, [key]: deepClone(scopeValue) }))
   const confirmations = selected.filter(profile => fallbackTargetNeedsConsent(scope, byName.get(profile), scopeValue))
     .map(profile => ({
       profile,
       scope,
       allow_additional_cost: true,
-      allow_task_rerun: scope === 'routing'
+      allow_task_rerun: false
     }))
   return { expected_revision: revision, updates, confirmations }
 }
@@ -1417,7 +1305,7 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
   const errors = []
   const updatesByProfile = new Map()
   const confirmations = []
-  // Stored routing and delegation fallbacks are never part of a page save, whatever the drafts hold.
+  // The stored delegation fallback is never part of a page save, whatever the drafts hold.
   const scopes = PAGE_FALLBACK_SCOPES
 
   for (const scope of scopes) {
@@ -1455,13 +1343,13 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
       errors.push(`${title}: ${validation}`)
       continue
     }
-    const key = scope === 'native' ? 'native_fallback' : scope === 'routing' ? 'routing_fallback' : 'delegation_fallback'
+    const key = scope === 'native' ? 'native_fallback' : 'delegation_fallback'
     for (const name of targets) {
       const update = updatesByProfile.get(name) || { profile: name }
       update[key] = deepClone(value)
       updatesByProfile.set(name, update)
       if (fallbackTargetNeedsConsent(scope, byName.get(name), value)) {
-        confirmations.push({ profile: name, scope, allow_additional_cost: true, allow_task_rerun: scope === 'routing' })
+        confirmations.push({ profile: name, scope, allow_additional_cost: true, allow_task_rerun: false })
       }
     }
   }
@@ -1489,7 +1377,8 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
         timeoutSettings.targets,
         timeoutSettings.baselinesByProfile,
         timeoutSettings.currentByProfile,
-        fields
+        fields,
+        partialSave
       )
       if (timeoutResult.updates.length) body.timeout_updates = timeoutResult.updates
       errors.push(...timeoutResult.errors)
@@ -1499,7 +1388,8 @@ export function buildCombinedPreviewBody(revision, profile, draft, modelTargets,
         timeoutSettings.draft,
         timeoutSettings.baseline,
         timeoutSettings.current,
-        fields
+        fields,
+        partialSave
       )
       if (timeoutResult.update) body.timeout_updates = [timeoutResult.update]
       if (timeoutResult.error) errors.push(timeoutResult.error)
@@ -1600,34 +1490,27 @@ export function buildModelSectionFallbackBody(snapshot, revision = snapshot?.rev
 
 // What one model-section save writes to each profile, read from the request bodies themselves: the
 // delegation-method batch, the store plan and the conversation spare-model plan (each may be null).
-// `slots` is true for a whole slot map (the earlier body), or the slot ids a partial body writes to that
-// target (`keptSlots`: submitted ids that target keeps, see partialSlotSkips; needs `profiles`).
+// `slots` is true for a whole slot map (a full body), or the slot ids a partial body writes to that target.
 // `slotSpares` is true for a whole spare-model policy, or the slot ids of a per-slot patch.
-// `timeouts` is the list of seconds fields each time-limit target receives.
-export function modelSectionWriteSet({ native = null, store = null, fallback = null, profiles = null } = {}) {
+// `timeouts` is the list of time-limit fields each time-limit target receives (see timeoutUpdateFields).
+export function modelSectionWriteSet({ native = null, store = null, fallback = null } = {}) {
   const set = new Map()
-  const rows = Array.isArray(profiles) ? profiles : []
   const has = (item, key) => Boolean(item) && Object.prototype.hasOwnProperty.call(item, key)
-  const entry = name => { if (!set.has(name)) set.set(name, { models: false, slots: false, keptSlots: [], method: null, slotSpares: false, conversationSpares: null, auxiliarySpares: null, timeouts: null }); return set.get(name) }
+  const entry = name => { if (!set.has(name)) set.set(name, { models: false, slots: false, method: null, slotSpares: false, conversationSpares: null, auxiliarySpares: null, timeouts: null }); return set.get(name) }
   if (store) {
     const scope = store.save_scope ?? null
     const partial = store.partial_save_schema === PARTIAL_SAVE_SCHEMA
     if (scope === null || scope === 'models') for (const name of store.model_targets || []) entry(name).models = true
     if ((scope === null || scope === 'routing') && store.routing && has(store.routing, 'slots')) {
       const ids = Object.keys(store.routing.slots || {})
-      for (const name of Array.isArray(store.routing_targets) ? store.routing_targets : [store.profile]) {
-        const item = entry(name)
-        if (!partial) { item.slots = true; continue }
-        item.keptSlots = partialSlotSkips(rows.find(row => row.name === name), ids, store.profile)
-        item.slots = ids.filter(id => !item.keptSlots.includes(id))
-      }
+      for (const name of Array.isArray(store.routing_targets) ? store.routing_targets : [store.profile]) entry(name).slots = partial ? [...ids] : true
     }
-    for (const update of store.timeout_updates || []) entry(update.profile).timeouts = Object.keys(update).filter(key => !['profile', 'expected_revision'].includes(key))
+    for (const update of store.timeout_updates || []) entry(update.profile).timeouts = timeoutUpdateFields(update)
   }
   for (const update of native?.updates || []) {
     const item = entry(update.profile)
     item.method = update.backend ?? null
-    item.slotSpares = has(update, 'slot_policy_patch') ? Object.keys(update.slot_policy_patch) : has(update, 'slot_policy') || has(update, 'policy')
+    item.slotSpares = has(update, 'slot_policy_patch') ? Object.keys(update.slot_policy_patch) : has(update, 'slot_policy')
   }
   for (const update of fallback?.updates || []) {
     if (Object.prototype.hasOwnProperty.call(update, 'native_fallback')) entry(update.profile).conversationSpares = deepClone(update.native_fallback)
@@ -1668,26 +1551,11 @@ export function buildScopedPreviewBody(snapshot, saveScope) {
     snapshot.timeoutTargets,
     snapshot.timeoutBaselinesByProfile,
     snapshot.currentTimeoutsByProfile,
-    fields
+    fields,
+    partialSave
   )
   if (timeoutResult.updates.length) body.timeout_updates = timeoutResult.updates
   return { body, errors: timeoutResult.errors }
-}
-
-export function projectedRoutingFallbackErrors(profiles, projection, updatedFallbackProfiles = []) {
-  const updated = new Set(updatedFallbackProfiles)
-  const errors = []
-  for (const row of Array.isArray(profiles) ? profiles : []) {
-    const value = copyRoutingFallbackDraft(row?.fallbacks?.routing)
-    if (!value?.enabled || updated.has(row.name)) continue
-    const primaryChanged = ['heavy', 'light'].some(role =>
-      routeIdentity(primaryRouteForFallback(row, role)) !== routeIdentity(primaryRouteForFallback(row, role, projection))
-    )
-    if (!primaryChanged) continue
-    const error = routingFallbackValidation(value, [row], projection)
-    if (error) errors.push(`프로필 ${row.name}에 보관된 이전 작업 방식의 예비 모델과 겹칩니다(이 화면에서는 바꾸지 않는 값입니다): ${error}`)
-  }
-  return errors
 }
 
 export function previewFieldLabel(field) {
@@ -1695,11 +1563,9 @@ export function previewFieldLabel(field) {
     native_fallback: '대화 예비 모델',
     fallback_providers: '대화 예비 모델 목록',
     fallback_model: '이전 대화 예비 모델 설정',
-    'routing.fallback': '이전 작업 방식의 보관된 예비 모델',
     delegation_fallback: '이전 기본 위임 방식의 보관된 예비 모델',
     'delegation.fallback_providers': '이전 기본 위임 방식의 보관된 예비 모델 목록',
     'fallback_consent.native': '대화 예비 모델 승인 기록',
-    'fallback_consent.routing': '이전 작업 방식 예비 모델 승인 기록',
     'fallback_consent.delegation': '이전 기본 위임 방식 예비 모델 승인 기록'
   }
   return labels[field] || field || '설정 항목'
@@ -1819,7 +1685,7 @@ function Field({ id, label, value, onChange, disabled = false, hint }) {
   })
 }
 
-function TimeoutField({ id, label, value, onChange, disabled, describedBy }) {
+function TimeoutField({ id, label, value, onChange, disabled, describedBy, placeholder, hint = '분 (minutes)' }) {
   return jsxs('label', {
     htmlFor: id,
     style: styles.field,
@@ -1833,12 +1699,13 @@ function TimeoutField({ id, label, value, onChange, disabled, describedBy }) {
         inputMode: 'decimal',
         style: { width: '100%', minWidth: 0, boxSizing: 'border-box' },
         value: value ?? '',
+        ...(placeholder ? { placeholder } : {}),
         onChange: event => onChange(event.target.value),
         disabled,
         'aria-label': label,
         'aria-describedby': describedBy
       }),
-      jsx('span', { style: styles.hint, children: '분 (minutes)' })
+      jsx('span', { style: styles.hint, children: hint })
     ]
   })
 }
@@ -2053,7 +1920,7 @@ export function validProfileReadiness(value) {
     ['missing', 'disabled', 'ready', 'unsupported'].includes(value.state) &&
     ['missing', 'complete', 'partial', 'unsafe'].includes(value.files) &&
     ['enabled', 'disabled', 'not_enabled', 'unknown'].includes(value.python) &&
-    typeof value.base_supported === 'boolean' && typeof value.split_supported === 'boolean' &&
+    typeof value.base_supported === 'boolean' &&
     typeof value.explicit_opt_out === 'boolean' && typeof value.managed_selection === 'boolean' &&
     Array.isArray(value.reason_codes) && value.reason_codes.every(code => typeof code === 'string' && /^[a-z_]+$/.test(code)) &&
     (value.version === null || (typeof value.version === 'string' && value.version.length <= 64 && PREPARATION_VERSION_RE.test(value.version))) &&
@@ -2670,8 +2537,6 @@ export const nativeBackendSelectable = backend => NATIVE_DELEGATION_BACKENDS.som
 
 const nativeModelMode = backend => ['model-router', 'model-router-auto'].includes(backend)
 const nativeProfileMode = backend => ['model-router-profiles', 'model-router-auto'].includes(backend)
-const nativeEmptyPolicy = () => ({ heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } })
-const nativeDraftPolicy = draft => draft.backend === 'model-router-auto' ? draft.autoPolicy : draft.policy
 const nativeSlotPolicyKey = backend => backend === 'model-router-auto' ? 'autoSlotPolicy' : 'slotPolicy'
 export const nativeDraftSlotPolicy = draft => draft?.[nativeSlotPolicyKey(draft?.backend)] || null
 // Spare models are edited per slot only when the loaded profile's plugin stores them that way.
@@ -2690,11 +2555,12 @@ const nativePolicyEntryError = policy => {
   return ''
 }
 
+// The spare models are per task slot only (`slot_policy`, `auto_slot_policy`: one entry per built-in
+// slot); `policy_schema` says what is stored (0 nothing, 2 per slot).
 export function copyNativeDelegationDraft(dto) {
   if (dto?.schema !== 1 || dto.supported !== true || typeof dto.digest !== 'string' ||
-    typeof dto.backend !== 'string' || !dto.policy || !dto.profile_routes) return null
-  return { backend: dto.backend, expectedDigest: dto.digest, policy: deepClone(dto.policy),
-    autoPolicy: deepClone(dto.auto_policy || nativeEmptyPolicy()),
+    typeof dto.backend !== 'string' || !dto.profile_routes) return null
+  return { backend: dto.backend, expectedDigest: dto.digest,
     ...(dto.slot_policy ? { slotPolicy: deepClone(dto.slot_policy) } : {}),
     ...(dto.auto_slot_policy ? { autoSlotPolicy: deepClone(dto.auto_slot_policy) } : {}),
     profile_routes: deepClone(dto.profile_routes), allowProfileAccess: false, descriptionEdits: {} }
@@ -2704,17 +2570,10 @@ export function copyNativeDelegationDraft(dto) {
 // which may still name a deleted profile, is left as it is), 'profiles' sends no spare policy.
 export function nativeDelegationValidation(draft, profileNames, part = 'all') {
   if (!draft || !NATIVE_DELEGATION_BACKENDS.some(item => item.value === draft.backend)) return '작업을 맡기는 방식을 선택하세요.'
-  if (part === 'profiles' || draft.sendPolicy === false) {
-    // No spare policy in this update.
-  } else if (draft.sendSlotPolicy === true) {
+  if (part !== 'profiles' && draft.sendPolicy !== false) {
     for (const slot of TASK_SLOTS) {
       const issue = nativePolicyEntryError(nativeDraftSlotPolicy(draft)?.[slot.id])
       if (issue) return `${slot.label}: ${issue}`
-    }
-  } else {
-    for (const role of ['heavy', 'light']) {
-      const issue = nativePolicyEntryError(nativeDraftPolicy(draft)?.[role])
-      if (issue) return issue
     }
   }
   if (part === 'native') return ''
@@ -2740,10 +2599,9 @@ export function buildNativeDelegationPreviewBody(revision, profile, draft, dto, 
   const update = { profile, expected_digest: dto.digest, backend: draft.backend,
     allow_profile_access: part !== 'native' && draft.allowProfileAccess === true }
   if (part !== 'profiles' && draft.sendPolicy !== false) {
-    // Exactly one policy shape per update: one entry per task slot, or the two stored roles.
-    const bySlot = draft.sendSlotPolicy === true
-    const policy = deepClone(bySlot ? nativeDraftSlotPolicy(draft) : nativeDraftPolicy(draft))
-    update[bySlot ? 'slot_policy' : 'policy'] = policy
+    // One entry per built-in task slot.
+    const policy = deepClone(nativeDraftSlotPolicy(draft))
+    update.slot_policy = policy
     update.allow_additional_cost = Object.values(policy).some(entry => entry.mode === 'custom')
   }
   if (part !== 'native') update.profile_routes = deepClone(draft.profile_routes)
@@ -2797,8 +2655,7 @@ export function nativeProfileTargetReason(row) {
 // `options.partial` (a service with `partial_save_schema: 1`) sends only what changed against the
 // loaded profile's frozen value, unless `options.copyAll` (the section's ‘현재 설정 전체 복사’):
 //  'native'   - `backend` only when the method was edited; `slot_policy_patch` with only the edited
-//               slots. A target stored on another method, or (other than the loaded profile) with a
-//               two-role block, keeps its spare models and is named in `skipped`.
+//               slots. A target stored on another method keeps its spare models and is named in `skipped`.
 //  'profiles' - `profile_routes_patch` (add/remove/descriptions, `default` only when edited and that
 //               target takes it), merged into each target's stored list by the service.
 // A target with nothing to receive gets no update. Copy-all sends the earlier full forms.
@@ -2806,7 +2663,6 @@ export function buildNativeDelegationBatchBody(revision, origin, targets, draft,
   return planNativeDelegationBatch(revision, origin, targets, draft, baselines, profiles, part, options).body
 }
 
-export const NATIVE_TWO_ROLE_SKIP_REASON = '이 프로필에는 이전 형식(역할별) 예비 모델이 저장되어 있어 바뀐 슬롯만 저장할 수 없습니다. 이 프로필을 불러와 저장하거나 ‘현재 설정 전체 복사’를 사용하세요.'
 export const nativeMethodMismatchReason = backend => `이 프로필은 다른 맡기는 방식(${nativeBackendLabel(backend)})으로 저장되어 있어 바뀐 슬롯 예비 모델은 적용하지 않습니다. 방식까지 맞추려면 ‘현재 설정 전체 복사’를 사용하세요.`
 // The allow-list changes the draft makes against the frozen loaded routes (no `default`; see below).
 export function profileRoutesPatch(draftRoutes, frozenRoutes, descriptionEdits = {}) {
@@ -2924,15 +2780,11 @@ export function planNativeDelegationBatch(revision, origin, targets, draft, base
     if (issue) throw new Error(`${name}: ${issue}`)
     if (!baseline || baseline.supported !== true || baseline.editable !== true || baseline.digest !== row.native_delegation.digest) throw new Error(`${name}의 설정이 바뀌었습니다. 상태를 다시 불러온 뒤 저장하세요.`)
     // Copy visible fields only. A mode change must never overwrite hidden permissions/policies.
-    const storedBySlot = (backend === 'model-router-auto' ? baseline.auto_policy_schema : baseline.policy_schema) === 2
     const routesFromDraft = part === 'profiles' || (part === 'all' && nativeProfileMode(draft.backend))
     const next = { ...deepClone(draft), backend, expectedDigest: baseline.digest,
       // Only the 'native' part with slot cards on screen carries spare models; otherwise the
       // stored policy (or its absence) is left to the writer untouched.
       sendPolicy: part === 'all' || copySlots,
-      sendSlotPolicy: copySlots || storedBySlot,
-      policy: deepClone(baseline.policy),
-      autoPolicy: deepClone(baseline.auto_policy || nativeEmptyPolicy()),
       slotPolicy: deepClone(copySlots && draft.backend === 'model-router' ? draft.slotPolicy : baseline.slot_policy || null),
       autoSlotPolicy: deepClone(copySlots && draft.backend === 'model-router-auto' ? draft.autoSlotPolicy : baseline.auto_slot_policy || null),
       profile_routes: deepClone(routesFromDraft ? draft.profile_routes : baseline.profile_routes),
@@ -2964,19 +2816,13 @@ export function planNativeDelegationBatch(revision, origin, targets, draft, base
     const update = { profile: full.profile, expected_digest: full.expected_digest, allow_profile_access: false }
     if (backendEdited) update.backend = draft.backend
     if (editedSpares.length) {
-      const storedSchema = draft.backend === 'model-router-auto' ? baseline.auto_policy_schema : baseline.policy_schema
       if (!backendEdited && baseline.backend !== draft.backend) skipped[name] = nativeMethodMismatchReason(baseline.backend)
-      else if (storedSchema === 1 && name !== origin) skipped[name] = NATIVE_TWO_ROLE_SKIP_REASON
-      else if (storedSchema === 1) {
-        // The loaded profile's own two-role block: replaced by its whole per-slot view, as before.
-        update.slot_policy = deepClone(draft[policyKey])
-        update.allow_additional_cost = Object.values(update.slot_policy).some(entry => entry.mode === 'custom')
-      } else {
+      else {
         update.slot_policy_patch = Object.fromEntries(editedSpares.map(id => [id, deepClone(draft[policyKey][id])]))
         update.allow_additional_cost = Object.values(update.slot_policy_patch).some(entry => entry.mode === 'custom')
       }
     }
-    return update.backend || update.slot_policy || update.slot_policy_patch ? update : null
+    return update.backend || update.slot_policy_patch ? update : null
   }).filter(Boolean)
   // Nothing visible was edited: an empty plan, not an error (the caller sends nothing).
   if (delta && !updates.length && part === 'native' && !backendEdited && !editedSpares.length) return { body: { partial_save_schema: PARTIAL_SAVE_SCHEMA, expected_revision: revision, updates: [] }, skipped }
@@ -3034,7 +2880,6 @@ export function submittedEditCoverage(view, sent) {
       if ((scope === null || scope === 'routing') && body.routing) {
         const routingTargets = Array.isArray(body.routing_targets) ? body.routing_targets : [body.profile]
         if (routingTargets.length) {
-          if (sameValue(body.routing.heavy, view.routing?.heavy) && sameValue(body.routing.light, view.routing?.light)) covered.add('routing.roles')
           if (Object.prototype.hasOwnProperty.call(body.routing, 'slots')) {
             const sent = body.routing.slots && typeof body.routing.slots === 'object' ? body.routing.slots : {}
             if (body.partial_save_schema === PARTIAL_SAVE_SCHEMA) {
@@ -3054,7 +2899,7 @@ export function submittedEditCoverage(view, sent) {
       if (Array.isArray(body.timeout_updates) && body.timeout_updates.length) {
         // A partial body covers the time-limit edit when every update carries every changed field.
         const fields = Array.isArray(view.timeoutFields) ? view.timeoutFields : []
-        if (body.partial_save_schema !== PARTIAL_SAVE_SCHEMA || body.timeout_updates.every(update => fields.every(key => has(update, key)))) covered.add('timeouts')
+        if (body.partial_save_schema !== PARTIAL_SAVE_SCHEMA || body.timeout_updates.every(update => fields.every(field => timeoutUpdateFields(update).includes(field)))) covered.add('timeouts')
       }
       coverFallbacks(body.fallback_updates)
     } else if (operation === '/fallback-preview') {
@@ -3062,8 +2907,8 @@ export function submittedEditCoverage(view, sent) {
     } else if (operation === '/delegation-preview' && view.native) {
       const updates = body.updates
       if (part === 'native' && body.partial_save_schema === PARTIAL_SAVE_SCHEMA) {
-        // Partial updates: a method sent at all is the drafted one; a spare-model part (patch, or the
-        // whole view for a two-role block) carries every edited slot as drafted for the drafted method.
+        // Partial updates: a method sent at all is the drafted one; a spare-model patch carries every
+        // edited slot as drafted for the drafted method.
         const withBackend = (updates || []).filter(update => has(update, 'backend'))
         if (every(withBackend, update => update.backend === view.native.backend)) covered.add('native.backend')
         if (every(updates, update => update.backend === view.native.backend)) covered.add('native.copy')
@@ -3101,12 +2946,6 @@ export function submittedEditCoverage(view, sent) {
     }
   }
   return covered
-}
-
-export function nativePrimaryModel(row, role) {
-  const declaration = row?.routing?.[role]
-  const route = declaration?.follow === 'custom' ? declaration.custom : row?.models?.[role === 'heavy' ? 'main' : 'delegation']
-  return route && typeof route.model === 'string' && route.model ? route : null
 }
 
 const nativeBackendLabel = value => NATIVE_DELEGATION_BACKENDS.find(item => item.value === value)?.label || NATIVE_DELEGATION_LEGACY_LABELS[value] || '별도 고급 설정'
@@ -3327,14 +3166,10 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
     const coder = slot.id === 'verify-complex' ? slotResolvedRoute(slots.draft['code-complex'], slots.models) : null
     const sameAsCoder = Boolean(coder && resolved && coder.model && coder.provider === resolved.provider && coder.model === resolved.model)
     const primaryLocked = slots.disabled || !slots.support.editable
-    // A slot stored as following the delegation model: shown as that value (disabled in the picker),
-    // never switched by the page; the operator may pick another basis, and go back to the stored one.
-    const legacy = declaration.follow === LEGACY_SLOT_FOLLOW
-    const storedLegacy = slots.frozen?.[slot.id]?.follow === LEGACY_SLOT_FOLLOW
     const spare = spareReady && !slot.custom ? nativeDraftSlotPolicy(draft)[slot.id] : null
     const model = [
       jsx(ChoiceField, { id: `slot-${slot.id}-follow`, label: '모델 기준', value: declaration.follow, disabled: primaryLocked,
-        options: slotFollowOptions(declaration, slots.models), onChange: follow => slots.onFollow(slot.id, follow) }),
+        options: SLOT_FOLLOW_OPTIONS, onChange: follow => slots.onFollow(slot.id, follow) }),
       declaration.follow === 'custom'
         ? jsx(ModelRouteField, {
           ids: { picker: `slot-${slot.id}-picker`, provider: `slot-${slot.id}-provider`, model: `slot-${slot.id}-model`, reasoning: `slot-${slot.id}-reasoning` },
@@ -3344,12 +3179,9 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
         : jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: 0 }, children: [
           jsx('strong', { id: `slot-${slot.id}-resolved`, style: { overflowWrap: 'anywhere', fontSize: '0.95rem' }, children: resolved?.model || '모델이 설정되지 않았습니다.' }),
           resolved?.model ? jsx('span', { style: styles.hint, children: `연결된 서비스: ${resolved.provider || '—'} · 추론 강도: ${resolved.reasoning || '—'}` }) : null
-        ] }),
-      storedLegacy && !legacy ? jsx(Button, { id: `slot-${slot.id}-follow-revert`, size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: primaryLocked,
-        onClick: () => slots.onRevertFollow(slot.id), children: '저장된 설정으로 되돌리기' }) : null
+        ] })
     ]
     const notes = [
-      legacy ? jsx('p', { id: `slot-${slot.id}-legacy-note`, role: 'note', style: styles.hint, children: '이전 설정이라 그대로 둡니다. 다른 프로필에는 복사하지 않습니다. 바꾸려면 위에서 기준을 고르세요.' }) : null,
       sameAsCoder ? jsx('p', { id: 'slot-verify-same-model-note', role: 'note', style: styles.hint, children: '‘코드 · 복잡’과 같은 모델입니다. 같은 모델이 하는 검수는 다른 모델이 하는 검수와 같지 않습니다.' }) : null
     ]
     const ids = { root: `slot-${slot.id}-fallback`, mode: `slot-${slot.id}-fallback-mode`, add: `slot-${slot.id}-fallback-add`,
@@ -3362,8 +3194,10 @@ function NativeDelegationCard({ dto, draft, targets, disabled, onChange, catalog
       onRemove: index => updateSparePolicy(slot.id, current => ({ ...current, chain: current.chain.filter((_, at) => at !== index) })),
       onAdd: () => updateSparePolicy(slot.id, current => ({ ...current, chain: [...current.chain, { provider: '', model: '' }] })) })
       : jsx('p', { style: styles.hint, children: slot.custom ? '사용자지정 슬롯은 예비 모델을 지원하지 않습니다. 이 모델을 쓸 수 없으면 작업이 실패합니다.' : '이 슬롯의 예비 모델은 플러그인을 업데이트한 뒤 설정할 수 있습니다.' })
+    // The slot's runtime limit as saved for the loaded profile (edited in the time-limit section).
+    const limit = slot.limitLabel || slots.limitText?.(slot.id) || ''
     return jsx(ModelCard, { id: `slot-${slot.id}`, title: slot.custom ? `${slot.label} · 사용자지정` : slot.label, description: slot.description,
-      badge: jsx(Badge, { variant: 'muted', children: slot.limitLabel || (slot.tier === 'heavy' ? '긴 작업 제한' : '짧은 작업 제한') }),
+      badge: limit ? jsx(Badge, { variant: 'muted', 'data-slot-limit': slot.id, children: limit }) : null,
       model, notes, spare: spareEditor }, slot.id)
   }
   return jsxs('div', { id: 'native-delegation-settings', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem', minWidth: 0 }, children: [
@@ -3489,12 +3323,9 @@ function ProfileDelegationCard({ dto, draft, profiles, origin, targets, disabled
 }
 
 // The '사용자지정 슬롯' section: define up to four operator slots (shared by every profile), saved on
-// its own through 'custom-slots-preview' and 'apply'. Each profile then picks the slot's model on its
-// slot card. Removing a slot also removes its model setting from every profile (listed before apply).
-export const CUSTOM_SLOT_TIERS = Object.freeze([
-  { value: 'heavy', label: '긴 작업 제한 (Heavy)' },
-  { value: 'light', label: '짧은 작업 제한 (Light)' }
-])
+// its own through 'custom-slots-preview' and 'apply'. A definition is {id, label, description}; each
+// profile then picks the slot's model on its slot card and its runtime limit in the time-limit section.
+// Removing a slot also removes its model setting from every profile (listed before apply).
 export function customSlotDraftError(list) {
   if (!Array.isArray(list)) return '슬롯 목록을 확인할 수 없습니다.'
   if (list.length > CUSTOM_SLOT_LIMIT) return `사용자지정 슬롯은 ${CUSTOM_SLOT_LIMIT}개까지 만들 수 있습니다.`
@@ -3508,7 +3339,6 @@ export function customSlotDraftError(list) {
     if (labels.has(label.toLowerCase())) return `${name}: 같은 이름이 이미 있습니다.`
     const description = typeof item.description === 'string' ? item.description : ''
     if (!description || description !== description.trim() || textLength(description) > 120 || !CUSTOM_SLOT_TEXT.test(description)) return `${name}: 설명은 앞뒤 공백 없이 한 줄, 1~120자로 쓰세요. 줄바꿈·제어문자·보이지 않는 서식 문자(이모지 결합 문자 포함)는 쓸 수 없습니다.`
-    if (!['heavy', 'light'].includes(item.tier)) return `${name}: 시간 제한 종류를 고르세요.`
     ids.add(item.id)
     labels.add(label.toLowerCase())
   }
@@ -3562,7 +3392,7 @@ function CustomSlotsSection({ status, rest, disabled, onApplied }) {
   const error = editing ? customSlotDraftError(plain(draft)) : ''
   const locked = disabled || busy || Boolean(preview)
   const edit = (index, field, value) => { setPreview(null); setMessage(''); setDraft(current => (current ?? stored).map((item, at) => at === index ? { ...item, [field]: value } : item)) }
-  const add = () => { setPreview(null); setMessage(''); setDraft(current => [...(current ?? stored), { id: 'custom:', label: '', description: '', tier: 'heavy', fresh: true }]) }
+  const add = () => { setPreview(null); setMessage(''); setDraft(current => [...(current ?? stored), { id: 'custom:', label: '', description: '', fresh: true }]) }
   const remove = index => { setPreview(null); setMessage(''); setDraft(current => (current ?? stored).filter((_, at) => at !== index)) }
   const reset = () => { setDraft(null); setPreview(null); setMessage('') }
   const check = async () => {
@@ -3597,15 +3427,14 @@ function CustomSlotsSection({ status, rest, disabled, onApplied }) {
       jsxs('div', { style: styles.fields, children: [
         isNew ? jsx(Field, { id: `custom-slot-${index}-id`, label: 'ID (영문 소문자·숫자·하이픈)', value: name, disabled: locked,
           onChange: value => edit(index, 'id', `custom:${value.trim().toLowerCase()}`), hint: '에이전트가 이 값을 목적(purpose)으로 보냅니다. 저장한 뒤에는 바꿀 수 없습니다.' }) : null,
-        jsx(Field, { id: `custom-slot-${index}-label`, label: '이름 (24자 이내)', value: item.label, disabled: locked, onChange: value => edit(index, 'label', value) }),
-        jsx(ChoiceField, { id: `custom-slot-${index}-tier`, label: '시간 제한', value: item.tier, disabled: locked, options: CUSTOM_SLOT_TIERS, onChange: value => edit(index, 'tier', value) })
+        jsx(Field, { id: `custom-slot-${index}-label`, label: '이름 (24자 이내)', value: item.label, disabled: locked, onChange: value => edit(index, 'label', value) })
       ] }),
       jsx(Field, { id: `custom-slot-${index}-description`, label: '맡길 작업 설명 (한 줄, 120자 이내)', value: item.description, disabled: locked, onChange: value => edit(index, 'description', value),
         hint: '에이전트가 이 설명을 보고 슬롯을 고릅니다. 지시문이 아니라 작업 범위를 쓰세요. 예: Blender Python·Three.js 코드와 렌더 결과 검수' }),
       jsx(Button, { id: `custom-slot-${index}-remove`, size: 'sm', variant: 'secondary', style: { alignSelf: 'flex-start' }, disabled: locked, onClick: () => remove(index), children: '이 슬롯 삭제' })
     ] }, `${index}`)
   }
-  return section('사용자지정 슬롯', `3D 작업, 영상 편집, 한국어 글쓰기처럼 특정 작업에 맞는 슬롯을 ${CUSTOM_SLOT_LIMIT}개까지 만듭니다. 슬롯 정의는 모든 프로필이 함께 쓰고, 모델은 위 작업 슬롯 카드에서 프로필마다 정합니다. 예비 모델은 지원하지 않습니다.`, jsxs('div', { id: 'custom-slots', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
+  return section('사용자지정 슬롯', `3D 작업, 영상 편집, 한국어 글쓰기처럼 특정 작업에 맞는 슬롯을 ${CUSTOM_SLOT_LIMIT}개까지 만듭니다. 슬롯 정의는 모든 프로필이 함께 쓰고, 모델은 위 작업 슬롯 카드에서, 실행 시간 제한은 아래 시간 제한 섹션에서 프로필마다 정합니다. 예비 모델은 지원하지 않습니다.`, jsxs('div', { id: 'custom-slots', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: [
     blocking.length ? jsx('p', { id: 'custom-slots-blocked', role: 'note', style: styles.warning, children: `다음 프로필의 플러그인을 먼저 업데이트해야 사용자지정 슬롯을 저장할 수 있습니다: ${blocking.join(', ')}. 모든 슬롯을 지우는 저장은 지금도 할 수 있습니다.` }) : null,
     list.length ? jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.75rem' }, children: list.map(row) }) : jsx('p', { style: styles.hint, children: '아직 만든 사용자지정 슬롯이 없습니다.' }),
     jsxs('div', { style: styles.actions, children: [
@@ -3740,7 +3569,6 @@ function RouterPage({ ctx: pluginContext }) {
   // Profiles the operator explicitly ticked to turn task routing back on (sent as reenable_profiles).
   const [reenableChosen, setReenableChosen] = useState([])
   const [routingTargets, setRoutingTargets] = useState(null)
-  const [routingBaseline, setRoutingBaseline] = useState(null)
   const [routingTargetEdited, setRoutingTargetEdited] = useState(false)
   // Each section's explicit ‘현재 설정 전체 복사’ intent. A hand-picked target list alone copies nothing:
   // without it a save sends only the values that differ from what was loaded. Reset by a reload, a
@@ -3751,9 +3579,9 @@ function RouterPage({ ctx: pluginContext }) {
   // Whether the whole-page save has anything to write (set each render; read by its handler).
   const pageWriteNeededRef = useRef(false)
   // The conversation spare models (native fallback) as drafted and as loaded; they are saved by the
-  // model section to its own targets. The routing/delegation values are read only, never written.
-  const [fallbackDrafts, setFallbackDrafts] = useState({ native: null, routing: null, delegation: null })
-  const [fallbackBaselines, setFallbackBaselines] = useState({ native: null, routing: null, delegation: null })
+  // model section to its own targets. The delegation value is read only, never written.
+  const [fallbackDrafts, setFallbackDrafts] = useState({ native: null, delegation: null })
+  const [fallbackBaselines, setFallbackBaselines] = useState({ native: null, delegation: null })
   // The compression and title-generation spare models (auxiliary.{task}.fallback_chain), as drafted and
   // as loaded; saved by the model section to its targets, like the conversation spare models.
   const [auxiliaryDrafts, setAuxiliaryDrafts] = useState({ compression: null, title: null })
@@ -3833,16 +3661,13 @@ function RouterPage({ ctx: pluginContext }) {
   const timeoutSourceRevisionChanged = Boolean(timeoutBaseline && (
     !validTimeoutsDto(loadedTimeoutRow?.timeouts) ||
     timeoutBaselineMap[selectedProfile]?.editable !== loadedTimeoutRow?.timeouts?.editable ||
-    timeoutBaselineMap[selectedProfile]?.split_routing_supported !== (loadedTimeoutRow?.timeouts?.split_routing_supported === true) ||
     !timeoutRevisionMatches(timeoutBaselineMap[selectedProfile], loadedTimeoutRow?.timeouts)
   ))
   const timeoutTargetsRevisionChanged = selectedTimeoutTargets.some(name => {
     const row = profiles.find(item => item.name === name)
     const baseline = timeoutBaselineMap[name]
     return !validTimeoutsDto(row?.timeouts) || baseline?.editable !== row?.timeouts?.editable ||
-      baseline?.split_routing_supported !== (row?.timeouts?.split_routing_supported === true) ||
-      row?.timeouts?.editable !== true || row?.timeouts?.split_routing_supported !== true ||
-      !timeoutRevisionMatches(baseline, row?.timeouts)
+      row?.timeouts?.editable !== true || !timeoutRevisionMatches(baseline, row?.timeouts)
   })
   const timeoutRevisionChanged = timeoutWriteRequested && (timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged)
   const timeoutSaveRevisionChanged = timeoutSourceRevisionChanged || timeoutTargetsRevisionChanged
@@ -3890,13 +3715,12 @@ function RouterPage({ ctx: pluginContext }) {
     setRoutingProfiles([])
     setReenableChosen([])
     setRoutingTargets(null)
-    setRoutingBaseline(null)
     setRoutingTargetEdited(false)
     setModelCopyAll(false)
     setProfileCopyAll(false)
     setTimeoutCopyAll(false)
-    setFallbackDrafts({ native: null, routing: null, delegation: null })
-    setFallbackBaselines({ native: null, routing: null, delegation: null })
+    setFallbackDrafts({ native: null, delegation: null })
+    setFallbackBaselines({ native: null, delegation: null })
     setAuxiliaryDrafts({ compression: null, title: null })
     setAuxiliaryBaselines({ compression: null, title: null })
     setPageError('')
@@ -3943,16 +3767,14 @@ function RouterPage({ ctx: pluginContext }) {
     // until the operator edits the list by hand.
     setTimeoutTargets(null)
     setTimeoutTargetEdited(false)
-    setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
     setRoutingTargetEdited(false)
     setModelCopyAll(false)
     setProfileCopyAll(false)
     setTimeoutCopyAll(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
-    const routingFallback = copyRoutingFallbackDraft(row.fallbacks?.routing)
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
-    setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
-    setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
+    setFallbackDrafts({ native: nativeFallback, delegation: delegationFallback })
+    setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
     setAuxiliaryDrafts(copyAuxiliaryDrafts(row))
     setAuxiliaryBaselines(copyAuxiliaryDrafts(row))
     setModelTargets([row.name])
@@ -4016,41 +3838,12 @@ function RouterPage({ ctx: pluginContext }) {
   // A partial save sends only the slots whose declaration changed (all six on copy-all).
   const editedSlots = slotInfo.editable && draft?.slots && frozenProfile ? editedSlotIds(draft.slots, frozenProfile.slots) : []
   const slotSendIds = !draft?.slots ? [] : partialSave && !slotCopyAll ? editedSlots : taskSlots().map(slot => slot.id).filter(id => draft.slots[id])
-  // A slot still following the delegation model (an earlier setting) is never copied to another
-  // profile: the slot models then go to the loaded profile only, and every other target is named as
-  // keeping its own slot models. No copy intent is pending for them.
-  const slotsCopyOk = slotsCopyable(draft?.slots)
-  // ...and never over another profile's own slot that still follows the delegation model: the slot
-  // map is replaced as a whole, so such a target keeps all its slot models and is named as skipped.
-  // Only a slot the receiving profile has explicitly stored that way (slots.stored); a never-saved slot
-  // merely shown through its tier's default link is not a setting to protect (as service.py keeps).
-  const legacySlotTarget = name => {
-    if (name === selectedProfile) return false
-    const row = profiles.find(item => item.name === name)
-    return (Array.isArray(row?.slots?.stored) ? row.slots.stored : []).some(id => row?.slots?.declarations?.[id]?.follow === LEGACY_SLOT_FOLLOW)
-  }
-  // A partial save merges the slots it sends over each target's own (service.py _merge_partial_slots):
-  // a target keeps only those submitted slots it stores as following the delegation model, and takes
-  // the save unless it keeps every one of them. Edited slots never follow the delegation model, so the
-  // loaded profile's own earlier slots restrict only a whole-map copy.
-  const partialSlotMerge = partialSave && (slotsCopyOk || !slotCopyAll)
-  const keptSlotsFor = name => partialSlotMerge ? partialSlotSkips(profiles.find(item => item.name === name), slotSendIds, selectedProfile) : []
-  const slotTargetsAllowed = partialSlotMerge ? selectedTargets.filter(name => slotSendIds.some(id => !keptSlotsFor(name).includes(id)))
-    : slotsCopyOk ? selectedTargets.filter(name => !legacySlotTarget(name)) : selectedTargets.filter(name => name === selectedProfile)
-  // Copy intent alone sends slot models only while some chosen target can take them; otherwise the
-  // rest is saved and every chosen target is named as keeping its own slot models.
+  // Slot models go to every target of the section (a partial save merges the sent slots over each
+  // target's own, see mergePartialSlots).
   const routingCopyPending = !revisionChanged && slotInfo.editable && Boolean(draft?.slots) && slotSendIds.length > 0 &&
-    (slotDraftChanged || (slotCopyAll && slotsCopyOk && slotTargetsAllowed.length > 0))
-  const routingWriteTargets = routingCopyPending ? slotTargetsAllowed : []
-  const slotSkippedTargets = slotInfo.editable && Boolean(draft?.slots) && (slotDraftChanged || slotCopyAll)
-    ? selectedTargets.filter(name => !slotTargetsAllowed.includes(name)) : []
-  const slotSkipReason = '이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 다른 프로필에는 복사하지 않음'
-  const targetSlotSkipReason = '이 프로필에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않음'
-  const slotSkipReasonFor = name => slotsCopyOk || partialSlotMerge ? targetSlotSkipReason : slotSkipReason
-  const routingTargetError = routingCopyPending ? slotDraftIssue || (!selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.'
-    : !slotTargetsAllowed.length ? (slotsCopyOk || partialSlotMerge
-      ? `작업 슬롯 모델: 선택한 프로필(${selectedTargets.join(', ')})에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않습니다. 불러온 프로필(${selectedProfile})을 적용 대상에 넣거나 다른 프로필을 고르세요.`
-      : `작업 슬롯 모델: ${slotSkipReason}입니다. 불러온 프로필(${selectedProfile})을 적용 대상에 넣거나, 그 슬롯의 모델 기준을 다시 고르세요.`) : '') : ''
+    (slotDraftChanged || slotCopyAll)
+  const routingWriteTargets = routingCopyPending ? selectedTargets : []
+  const routingTargetError = routingCopyPending ? slotDraftIssue || (!selectedTargets.length ? '‘모델’ 섹션의 적용 대상이 0개입니다. 적용할 프로필을 하나 이상 선택하세요.' : '') : ''
   // A Hermes-native service (status `model_settings_schema: 1`) takes only the roles a save writes:
   // each edited role, and on explicit copy intent each role Hermes holds as a verified explicit value.
   // Those roles are 'held': their frozen values stay, everything else follows the newest status.
@@ -4092,7 +3885,7 @@ function RouterPage({ ctx: pluginContext }) {
   const serverDrift = serverConflict ? [conflictDrift(serverConflict)] : []
   // On a Hermes-native service only the held roles of the loaded profile and the model targets count.
   const modelCheck = modelSettings ? { roles: [...requestedRoles], targets: [...modelWriteTargets] } : null
-  // A partial save compares only the slots it writes (and no Heavy/Light) of the loaded profile.
+  // A partial save compares only the slots it writes of the loaded profile.
   const routingCheck = partialSave ? { slots: routingCopyPending ? [...slotSendIds] : [] } : null
   const driftItems = [...pageLiveDrift(profiles, selectedProfile, profileBaselines, expectationBaselines, modelCheck, routingCheck), ...serverDrift]
   const storeDrift = driftItems.filter(item => driftKind(item) === 'store')
@@ -4168,7 +3961,7 @@ function RouterPage({ ctx: pluginContext }) {
     (modelCopyAll || nativeChangePending)
   let nativeDelegationError = ''
   let nativeBatchBody = null
-  // Per target, why a partial save leaves its slot spare models as stored (another method, two-role block).
+  // Per target, why a partial save leaves its slot spare models as stored (another method, unreadable block).
   let nativeSpareSkips = {}
   const nativeOptions = { partial: partialSave, copyAll: modelCopyAll }
   if (nativeChangePending && selectedTargets.includes(selectedProfile) && nativeTargetReasons[selectedProfile]) {
@@ -4314,14 +4107,12 @@ function RouterPage({ ctx: pluginContext }) {
   dirtyPartsRef.current = {
     // Without a frozen baseline an edit can never be shown as saved.
     models: Boolean(draft && (!frozenProfile || differs(draft.models, frozenProfile.models))),
-    'routing.roles': Boolean(draft && frozenProfile && (differs(draft.routing?.heavy, frozenProfile.routing?.heavy) || differs(draft.routing?.light, frozenProfile.routing?.light))),
     'routing.slots': Boolean(draft && frozenProfile && differs(draft.slots, frozenProfile.slots)),
     // The section's ‘현재 설정 전체 복사’ checkbox is a pending copy of the role models, of the slot
     // models while their cards are on screen, and of the delegation method to profiles stored on a
     // plugin method (a hand-picked target list alone is not).
     'copy.models': Boolean(modelCopyAll && (!modelSettings || requestedRoles.length > 0)),
-    // (never while a slot still follows the delegation model: such slot models are not copied)
-    'copy.slots': Boolean(slotCopyAll && draft?.slots && slotsCopyOk && slotTargetsAllowed.length > 0),
+    'copy.slots': Boolean(slotCopyAll && draft?.slots && selectedTargets.length > 0),
     'native.copy': Boolean(modelCopyAll && nativeBackendCopyable && selectedTargets.some(name => nativeBackendSelectable(nativeDelegationBaselines[name]?.backend))),
     // ...and of the conversation spare models to the targets that can take them.
     'copy.fallback': Boolean(nativeFallbackCopy && nativeFallbackWriteTargets.length),
@@ -4338,7 +4129,7 @@ function RouterPage({ ctx: pluginContext }) {
   // The drafted value of each edit, for checking what a save actually sent.
   const nativeSpareKey = nativeDelegationDraft ? nativeSlotPolicyKey(nativeDelegationDraft.backend) : null
   editViewRef.current = { profile: selectedProfile, models: draft?.models ?? null, editedRoles: modelSettings ? [...editedRoles] : null,
-    routing: draft ? { heavy: draft.routing?.heavy, light: draft.routing?.light } : null, slots: draft?.slots ?? null,
+    slots: draft?.slots ?? null,
     // What a partial save must carry to count as saved: the edited slots and the changed time limits.
     editedSlots: [...editedSlots], timeoutFields: changedTimeoutFields(draft?.timeouts, timeoutBaseline),
     native: nativeDelegationDraft ? { backend: nativeDelegationDraft.backend, slotPolicy: nativeDelegationDraft.slotPolicy ?? null,
@@ -4380,7 +4171,7 @@ function RouterPage({ ctx: pluginContext }) {
   const sectionFallbackBody = nativeFallbackWriteNeeded || auxiliaryWriteNeeded ? buildModelSectionFallbackBody({ profiles, profile: selectedProfile, draft: saveDraft, modelTargets: modelWriteTargets,
     fallbackWrite: nativeFallbackWriteNeeded ? { targets: nativeFallbackWriteTargets, value: fallbackValueForScope('native', nativeFallbackDraft) } : null,
     auxiliaryWrite: auxiliaryWriteNeeded ? auxiliaryWrite : null }, draftRevision).body : null
-  const sectionWriteSet = modelSectionWriteSet({ native: nativeWriteNeeded ? nativeBatchBody : null, store: sectionStoreBody, fallback: sectionFallbackBody, profiles })
+  const sectionWriteSet = modelSectionWriteSet({ native: nativeWriteNeeded ? nativeBatchBody : null, store: sectionStoreBody, fallback: sectionFallbackBody })
   const targetWriteLine = name => {
     const item = sectionWriteSet.get(name)
     const parts = item ? [
@@ -4393,9 +4184,6 @@ function RouterPage({ ctx: pluginContext }) {
         ? `${task.label} 예비 모델(${item.auxiliarySpares[task.id].length ? `${item.auxiliarySpares[task.id].length}개 사용` : '사용 안 함'})` : '')
     ].filter(Boolean) : []
     const kept = [
-      slotSkippedTargets.includes(name) ? `작업 슬롯 모델은 그대로 둠(${slotSkipReasonFor(name)})` : '',
-      // A partial save that leaves some of the submitted slots as that target stores them.
-      !slotSkippedTargets.includes(name) && item?.keptSlots?.length ? `${slotLabels(item.keptSlots)} 슬롯 모델은 그대로 둠(${targetSlotSkipReason})` : '',
       nativeSkippedTargets.includes(name) ? `맡기는 방식·슬롯 예비 모델은 그대로 둠(${nativeTargetReasons[name]})` : '',
       !nativeSkippedTargets.includes(name) && nativeSpareSkips[name] ? `슬롯 예비 모델은 그대로 둠(${nativeSpareSkips[name]})` : '',
       nativeFallbackSkipReasons[name] ? `대화 예비 모델은 그대로 둠(${nativeFallbackSkipReasons[name]})` : '',
@@ -4427,8 +4215,15 @@ function RouterPage({ ctx: pluginContext }) {
   const targetSummary = allTargetsSelected ? `전체 ${profileNames.length}개 프로필` : `${selectedTargets.length}/${profileNames.length}개 프로필`
   const timeoutDraftResult = buildTimeoutUpdate(selectedProfile, draft?.timeouts, timeoutBaseline, currentRow?.timeouts)
   const timeoutSettingsSupported = validTimeoutsDto(currentRow?.timeouts)
-  const timeoutRoleSupported = splitRoutingSupported(currentRow?.timeouts)
-  const timeoutSettingsEditable = timeoutSettingsSupported && timeoutRoleSupported && currentRow?.timeouts?.editable === true && Boolean(draft?.timeouts)
+  const timeoutSettingsEditable = timeoutSettingsSupported && currentRow?.timeouts?.editable === true && Boolean(draft?.timeouts)
+  // The default slot limit as the loaded profile reports it (2 hours), and each slot's saved limit.
+  const defaultSlotSeconds = timeoutSettingsSupported ? currentRow.timeouts.default_slot_seconds : null
+  const defaultSlotText = defaultSlotSeconds === null ? '기본값' : `${timeoutDurationText(defaultSlotSeconds)} (기본값)`
+  const slotLimitText = id => {
+    if (!timeoutSettingsSupported) return ''
+    const own = currentRow.timeouts.slot_seconds[id]
+    return own === undefined ? `실행 제한 ${timeoutDurationText(defaultSlotSeconds)} · 기본값` : own === 0 ? '실행 제한 없음' : `실행 제한 ${timeoutDurationText(own)}`
+  }
   const disabled = setupPending || profilePreparationLocked() || Boolean(nativeFence) || applyPending || needsReload || revisionChanged || statusQuery.isFetching || !selectedProfile || !draft
   const timeoutSaveValuesValid = Boolean(timeoutPayloadValues(draft?.timeouts, timeoutBaseline))
   const timeoutSaveDisabled = disabled || !timeoutSettingsEditable || !selectedTimeoutTargets.length || missingTimeoutTargets.length > 0 ||
@@ -4473,16 +4268,14 @@ function RouterPage({ ctx: pluginContext }) {
     setProfileTargetEdited(false)
     setTimeoutBaseline(copyTimeoutBaselineShape(loadedBaseline.timeouts))
     setTimeoutTargetEdited(false)
-    setRoutingBaseline(deepClone({ heavy: loadedBaseline.routing.heavy, light: loadedBaseline.routing.light }))
     setRoutingTargetEdited(false)
     setModelCopyAll(false)
     setProfileCopyAll(false)
     setTimeoutCopyAll(false)
     const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
-    const routingFallback = copyRoutingFallbackDraft(row.fallbacks?.routing)
     const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
-    setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
-    setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
+    setFallbackDrafts({ native: nativeFallback, delegation: delegationFallback })
+    setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
     setAuxiliaryDrafts(copyAuxiliaryDrafts(row))
     setAuxiliaryBaselines(copyAuxiliaryDrafts(row))
     // A hand-picked list survives a source switch as picked, vanished names included; only the
@@ -4567,17 +4360,15 @@ function RouterPage({ ctx: pluginContext }) {
     ...current,
     timeouts: { ...current.timeouts, [key]: value }
   }))
-  // Only the offered bases can be picked; the earlier 'delegation' basis is shown, never chosen here.
+  // A slot's own limit in minutes; a blank field removes it (the slot then runs with the default).
+  const updateSlotTimeout = (slot, value) => updateDraft(current => current.timeouts ? ({
+    ...current,
+    timeouts: { ...current.timeouts, slot_minutes: { ...(current.timeouts.slot_minutes || {}), [slot]: value } }
+  }) : current)
   const changeSlotFollow = (slot, follow) => {
     if (!SLOT_FOLLOW_OPTIONS.some(option => option.value === follow)) return
     updateDraft(current => current.slots?.[slot]
       ? { ...current, slots: { ...current.slots, [slot]: slotFollowDeclaration(current.slots[slot], follow, current.models) } } : current)
-  }
-  // Back to the declaration stored when the profile was loaded (the way back to an earlier basis).
-  const revertSlotFollow = slot => {
-    const stored = profileBaselines?.[selectedProfile]?.slots?.[slot]
-    if (!stored) return
-    updateDraft(current => current.slots?.[slot] ? { ...current, slots: { ...current.slots, [slot]: deepClone(stored) } } : current)
   }
   const updateSlotRoute = (slot, field, value) => updateDraft(current => current.slots?.[slot]?.follow === 'custom'
     ? { ...current, slots: { ...current.slots, [slot]: { follow: 'custom', custom: { ...(current.slots[slot].custom || {}), [field]: value } } } } : current)
@@ -4649,7 +4440,6 @@ function RouterPage({ ctx: pluginContext }) {
       const baseline = snapshot.timeoutBaselinesByProfile?.[name]
       const current = currentRows.find(row => row.name === name)?.timeouts
       if (!baseline || !validTimeoutsDto(current) || current.editable !== baseline.editable ||
-        current.split_routing_supported !== baseline.split_routing_supported || current.split_routing_supported !== true ||
         (name !== snapshot.profile && current.editable !== true)) return false
       return timeoutRevisionMatches(baseline, current)
     })
@@ -5046,17 +4836,7 @@ function RouterPage({ ctx: pluginContext }) {
           snapshot.modelRoles,
           snapshot.partialSave
         )
-        const routingUpdates = (combined.body.fallback_updates || [])
-          .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
-          .map(update => update.profile)
-        const projectedErrors = projectedRoutingFallbackErrors(snapshot.profiles, {
-          profile: snapshot.profile,
-          models: projectedModels(snapshot.draft.models, snapshot.modelRoles),
-          routing: combined.body.routing,
-          model_targets: combined.body.model_targets,
-          routing_targets: combined.body.routing_targets
-        }, routingUpdates)
-        return { body: combined.body, errors: [...new Set([...combined.errors, ...projectedErrors, ...(snapshot.routingTargetError ? [snapshot.routingTargetError] : []), ...(snapshot.noTargetError ? [snapshot.noTargetError] : []), ...(snapshot.modelRoleError ? [snapshot.modelRoleError] : []),
+        return { body: combined.body, errors: [...new Set([...combined.errors, ...(snapshot.routingTargetError ? [snapshot.routingTargetError] : []), ...(snapshot.noTargetError ? [snapshot.noTargetError] : []), ...(snapshot.modelRoleError ? [snapshot.modelRoleError] : []),
           ...(snapshot.nativeFallbackTargetError ? [snapshot.nativeFallbackTargetError] : []), ...(snapshot.auxiliaryFallbackTargetError ? [snapshot.auxiliaryFallbackTargetError] : [])])] }
       }
     })
@@ -5129,26 +4909,23 @@ function RouterPage({ ctx: pluginContext }) {
       const nextDraft = copyProfileDraft(row)
       setSelectedProfile(row.name)
       setDraft(nextDraft)
-    setNativeDelegationDraft(copyNativeDelegationDraft(row.native_delegation))
+      setNativeDelegationDraft(copyNativeDelegationDraft(row.native_delegation))
       setTimeoutBaseline(copyTimeoutBaseline(row.timeouts))
-      setRoutingBaseline(deepClone({ heavy: row.routing.heavy, light: row.routing.light }))
       setRoutingTargetEdited(false)
       const nativeFallback = copyNativeFallbackDraft(row.fallbacks?.native)
-      const routingFallback = copyRoutingFallbackDraft(row.fallbacks?.routing)
       const delegationFallback = copyDelegationFallbackDraft(row.fallbacks?.delegation)
-      setFallbackDrafts({ native: nativeFallback, routing: routingFallback, delegation: delegationFallback })
-      setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, routing: routingFallback ? deepClone(routingFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
+      setFallbackDrafts({ native: nativeFallback, delegation: delegationFallback })
+      setFallbackBaselines({ native: nativeFallback ? deepClone(nativeFallback) : null, delegation: delegationFallback ? deepClone(delegationFallback) : null })
       setAuxiliaryDrafts(copyAuxiliaryDrafts(row))
       setAuxiliaryBaselines(copyAuxiliaryDrafts(row))
     } else {
       setSelectedProfile(null)
       setDraft(null)
-    setNativeDelegationDraft(null)
+      setNativeDelegationDraft(null)
       setTimeoutBaseline(null)
-      setRoutingBaseline(null)
       setRoutingTargetEdited(false)
-      setFallbackDrafts({ native: null, routing: null, delegation: null })
-      setFallbackBaselines({ native: null, routing: null, delegation: null })
+      setFallbackDrafts({ native: null, delegation: null })
+      setFallbackBaselines({ native: null, delegation: null })
       setAuxiliaryDrafts({ compression: null, title: null })
       setAuxiliaryBaselines({ compression: null, title: null })
     }
@@ -5288,7 +5065,6 @@ function RouterPage({ ctx: pluginContext }) {
       allTargetsSelected && profileNames.length > 1 ? jsx('p', { role: 'note', style: styles.warning, children: `모든 ${profileNames.length}개 프로필이 적용 대상입니다. 저장하면 확인 단계 없이 바로 적용됩니다.` }) : null,
       jsx('div', { style: { ...styles.profileList, alignItems: 'start' }, children: profiles.map(row => jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, { id: `model-target-${row.name}`, label: row.name,
         detail: selectedTargets.includes(row.name) ? [
-          slotSkippedTargets.includes(row.name) ? `작업 슬롯 모델은 적용하지 않습니다. ${slotSkipReasonFor(row.name)}.` : '',
           nativeSkippedTargets.includes(row.name) ? `맡기는 방식과 슬롯 예비 모델은 적용하지 않습니다. ${nativeTargetReasons[row.name]}` : '',
           nativeFallbackSkippedTargets.includes(row.name) ? `대화 예비 모델은 적용하지 않습니다. ${nativeFallbackSkipReasons[row.name]}` : '',
           ...AUXILIARY_TASKS.map(task => auxiliary[task.id].skipReasons[row.name] ? `${task.label} 예비 모델은 적용하지 않습니다. ${auxiliary[task.id].skipReasons[row.name]}` : '')
@@ -5303,7 +5079,6 @@ function RouterPage({ ctx: pluginContext }) {
         nativeSkippedTargets.length ? jsx('p', { id: 'model-section-skipped', style: styles.hint, children: `맡기는 방식과 슬롯 예비 모델을 적용하지 않는 프로필: ${nativeSkippedTargets.join(', ')}. 이 프로필의 맡기는 방식과 슬롯 예비 모델은 그대로 둡니다.` }) : null,
         nativeFallbackSkippedTargets.length ? jsx('p', { id: 'model-section-fallback-skipped', style: styles.hint, children: `대화 예비 모델을 적용하지 않는 프로필: ${nativeFallbackSkippedTargets.join(', ')}. 이 프로필의 대화 예비 모델은 그대로 둡니다.` }) : null,
         ...AUXILIARY_TASKS.map(task => auxiliary[task.id].skipped.length ? jsx('p', { id: `model-section-aux-${task.id}-skipped`, style: styles.hint, children: `${task.label} 예비 모델을 적용하지 않는 프로필: ${auxiliary[task.id].skipped.join(', ')}. 이 프로필의 ${task.label} 예비 모델은 그대로 둡니다.` }, task.id) : null),
-        slotSkippedTargets.length ? jsx('p', { id: 'model-section-slot-skipped', style: styles.hint, children: `작업 슬롯 모델을 적용하지 않는 프로필: ${slotSkippedTargets.join(', ')}. ${slotsCopyOk ? '그 프로필에' : '불러온 프로필에'} 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있습니다. 이 프로필의 슬롯 모델은 그대로 둡니다.` }) : null,
         sectionWriteNeeded ? jsx('ul', { id: 'model-section-target-writes', style: { ...styles.hint, margin: 0, paddingLeft: '1.1rem' },
           children: selectedTargets.map(name => jsx('li', { id: `model-section-write-${name}`, children: targetWriteLine(name) }, name)) }) : null
       ] }),
@@ -5326,14 +5101,32 @@ function RouterPage({ ctx: pluginContext }) {
     ]
   }) : null
 
-  const timeoutSettingsSection = section('작업별 실행 시간 제한', '불러온 프로필에서 일반 작업, 짧은 작업 슬롯, 긴 작업 슬롯의 시간 제한을 각각 분 단위로 편집하고, 아래 시간 제한 적용 대상에 복사합니다. 짧은 작업 제한은 코드·검증(간단)·컴퓨터 유즈 슬롯에, 긴 작업 제한은 설계·검증(복잡) 슬롯에 적용됩니다. 조언 슬롯은 호출마다 5분으로 고정됩니다. 모델·라우팅·폴백 적용 대상과는 독립적입니다.', jsxs('div', {
+  // One field per task slot (built-ins, then the defined custom slots). A blank field is "no own limit":
+  // the slot then runs with the default limit, shown as the placeholder. The advisor's limit is fixed by
+  // its tool, so it is shown, not edited.
+  const timeoutFieldsLocked = disabled || timeoutRevisionChanged || !timeoutSettingsEditable
+  const slotTimeoutFields = taskSlots().map(slot => slot.fixedLimit
+    ? jsxs('div', { id: `slot-timeout-${slot.id}`, style: styles.field, children: [
+      jsx('span', { style: styles.fieldName, children: slot.label }),
+      jsx('span', { style: { ...styles.hint, paddingBlock: '0.45rem' }, children: '5분 고정 · ask_advisor 도구가 호출마다 정합니다. 이 화면에서는 바꾸지 않습니다.' })
+    ] }, slot.id)
+    : jsx(TimeoutField, {
+      id: `slot-timeout-${slot.id}`,
+      label: `${slot.custom ? `${slot.label} · 사용자지정` : slot.label} (분)`,
+      value: draft?.timeouts?.slot_minutes?.[slot.id],
+      placeholder: defaultSlotText,
+      hint: `분 (minutes) · 비우면 ${defaultSlotText} · 0은 제한 없음`,
+      onChange: value => updateSlotTimeout(slot.id, value),
+      disabled: timeoutFieldsLocked,
+      describedBy: 'timeout-policy-explanation'
+    }, slot.id))
+  const timeoutSettingsSection = section('작업별 실행 시간 제한', `불러온 프로필의 일반 위임 작업과 작업 슬롯마다의 실행 시간 제한을 분 단위로 편집하고, 아래 시간 제한 적용 대상에 저장합니다. 슬롯 칸을 비워 두면 기본값(${defaultSlotSeconds === null ? '확인할 수 없음' : timeoutDurationText(defaultSlotSeconds)})이 적용되고, 0은 제한하지 않습니다. 조언 슬롯은 호출마다 5분으로 고정됩니다. 모델·라우팅·폴백 적용 대상과는 독립적입니다.`, jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '0.8rem' },
     children: [
-      jsx('p', { id: 'timeout-policy-explanation', role: 'note', style: styles.hint, children: '작업을 얼마나 오래 실행할지 분 단위로 정합니다. 0은 전체 실행 시간을 제한하지 않습니다. 제한에 도달하면 중단을 요청하지만, 실제로 멈추기까지 시간이 걸릴 수 있습니다. 응답 대기 같은 Hermes의 다른 제한은 그대로 유지됩니다. 이전에 하나로 설정했던 값은 짧은 작업과 긴 작업에 같은 값으로 표시됩니다.' }),
+      jsx('p', { id: 'timeout-policy-explanation', role: 'note', style: styles.hint, children: '작업을 얼마나 오래 실행할지 분 단위로 정합니다. 0은 전체 실행 시간을 제한하지 않습니다. 제한에 도달하면 중단을 요청하지만, 실제로 멈추기까지 시간이 걸릴 수 있습니다. 응답 대기 같은 Hermes의 다른 제한은 그대로 유지됩니다.' }),
       jsx('p', { style: styles.hint, children: '작업을 시작할 때의 설정을 사용합니다. 이미 진행 중인 작업의 시간은 바뀌지 않습니다. 응답 대기나 반복 횟수 등 다른 제한은 별도로 적용됩니다.' }),
-      !timeoutSettingsSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '이 연결에서는 시간 제한을 변경할 수 없습니다. 기존 값을 그대로 표시합니다. Hermes와 플러그인 버전을 확인하세요.' }) : null,
-      timeoutSettingsSupported && !timeoutRoleSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '이 연결에서는 짧은 작업과 긴 작업의 시간 제한을 따로 변경할 수 없습니다. 기존 값을 유지합니다.' }) : null,
-      timeoutSettingsSupported && timeoutRoleSupported && currentRow.timeouts.editable !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필의 시간 제한은 읽기 전용입니다. 기존 값을 보존합니다.' }) : null,
+      !timeoutSettingsSupported ? jsx('p', { role: 'alert', style: styles.warning, children: '이 연결에서는 시간 제한을 확인할 수 없어 변경하지 않습니다. 기존 값은 그대로 둡니다. Hermes와 플러그인 버전을 확인하세요.' }) : null,
+      timeoutSettingsSupported && currentRow.timeouts.editable !== true ? jsx('p', { role: 'note', style: styles.warning, children: '이 프로필의 시간 제한은 읽기 전용입니다. 기존 값을 보존합니다.' }) : null,
       timeoutRevisionChanged || timeoutSaveRevisionChanged ? jsx('p', { role: 'alert', style: styles.warning, children: '선택한 프로필의 시간 제한 설정이 다른 곳에서 바뀌었습니다. 덮어쓰지 않도록 저장을 멈췄습니다. 최신 상태를 다시 불러오세요.' }) : null,
       timeoutSettingsSupported && currentRow.timeouts.warnings.length ? jsx('div', { role: 'note', style: styles.warning, children: currentRow.timeouts.warnings.map((warning, index) => jsx('p', { style: { margin: index ? '0.35rem 0 0' : 0 }, children: warning }, index)) }) : null,
       timeoutDraftResult.error ? jsx('p', { role: 'alert', style: styles.warning, children: timeoutDraftResult.error }) : null,
@@ -5343,29 +5136,15 @@ function RouterPage({ ctx: pluginContext }) {
           label: '일반 위임 작업 제한 (분)',
           value: draft?.timeouts?.delegate_total_minutes,
           onChange: value => updateTimeout('delegate_total_minutes', value),
-          disabled: disabled || timeoutRevisionChanged || !timeoutSettingsEditable,
-          describedBy: 'timeout-policy-explanation'
-        }),
-        jsx(TimeoutField, {
-          id: 'routed-light-total-minutes',
-          label: '짧은 작업 제한 (분)',
-          value: draft?.timeouts?.routed_light_total_minutes,
-          onChange: value => updateTimeout('routed_light_total_minutes', value),
-          disabled: disabled || timeoutRevisionChanged || !timeoutSettingsEditable,
-          describedBy: 'timeout-policy-explanation'
-        }),
-        jsx(TimeoutField, {
-          id: 'routed-heavy-total-minutes',
-          label: '긴 작업 제한 (분)',
-          value: draft?.timeouts?.routed_heavy_total_minutes,
-          onChange: value => updateTimeout('routed_heavy_total_minutes', value),
-          disabled: disabled || timeoutRevisionChanged || !timeoutSettingsEditable,
+          disabled: timeoutFieldsLocked,
           describedBy: 'timeout-policy-explanation'
         })
       ] }),
+      jsx('h3', { style: styles.groupTitle, children: '작업 슬롯별 제한' }),
+      jsx('div', { id: 'slot-timeout-fields', style: styles.fields, children: slotTimeoutFields }),
       jsx('fieldset', { id: 'timeout-targets', style: styles.fieldset, children: [
         jsx('legend', { style: styles.fieldName, children: '시간 제한 적용 대상' }),
-        jsx('p', { style: styles.hint, children: '처음 열면 역할별 지원이 확인되고 편집 가능한 모든 프로필을 선택합니다. 수동 부분 선택이나 모두 해제는 프로필 전환과 새로고침 후에도 유지됩니다. 대상 선택만으로는 아무것도 복사하지 않으며, 저장하면 바꾼 시간 제한만 선택한 프로필에 저장합니다.' }),
+        jsx('p', { style: styles.hint, children: '처음 열면 시간 제한을 편집할 수 있는 모든 프로필을 선택합니다. 수동 부분 선택이나 모두 해제는 프로필 전환과 새로고침 후에도 유지됩니다. 대상 선택만으로는 아무것도 복사하지 않으며, 저장하면 바꾼 시간 제한만 선택한 프로필에 저장합니다.' }),
         jsx(CheckRow, { id: 'timeout-copy-all', label: COPY_ALL_LABEL, detail: COPY_ALL_HINT, checked: timeoutCopyAll, disabled: disabled || !timeoutSettingsEditable, onChange: checked => chooseCopyAll('timeouts', checked) }),
         jsxs('div', { style: styles.selectionToolbar, children: [
           jsx('span', { style: styles.hint, children: `${selectedTimeoutTargets.length}/${eligibleTimeoutTargets(profiles).length}개 편집 가능 프로필 선택${timeoutCopyAll ? ' · 현재 설정 전체 복사' : ''}` }),
@@ -5377,13 +5156,10 @@ function RouterPage({ ctx: pluginContext }) {
         ] }),
         jsx('div', { style: styles.profileList, children: profiles.map(row => {
           const dtoValid = validTimeoutsDto(row.timeouts)
-          const roleSupported = splitRoutingSupported(row.timeouts)
-          const eligible = roleSupported && row.timeouts.editable === true
+          const eligible = dtoValid && row.timeouts.editable === true
           const detail = !dtoValid
             ? '시간 제한 정보를 확인할 수 없습니다. 기존 값을 보존합니다.'
-            : !roleSupported
-              ? '역할별 시간 제한 지원을 확인할 수 없어 선택할 수 없습니다.'
-              : row.timeouts.editable !== true ? '시간 제한은 읽기 전용입니다. 기존 값을 보존합니다.' : undefined
+            : row.timeouts.editable !== true ? '시간 제한은 읽기 전용입니다. 기존 값을 보존합니다.' : undefined
           return jsx('div', { style: styles.profileChoice, children: jsx(CheckRow, {
             id: `timeout-target-${row.name}`,
             label: row.name,
@@ -5398,8 +5174,8 @@ function RouterPage({ ctx: pluginContext }) {
         missingTimeoutTargets.length ? jsx('p', { id: 'timeout-targets-missing', role: 'alert', style: styles.warning, children: vanishedMessage(missingTimeoutTargets) }) : null
       ] }),
       jsx('p', { id: 'timeout-section-summary', role: 'note', style: styles.hint, children: !timeoutWriteRequested
-        ? '바뀐 시간 제한이 없어 저장할 것이 없습니다. 값을 고치면 바뀐 값만 저장합니다. 불러온 프로필의 시간 제한 세 가지를 모두 복사하려면 ‘현재 설정 전체 복사’를 선택하세요.'
-        : `저장할 내용: ${Array.isArray(timeoutFields) ? `바뀐 값만(${timeoutFieldLabels(timeoutFields)})` : '일반 위임·짧은 작업·긴 작업 세 값 모두'} → ${selectedTimeoutTargets.join(', ') || '선택 안 됨'}` }),
+        ? '바뀐 시간 제한이 없어 저장할 것이 없습니다. 값을 고치면 바뀐 값만 저장합니다. 불러온 프로필의 시간 제한 전체를 복사하려면 ‘현재 설정 전체 복사’를 선택하세요.'
+        : `저장할 내용: ${Array.isArray(timeoutFields) ? `바뀐 값만(${timeoutFieldLabels(timeoutFields)})` : '일반 위임과 모든 작업 슬롯의 제한 전체(비운 슬롯은 기본값)'} → ${selectedTimeoutTargets.join(', ') || '선택 안 됨'}` }),
       sectionErrors.timeouts ? jsx('p', { role: 'alert', style: styles.warning, children: sectionErrors.timeouts }) : null,
       jsx(Button, { id: 'timeouts-save', size: 'sm', variant: 'secondary', disabled: timeoutSaveDisabled, onClick: () => void saveSection('timeouts'), children: applyPending ? '저장 중…' : '시간 제한 저장' })
     ]
@@ -5461,30 +5237,22 @@ function RouterPage({ ctx: pluginContext }) {
         copyIntent: timeoutCopyAll
       }, auxiliaryWrite, null, partialSave)
     : null
-  const summaryRoutingUpdates = (localCombinedSummary?.body.fallback_updates || [])
-    .filter(update => Object.prototype.hasOwnProperty.call(update, 'routing_fallback'))
-    .map(update => update.profile)
-  const summaryProjectedErrors = localCombinedSummary && draft ? projectedRoutingFallbackErrors(profiles, {
-    profile: selectedProfile,
-    models: draft.models,
-    routing: localCombinedSummary.body.routing,
-    model_targets: localCombinedSummary.body.model_targets,
-    routing_targets: localCombinedSummary.body.routing_targets
-  }, summaryRoutingUpdates) : []
+  // The drafted limits in words: the ordinary limit, then each slot with its own limit.
+  const ownSlotLimits = taskSlots().filter(slot => !slot.fixedLimit && !timeoutBlank(draft?.timeouts?.slot_minutes?.[slot.id]))
+    .map(slot => `${slot.label} ${draft.timeouts.slot_minutes[slot.id]}분`)
+  const draftLimitText = `일반 ${draft?.timeouts?.delegate_total_minutes}분 · 슬롯 ${ownSlotLimits.length ? `${ownSlotLimits.join(', ')} · 나머지 ${defaultSlotText}` : `모두 ${defaultSlotText}`}`
   const timeoutSummary = !timeoutSettingsSupported
     ? '시간 제한을 확인할 수 없어 변경하지 않습니다'
-    : !timeoutRoleSupported
-      ? '역할별 시간 제한 지원 미확인 · 표시만 가능'
-      : localCombinedSummary?.body.timeout_updates?.length
-        ? `전체 실행 시간 변경: ${localCombinedSummary.body.timeout_updates.length}개 대상${Array.isArray(timeoutFields) ? ` · 바뀐 값만(${timeoutFieldLabels(timeoutFields)})` : ''} · 일반 ${draft?.timeouts?.delegate_total_minutes}분 / 짧은 작업 ${draft?.timeouts?.routed_light_total_minutes}분 / 긴 작업 ${draft?.timeouts?.routed_heavy_total_minutes}분`
-        : timeoutWriteRequested
-          ? '시간 제한의 입력값과 대상 프로필 상태를 다시 확인하세요.'
-          : `전체 실행 시간 변경 없음 · 시간 제한 대상 ${selectedTimeoutTargets.length}개 선택 · 불러온 ${selectedProfile} 프로필 값 일반 ${draft?.timeouts?.delegate_total_minutes}분 / 짧은 작업 ${draft?.timeouts?.routed_light_total_minutes}분 / 긴 작업 ${draft?.timeouts?.routed_heavy_total_minutes}분`
+    : localCombinedSummary?.body.timeout_updates?.length
+      ? `전체 실행 시간 변경: ${localCombinedSummary.body.timeout_updates.length}개 대상${Array.isArray(timeoutFields) ? ` · 바뀐 값만(${timeoutFieldLabels(timeoutFields)})` : ''} · ${draftLimitText}`
+      : timeoutWriteRequested
+        ? '시간 제한의 입력값과 대상 프로필 상태를 다시 확인하세요.'
+        : `전체 실행 시간 변경 없음 · 시간 제한 대상 ${selectedTimeoutTargets.length}개 선택 · 불러온 ${selectedProfile} 프로필 값 ${draftLimitText}`
   const scopeDraftErrors = [
     [nativeFallbackDraftChanged, nativeFallbackError],
     ...AUXILIARY_TASKS.map(task => [auxiliary[task.id].changed, auxiliary[task.id].draftError ? `${task.label} 예비 모델: ${auxiliary[task.id].draftError}` : ''])
   ].filter(([changed, error]) => changed && error).map(([, error]) => error)
-  const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...summaryProjectedErrors, ...scopeDraftErrors, ...(routingTargetError ? [routingTargetError] : []), ...(noTargetError ? [noTargetError] : []),
+  const summaryValidationErrors = [...new Set([...(localCombinedSummary?.errors || []), ...scopeDraftErrors, ...(routingTargetError ? [routingTargetError] : []), ...(noTargetError ? [noTargetError] : []),
     ...(nativeFallbackTargetError ? [nativeFallbackTargetError] : []), ...(auxiliaryFallbackTargetError ? [auxiliaryFallbackTargetError] : [])])]
   // The whole-page save writes the model targets (models, slot models and conversation spare models)
   // and the time-limit targets; a vanished ticked name in any list it would write blocks it by name.
@@ -5512,7 +5280,7 @@ function RouterPage({ ctx: pluginContext }) {
         jsx('div', { id: 'conversation-models', style: { display: 'flex', flexDirection: 'column', gap: '0.9rem' }, children: modelFields }),
         jsx(NativeDelegationCard, { dto: currentRow?.native_delegation, draft: nativeDelegationDraft, catalog: modelCatalog,
           targets: nativeWriteTargets, disabled: disabled || !nativeStorageAvailable,
-          slots: { support: slotInfo, draft: draft?.slots || null, models: draft?.models || null, frozen: frozenProfile?.slots || null, disabled, onFollow: changeSlotFollow, onRoute: updateSlotRoute, onRevertFollow: revertSlotFollow,
+          slots: { support: slotInfo, draft: draft?.slots || null, models: draft?.models || null, disabled, onFollow: changeSlotFollow, onRoute: updateSlotRoute, limitText: slotLimitText,
             firstSave: profiles.every(row => !(row.slots?.stored || []).length && row.native_delegation?.policy_schema !== 2 && row.native_delegation?.auto_policy_schema !== 2) },
           onChange: updateNativeDelegationDraft }),
         reenableGroup,
@@ -5570,24 +5338,38 @@ export function selectExecutionRoute(routes, scope) {
     row.profile === scope.profile && typeof row.targetProfile === 'string' && EXECUTION_PROFILE.test(row.targetProfile))
   return matches.length === 1 ? { ...matches[0] } : null
 }
-function executionUnknown() { return { kind: 'unknown', role: null, profile: null, evidence: 'unknown' } }
+function executionUnknown() { return { kind: 'unknown', profile: null, slot: null, evidence: 'unknown' } }
+// A requested or runtime-reported execution: a task slot's model ({kind: 'model', slot, slot_label?}),
+// a specialist profile ({kind: 'profile', profile}) or unknown. A model run whose slot is not recognized
+// keeps `slot: null`.
 export function executionIdentity(value) {
   if (!value || typeof value !== 'object') return executionUnknown()
-  if (value.kind === 'model' && ['heavy', 'light'].includes(value.role) && value.profile == null) {
-    // A custom slot carries its own label (operator text from the settings page, not task text).
-    const custom = CUSTOM_SLOT_ID.test(value.slot) && typeof value.slot_label === 'string' && textLength(value.slot_label) <= 24 && CUSTOM_SLOT_TEXT.test(value.slot_label)
-    const slot = TASK_SLOTS.some(item => item.id === value.slot) || custom ? value.slot : null
-    return { kind: 'model', role: value.role, profile: null, slot, ...(custom ? { slot_label: value.slot_label } : {}), evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
+  const evidence = value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown'
+  if (value.kind === 'model' && value.profile == null) {
+    // A custom slot carries its own label (operator text from the settings page, not task text); without
+    // one, the label of a custom slot this page has loaded is used.
+    const customLabel = CUSTOM_SLOT_ID.test(value.slot) && typeof value.slot_label === 'string' && textLength(value.slot_label) <= 24 && CUSTOM_SLOT_TEXT.test(value.slot_label)
+      ? value.slot_label : CUSTOM_SLOT_ID.test(value.slot) ? customTaskSlots.find(item => item.id === value.slot)?.label || null : null
+    const slot = TASK_SLOTS.some(item => item.id === value.slot) || customLabel ? value.slot : null
+    return { kind: 'model', profile: null, slot, ...(customLabel ? { slot_label: customLabel } : {}), evidence }
   }
-  if (value.kind === 'profile' && typeof value.profile === 'string' && EXECUTION_PROFILE.test(value.profile) && value.role == null) {
-    return { kind: 'profile', role: null, profile: value.profile, evidence: value.evidence === 'runtime_reported' ? 'runtime_reported' : 'unknown' }
+  if (value.kind === 'profile' && typeof value.profile === 'string' && EXECUTION_PROFILE.test(value.profile)) {
+    return { kind: 'profile', profile: value.profile, slot: null, evidence }
   }
   return executionUnknown()
 }
 export function executionLabel(identity) {
   const known = executionIdentity(identity)
-  const slot = known.kind === 'model' && (TASK_SLOTS.find(item => item.id === known.slot) || (known.slot_label ? { label: known.slot_label } : null))
-  return known.kind === 'model' ? `모델 · ${slot ? slot.label : known.role === 'heavy' ? 'Heavy' : 'Light'}` : known.kind === 'profile' ? `프로필 · ${known.profile}` : '실행 종류 미확인'
+  const slot = known.kind === 'model' ? TASK_SLOTS.find(item => item.id === known.slot)?.label || known.slot_label || null : null
+  return known.kind === 'model' ? `모델 · ${slot || '슬롯 미확인'}` : known.kind === 'profile' ? `프로필 · ${known.profile}` : '실행 종류 미확인'
+}
+// The identity a row is shown as: the runtime-reported one once there is one, otherwise the requested
+// one. A reported custom slot takes its label from the request for that same slot.
+export function executionShownIdentity(row) {
+  const observed = row?.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
+  if (!observed) return row?.requested
+  return row.observed.kind === 'model' && row.requested?.kind === 'model' && row.requested.slot === row.observed.slot && row.requested.slot_label
+    ? { ...row.observed, slot_label: row.requested.slot_label } : row.observed
 }
 function executionSafeText(value, limit = 256) {
   return typeof value === 'string' && value.length <= limit && value === value.trim() && !/[\x00-\x1f\x7f]/.test(value) ? value : null
@@ -6259,8 +6041,8 @@ function executionActivityLabels(row) {
 }
 export function ExecutionRow({ row, bare = false }) {
   const observed = row.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
-  // A route label names the tier only; the requested slot stays the more specific name.
-  const identity = observed ? (row.observed.kind === 'model' && row.requested?.kind === 'model' ? { ...row.observed, slot: row.requested.slot, slot_label: row.requested.slot_label } : row.observed) : row.requested
+  // The runtime reports the slot it ran (route label = slot id).
+  const identity = executionShownIdentity(row)
   // The model the child's own API requests reported (runtime report, also when a spare model took over).
   const runtimeModel = row.model ? `${row.model}${row.provider ? ` · ${row.provider}` : ''}` : null
   const activity = executionActivityLabels(row)
@@ -6274,7 +6056,7 @@ export function ExecutionRow({ row, bare = false }) {
       children: activity.map((label, index) => jsx('span', { children: label }, index)) }) : null,
     row.terminal_conflict ? jsx('p', { style: styles.hint, children: '서로 다른 종료 정보가 확인되어 상태를 확정하지 않습니다.' }) :
       row.observation_gap ? jsx('p', { style: styles.hint, children: '현재 실행 목록에서 확인되지 않습니다. 완료로 판단하지 않으며, 최근 관찰 상태만 유지합니다.' }) : null,
-    jsx('p', { style: styles.actual, children: observed ? '실행 정보: 런타임 보고 · 개별 API 응답의 모델 검증과는 다릅니다.' : '역할은 요청 기준입니다. 실행 상태·활동 정보와 실제 역할 확인은 별개입니다.' }),
+    jsx('p', { style: styles.actual, children: observed ? '실행 정보: 런타임 보고 · 개별 API 응답의 모델 검증과는 다릅니다.' : '슬롯과 프로필은 요청 기준입니다. 실행 상태·활동 정보와 실제 실행 확인은 별개입니다.' }),
     runtimeModel ? jsx('p', { style: styles.actual, children: `실행 모델: ${runtimeModel}` }) : null,
     jsxs('details', { style: executionStyles.details, children: [jsx('summary', { style: executionStyles.summary, children: '실행 식별 정보' }),
       jsx('div', { children: `요청: ${executionLabel(row.requested)}` }),
@@ -6304,11 +6086,9 @@ export function sortExecutionRows(rows) {
     return timeB - timeA || b.index - a.index
   }).map(item => item.row)
 }
-function executionShortLabel(row) {
-  const observed = row.observed?.evidence === 'runtime_reported' && row.observed?.kind !== 'unknown'
-  const identity = executionIdentity(observed ? (row.observed.kind === 'model' && row.requested?.kind === 'model' ? { ...row.observed, slot: row.requested.slot, slot_label: row.requested.slot_label } : row.observed) : row.requested)
-  if (identity.kind === 'profile') return `프로필 · ${identity.profile}`
-  if (identity.kind === 'model') return TASK_SLOTS.find(item => item.id === identity.slot)?.label || identity.slot_label || (identity.role === 'heavy' ? 'Heavy' : 'Light')
+export function executionShortLabel(row) {
+  const identity = executionIdentity(executionShownIdentity(row))
+  if (identity.kind !== 'unknown') return executionLabel(identity)
   return row.execution_mode === 'gateway' ? '전체 프로필' : '종류 미확인'
 }
 function executionTime(row) {
@@ -6571,7 +6351,7 @@ export function normalizeProfileJobs(reply, targetProfile, parentId) {
   return jobs
 }
 export function profileJobExecutionRow(job) {
-  return { id: `gateway:${job.id}`, execution_mode: 'gateway', requested: { kind: 'profile', profile: job.target_profile, role: null },
+  return { id: `gateway:${job.id}`, execution_mode: 'gateway', requested: { kind: 'profile', profile: job.target_profile },
     observed: job.observed, status: job.status, task_index: null, model: job.model, provider: job.provider, model_source: job.model ? 'route' : null,
     started_at: job.created_at ?? null, updated_at: job.updated_at ?? null, job }
 }
@@ -6777,7 +6557,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.17.0',
+  version: '0.18.0',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

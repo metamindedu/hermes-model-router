@@ -16,7 +16,7 @@ def plan_for(service, combined, scope):
     proposal = body(service)
     proposal["routing_profiles"] = ["default", "p1"]
     proposal["routing_targets"] = ["p1"]
-    proposal["routing"]["heavy"] = {"follow": "custom", "custom": route("operator", "new-heavy", "high")}
+    proposal["routing"]["slots"]["design"] = {"follow": "custom", "custom": route("operator", "new-design", "high")}
     if scope:
         proposal["save_scope"] = scope
     if combined:
@@ -65,6 +65,6 @@ def test_valid_canonical_only_target_still_saves_without_skill_copies(tmp_path, 
     service, fake, root = fixture(tmp_path, monkeypatch)
     plan = plan_for(service, combined, scope)
     assert Service(root, writer=fake.write).apply(plan["plan_id"])["status"] == "applied"
-    assert service.routing_config("p1")["heavy"]["model"] == "new-heavy"
+    assert service.routing_config("p1")["slots"]["design"]["model"] == "new-design"
     assert all(name != "p1" for name, _key, _value in fake.calls)
     assert not list(root.rglob("skills/adaptive-coding-orchestration/SKILL.md"))

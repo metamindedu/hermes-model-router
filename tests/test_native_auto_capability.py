@@ -20,6 +20,8 @@ def package(service, name='p1', legacy=False):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(subprocess.check_output(['git', 'show', BASE + ':' + relative], cwd=ROOT)
                            if legacy else (ROOT / relative).read_bytes())
+    if not legacy:
+        (root / 'model_router/slots.py').write_bytes((ROOT / 'model_router/slots.py').read_bytes())
     return root
 
 
@@ -33,7 +35,15 @@ def test_real_legacy_package_remains_editable_but_cannot_select_auto(fixture, mo
     with pytest.raises(ValueError, match='automatic'):
         service.delegation_preview(body(service, profile='p1', backend='model-router-auto'))
     assert not calls
-    assert service.apply(service.delegation_preview(body(service, profile='p1'))['plan_id'])['status'] == 'applied'
+    assert dto['slot_policy_supported'] is False
+    with pytest.raises(ValueError, match='task slots are unsupported'):
+        service.delegation_preview(body(service, profile='p1'))
+    assert not calls
+    # A backend-only edit does not ask the old installation to store a slot policy.
+    request = {'expected_revision': 0, 'updates': [{'profile': 'p1', 'expected_digest': dto['digest'],
+               'backend': 'model-router', 'allow_profile_access': False}]}
+    assert service.apply(service.delegation_preview(request)['plan_id'])['status'] == 'applied'
+    assert [key for _, key, _ in calls] == [ns.KEY_BACKEND]
 
 
 def test_real_current_package_advertises_and_saves_auto(fixture, monkeypatch):
@@ -41,7 +51,7 @@ def test_real_current_package_advertises_and_saves_auto(fixture, monkeypatch):
     package(service)
     monkeypatch.setattr(service, '_native_delegation_code_signature', lambda p: native_service._code_signature(service, p))
     dto = native_service.status(service, 'p1')
-    assert dto['supported'] and dto['auto_supported']
+    assert dto['supported'] and dto['auto_supported'] and dto['slot_policy_supported']
     plan = service.delegation_preview(body(service, profile='p1', backend='model-router-auto'))
     assert service.apply(plan['plan_id'])['status'] == 'applied'
     assert native_service.status(service, 'p1')['backend'] == 'model-router-auto'
@@ -49,7 +59,7 @@ def test_real_current_package_advertises_and_saves_auto(fixture, monkeypatch):
 
 
 @pytest.mark.parametrize('module', ['native_delegation', 'native_watchdog', 'native_settings', 'native_service', 'config_writer'])
-def test_partial_feature_upgrade_remains_legacy_editable(fixture, module):
+def test_partial_feature_upgrade_refuses_auto_before_writing(fixture, module):
     service, calls, _ = fixture
     root = package(service)
     target = root / 'model_router' / (module + '.py')

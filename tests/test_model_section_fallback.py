@@ -102,7 +102,7 @@ def test_preexisting_store_wide_plans_also_write_the_bystander(tmp_path, monkeyp
 
 def test_a_scoped_models_body_cannot_carry_spare_models(tmp_path, monkeypatch):
     service, _fake, _ = bystander_setup(tmp_path, monkeypatch)
-    body = models_body(service, "heavy0")
+    body = models_body(service, "main-model0")
     body["fallback_updates"] = [{"profile": "default", "native_fallback": copy.deepcopy(SPARE)}]
     body["fallback_confirmations"] = [confirmation("native")]
     with pytest.raises(ValueError, match="outside the selected save scope"):

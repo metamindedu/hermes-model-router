@@ -1,6 +1,6 @@
 """Install reviewed local package using copies and supported config commands.
 
-No model/credential changes. Run only after independent Heavy review. Config
+No model/credential changes. Run only after an independent review. Config
 changes are deliberate plugin+skill activation; all previous values are backed up.
 """
 from pathlib import Path
@@ -16,7 +16,7 @@ import datetime
 import yaml
 
 PACKAGE = Path(__file__).resolve().parents[1]
-INCLUDE = ["plugin.yaml", "__init__.py", "model_router", "desktop", "dashboard", "skills", "compat", "lib", "cli.py", "README.md"]
+INCLUDE = ["plugin.yaml", "__init__.py", "model_router", "desktop", "dashboard", "skills", "compat", "cli.py", "README.md"]
 # This private-schema research prototype is not an admitted package component.
 # Keep it available for disposable research without copying it into a profile.
 _UNADMITTED_PACKAGE_FILES = frozenset({"model_router/execution_metadata.py"})

@@ -21,13 +21,7 @@ const sampleProfile = {
   },
   routing: {
     enabled: true,
-    heavy: { follow: 'custom', custom: { provider: 'openai', model: 'gpt-pro', reasoning: 'high' } },
-    light: { follow: 'delegation', custom: null },
-    fallback: {
-      enabled: true,
-      heavy: { provider: 'anthropic', model: 'claude-opus', reasoning: 'high' },
-      light: { provider: 'openai', model: 'gpt-mini', reasoning: 'low' }
-    }
+    slots: { design: { follow: 'custom', custom: { provider: 'openai', model: 'gpt-pro', reasoning: 'high' } } }
   }
 }
 
@@ -63,9 +57,8 @@ test('bulk model targets remain separate from routing scope in both all and none
   assert.deepEqual(nonePayload.model_targets, [])
   assert.deepEqual(allPayload.routing_profiles, routingProfiles)
   assert.deepEqual(nonePayload.routing_profiles, routingProfiles)
-  const { fallback: _retired, ...routingWithoutFallback } = sampleProfile.routing
-  assert.deepEqual(allPayload.routing, { ...routingWithoutFallback, enabled: false }, 'the retired routing fallback is never sent')
-  assert.deepEqual(nonePayload.routing, { ...routingWithoutFallback, enabled: false })
+  assert.deepEqual(allPayload.routing, { enabled: false, slots: sampleProfile.routing.slots }, 'routing is {enabled, slots} only')
+  assert.deepEqual(nonePayload.routing, { enabled: false, slots: sampleProfile.routing.slots })
 })
 
 test('bulk target actions invalidate pending previews and their prior confirmation generation', () => {
@@ -89,9 +82,9 @@ test('profile draft cloning preserves every model and route field without aliasi
   const draft = helpers.copyProfileDraft(sampleProfile)
   assert.deepEqual(draft, { models: sampleProfile.models, routing: sampleProfile.routing })
   assert.notStrictEqual(draft.models, sampleProfile.models)
-  assert.notStrictEqual(draft.routing.fallback.heavy, sampleProfile.routing.fallback.heavy)
-  draft.routing.fallback.heavy.model = 'changed'
-  assert.equal(sampleProfile.routing.fallback.heavy.model, 'claude-opus')
+  assert.notStrictEqual(draft.routing.slots.design, sampleProfile.routing.slots.design)
+  draft.routing.slots.design.custom.model = 'changed'
+  assert.equal(sampleProfile.routing.slots.design.custom.model, 'gpt-pro')
   assert.equal(helpers.copyProfileDraft({ models: {}, routing: null }), null)
 })
 
@@ -100,21 +93,20 @@ test('preview payload carries full draft and keeps model targets separate from r
   const modelTargets = ['claire', 'research']
   const routingProfiles = ['default', 'claire']
   const payload = helpers.buildPreviewBody(17, 'claire', draft, modelTargets, routingProfiles)
-  const { fallback: _retired, ...routingWithoutFallback } = sampleProfile.routing
   assert.deepEqual(payload, {
     expected_revision: 17,
     profile: 'claire',
     // The delegation role is never sent: each target keeps its own stored delegation model.
     models: helpers.pageModels(sampleProfile.models),
     model_targets: ['claire', 'research'],
-    routing: routingWithoutFallback,
+    routing: sampleProfile.routing,
     routing_profiles: ['default', 'claire']
   })
   payload.models.main.model = 'mutated'
-  payload.routing.heavy.custom.provider = 'mutated'
+  payload.routing.slots.design.custom.provider = 'mutated'
   payload.model_targets.push('later')
   assert.equal(draft.models.main.model, 'claude-sonnet')
-  assert.equal(draft.routing.heavy.custom.provider, 'openai')
+  assert.equal(draft.routing.slots.design.custom.provider, 'openai')
   assert.deepEqual(modelTargets, ['claire', 'research'])
 })
 

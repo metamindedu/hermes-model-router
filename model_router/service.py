@@ -21,7 +21,6 @@ from typing import Any, Callable
 from . import effective_config, fallback_policy, installation, timeouts, native_service
 from . import slots as slot_model
 
-SCHEMA = 2
 # One status read asks the same questions (which profiles exist, the source package identity) per
 # row. While a read is active those answers are computed once; the scope ends with the read.
 _READ_SCOPE: ContextVar[dict | None] = ContextVar("model_router_read_scope", default=None)
@@ -46,12 +45,8 @@ def scoped(key, compute):
     if key not in memo:
         memo[key] = compute()
     return copy.deepcopy(memo[key])
-# Written only while some profile carries task-slot declarations, so an
-# untouched install keeps a file an older package can still read.
-SLOT_SCHEMA = 3
-# Written only while custom slots are defined (store-level `custom_slots`), so an untouched or
-# built-in-only install keeps a file the previous package can still read.
-CUSTOM_SCHEMA = 4
+# settings.json schema. Profile routing is {enabled, slots}; any other schema is refused.
+STORE_SCHEMA = 5
 STORE_RELATIVE = Path("plugin-data") / "model-router" / "settings.json"
 STATE_RELATIVE = Path("plugin-data") / "model-router" / "recent_apply.json"
 SKILL_NAME = "adaptive-coding-orchestration"
@@ -89,12 +84,9 @@ ENDPOINT_KEYS = {
 MODEL_SETTINGS_SCHEMA = 1
 # Section saves that send only changed values. The status root advertises `partial_save_schema: 1`;
 # a '/preview' or '/delegation-preview' body that carries the same literal marker uses the partial
-# forms (slot declarations merged over each target's stored ones, optional Heavy/Light, a subset of
-# the split timeout fields, slot spare-model and profile-route patches). Without the marker every
-# body keeps its earlier meaning exactly.
+# forms (slot declarations merged over each target's stored ones, a patch of runtime limits, slot
+# spare-model and profile-route patches). Without the marker every body is a full section.
 PARTIAL_SAVE_SCHEMA = 1
-# A stored slot following the delegation model (an earlier setting the page no longer offers).
-LEGACY_SLOT_FOLLOW = "delegation"
 NATIVE_EDIT_ROLES = ("main", "compression", "title")
 ROLE_STATES = ("verified", "unverified")
 ROLE_SOURCES = ("explicit", "inherited")
@@ -749,43 +741,13 @@ def _models(value: Any, *, allow_empty_model: bool = False) -> dict[str, dict[st
     return {role: _route(value[role], allow_empty_model=allow_empty_model) for role in MODEL_ROLES}
 
 
-def _routing_fallback(fallback: Any) -> dict[str, Any]:
-    if not isinstance(fallback, dict) or set(fallback) != {"enabled", "heavy", "light"} or not isinstance(fallback["enabled"], bool):
-        raise ValueError("routing.fallback must define enabled, heavy, and light")
-    fb_heavy = None if fallback["heavy"] is None else _route(fallback["heavy"])
-    fb_light = None if fallback["light"] is None else _route(fallback["light"])
-    if fallback["enabled"] and (fb_heavy is None or fb_light is None):
-        raise ValueError("enabled fallback requires explicit Heavy and Light routes")
-    return {"enabled": fallback["enabled"], "heavy": fb_heavy, "light": fb_light}
-
-
-def _tier_declaration(key: str, item: Any) -> dict[str, Any]:
-    expected = "main" if key == "heavy" else "delegation"
-    if not isinstance(item, dict) or set(item) != {"follow", "custom"}:
-        raise ValueError(f"routing.{key} must define follow and custom")
-    follow = item["follow"]
-    if follow not in {expected, "custom"}:
-        raise ValueError(f"routing.{key}.follow must be {expected} or custom")
-    custom = None if item["custom"] is None else _route(item["custom"])
-    if follow == "custom" and custom is None:
-        raise ValueError(f"routing.{key}.custom is required when following custom")
-    if follow != "custom" and custom is not None:
-        raise ValueError(f"routing.{key}.custom must be null when following {expected}")
-    return {"follow": follow, "custom": custom}
-
-
-def _routing(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) - {"slots"} != {"enabled", "heavy", "light", "fallback"}:
-        raise ValueError("routing must define enabled, heavy, light, and fallback")
+def _routing(value: Any, custom_ids: Any = None) -> dict[str, Any]:
+    """Profile routing: membership and slot declarations (canonical form always has `slots`)."""
+    if not isinstance(value, dict) or set(value) != {"enabled", "slots"}:
+        raise ValueError("routing must define enabled and slots")
     if not isinstance(value["enabled"], bool):
         raise ValueError("routing.enabled must be boolean")
-    resolved = {key: _tier_declaration(key, value[key]) for key in ("heavy", "light")}
-    result = {"enabled": value["enabled"], **resolved, "fallback": _routing_fallback(value["fallback"])}
-    # Canonical form: the key exists only while at least one slot is declared.
-    declared = slot_model.validate_slots(value["slots"], _route) if "slots" in value else {}
-    if declared:
-        result["slots"] = declared
-    return result
+    return {"enabled": value["enabled"], "slots": slot_model.validate_slots(value["slots"], _route, custom_ids)}
 
 
 def _partial_save(body: dict) -> bool:
@@ -798,19 +760,16 @@ def _partial_save(body: dict) -> bool:
 
 
 def _partial_routing(value: Any) -> dict[str, Any]:
-    """The routing of a partial save: `enabled` (membership) plus only the declarations it writes.
+    """The routing of a partial save: `enabled` (membership) plus only the slots it writes.
 
-    Heavy/Light are optional (omitted: each target keeps its own). `slots` names only the slots the
-    save writes; they are merged over each target's stored slots (see _merge_partial_slots).
+    `slots` names only the slots the save writes; they are merged over each target's stored slots
+    (see _merge_partial_slots).
     """
-    if not isinstance(value, dict) or "enabled" not in value or set(value) - {"enabled", "heavy", "light", "slots", "fallback"}:
-        raise ValueError("routing must define enabled and only heavy, light, slots, or fallback")
+    if not isinstance(value, dict) or "enabled" not in value or set(value) - {"enabled", "slots"}:
+        raise ValueError("routing must define enabled and optionally slots")
     if not isinstance(value["enabled"], bool):
         raise ValueError("routing.enabled must be boolean")
     result: dict[str, Any] = {"enabled": value["enabled"]}
-    for key in ("heavy", "light"):
-        if key in value:
-            result[key] = _tier_declaration(key, value[key])
     if "slots" in value:
         declared = slot_model.validate_slots(value["slots"], _route)
         if not declared:
@@ -819,52 +778,24 @@ def _partial_routing(value: Any) -> dict[str, Any]:
     return result
 
 
-def _merge_partial_slots(stored: Any, submitted: dict[str, Any], *, keep_legacy: bool) -> dict[str, Any]:
-    """Submitted slot declarations over a target's stored ones (desktop: mergePartialSlots).
-
-    Every slot the save does not name keeps its stored declaration exactly, and an absent one stays
-    absent (it keeps following its tier). With `keep_legacy` (a target other than the loaded profile)
-    a stored slot that follows the delegation model is never overwritten.
-    """
-    merged = copy.deepcopy(stored) if isinstance(stored, dict) else {}
-    for slot, declaration in submitted.items():
-        current = merged.get(slot)
-        if keep_legacy and isinstance(current, dict) and current.get("follow") == LEGACY_SLOT_FOLLOW:
-            continue
-        merged[slot] = copy.deepcopy(declaration)
+def _ordered_slots(merged: dict[str, Any]) -> dict[str, Any]:
     customs = sorted(slot for slot in merged if slot not in slot_model.BUILTIN_SLOTS)
     return {slot: merged[slot] for slot in (*slot_model.BUILTIN_SLOTS, *customs) if slot in merged}
 
 
-def _keep_absent_keys(entry: Any, raw: Any, loaded: Any) -> Any:
-    """`entry` without the keys the stored `raw` entry did not have and the plan left unchanged.
+def _merge_partial_slots(stored: Any, submitted: dict[str, Any]) -> dict[str, Any]:
+    """Submitted slot declarations over a target's stored ones (desktop: mergePartialSlots).
 
-    Loading adds those keys with their defaults; leaving them out again reads back the same way.
+    Every slot the save does not name keeps its stored declaration exactly, and an absent one stays
+    absent (it runs on the profile's main model).
     """
-    if not (isinstance(entry, dict) and isinstance(raw, dict) and isinstance(loaded, dict)):
-        return entry
-    out: dict[str, Any] = {}
-    for key, value in entry.items():
-        if key not in raw:
-            if key in loaded and loaded[key] == value:
-                continue
-            out[key] = value
-        else:
-            out[key] = _keep_absent_keys(value, raw[key], loaded.get(key))
-    return out
+    merged = copy.deepcopy(stored) if isinstance(stored, dict) else {}
+    merged.update(copy.deepcopy(submitted))
+    return _ordered_slots(merged)
 
 
-def _store_schema(entries: dict[str, Any], custom: Any = ()) -> int:
-    if custom:
-        return CUSTOM_SCHEMA
-    return SLOT_SCHEMA if any(entry["routing"].get("slots") for entry in entries.values()) else SCHEMA
-
-
-def _store_payload(schema: int, revision: int, profiles: dict[str, Any], custom: Any) -> dict[str, Any]:
-    data = {"schema": schema, "revision": revision, "profiles": profiles}
-    if custom:
-        data["custom_slots"] = copy.deepcopy(list(custom))
-    return data
+def _store_payload(revision: int, profiles: dict[str, Any], custom: Any) -> dict[str, Any]:
+    return {"schema": STORE_SCHEMA, "revision": revision, "profiles": profiles, "custom_slots": copy.deepcopy(list(custom))}
 
 
 def _stored_slots(entries: dict[str, Any]) -> dict[str, Any]:
@@ -1020,9 +951,8 @@ class Service:
                                     custom: Any = ()) -> dict[str, Any]:
         """The plan's entries, with every entry the plan leaves unchanged kept exactly as stored.
 
-        Loading normalizes entries in memory (for example adding `delegation_fallback: null`).
-        An entry the plan does not change is written back as it is in the file, so a save never
-        rewrites another profile's entry. A schema change (migration) writes normalized entries.
+        An entry the plan does not change is written back as it is in the file (byte-identical
+        JSON values), so a save never rewrites another profile's entry.
         """
         try:
             data = self.store_path.read_bytes()
@@ -1035,17 +965,13 @@ class Service:
             raw = json.loads(data)
         except ValueError:
             return after
-        if not isinstance(raw, dict) or raw.get("schema") != _store_schema(after, custom) or not isinstance(raw.get("profiles"), dict):
+        if not isinstance(raw, dict) or raw.get("schema") != STORE_SCHEMA or not isinstance(raw.get("profiles"), dict):
             return after
         stored = raw["profiles"]
         kept: dict[str, Any] = {}
         for name, entry in after.items():
             if name in stored and name in loaded and loaded[name] == entry:
                 kept[name] = copy.deepcopy(stored[name])
-            elif name in stored and name in loaded:
-                # A changed entry keeps every key it did not have and this save did not change
-                # (for example the retired `delegation_fallback` or `fallback_consent.delegation`).
-                kept[name] = _keep_absent_keys(entry, stored[name], loaded[name])
             else:
                 kept[name] = entry
         return kept
@@ -1056,19 +982,15 @@ class Service:
             return None
         if (
             not isinstance(data, dict)
-            or isinstance(data.get("schema"), bool)
-            or data.get("schema") not in {1, SCHEMA, SLOT_SCHEMA, CUSTOM_SCHEMA}
-            or set(data) != ({"schema", "revision", "profiles", "custom_slots"} if data.get("schema") == CUSTOM_SCHEMA
-                             else {"schema", "revision", "profiles"})
+            or set(data) != {"schema", "revision", "profiles", "custom_slots"}
+            or type(data["schema"]) is not int or data["schema"] != STORE_SCHEMA
         ):
             raise ServiceError("settings schema is invalid")
         try:
-            custom = slot_model.validate_custom_slots(data["custom_slots"]) if data["schema"] == CUSTOM_SCHEMA else []
+            custom = slot_model.validate_custom_slots(data["custom_slots"])
         except ValueError as exc:
             raise ServiceError("settings custom slots are invalid") from exc
-        if data["schema"] == CUSTOM_SCHEMA and not custom:
-            raise ServiceError("settings schema is invalid")
-        custom_ids = {item["id"] for item in custom}
+        custom_ids = [item["id"] for item in custom]
         if not isinstance(data.get("revision"), int) or isinstance(data.get("revision"), bool) or data["revision"] < 0:
             raise ServiceError("settings revision is invalid")
         if not isinstance(data.get("profiles"), dict):
@@ -1078,49 +1000,21 @@ class Service:
             if PROFILE_RE.fullmatch(name) is None or not isinstance(entry, dict):
                 raise ServiceError("settings profile entry is invalid")
             try:
-                if data["schema"] == 1:
-                    if set(entry) != {"models", "routing"}:
-                        raise ValueError("schema1 profile entry has unknown fields")
-                    models = _models(entry["models"], allow_empty_model=True)
-                    routing = _routing(entry["routing"])
-                    if "slots" in entry["routing"]:
-                        raise ValueError("schema1 profile entry cannot declare slots")
-                    native_fallback = None
-                    delegation_fallback = None
-                    legacy_consent = None
-                    if routing["fallback"]["enabled"]:
-                        legacy_consent = fallback_policy.make_consent(
-                            name, "routing", routing["fallback"], source="legacy-approved"
-                        )
-                    consent = {"native": None, "routing": legacy_consent, "delegation": None}
-                else:
-                    old_fields = {"models", "routing", "native_fallback", "fallback_consent"}
-                    if not old_fields <= set(entry) or set(entry) - old_fields - {"delegation_fallback"}:
-                        raise ValueError("schema2 profile entry has unknown fields")
-                    models = _models(entry["models"], allow_empty_model=True)
-                    routing = _routing(entry["routing"])
-                    if "slots" in entry["routing"] and (data["schema"] not in (SLOT_SCHEMA, CUSTOM_SCHEMA) or "slots" not in routing):
-                        raise ValueError("slot declarations require the slot schema and must not be empty")
-                    if set(routing.get("slots", {})) - set(slot_model.BUILTIN_SLOTS) - custom_ids:
-                        raise ValueError("slot declarations name a custom slot that is not defined")
-                    native_fallback = self._validate_native_fallback(entry["native_fallback"])
-                    delegation_fallback = self._validate_delegation_fallback(entry.get("delegation_fallback"))
-                    raw_consent = entry["fallback_consent"]
-                    if (
-                        not isinstance(raw_consent, dict)
-                        or not {"native", "routing"} <= set(raw_consent)
-                        or set(raw_consent) - {"native", "routing", "delegation"}
-                    ):
-                        raise ValueError("fallback consent must define native, routing, and optional delegation")
-                    consent = {
-                        "native": fallback_policy.validate_consent(raw_consent["native"]),
-                        "routing": fallback_policy.validate_consent(raw_consent["routing"]),
-                        "delegation": fallback_policy.validate_consent(raw_consent.get("delegation")),
-                    }
-                    for scope in ("native", "routing", "delegation"):
-                        item = consent[scope]
-                        if item is not None and item["allow_task_rerun"] is not (scope == "routing"):
-                            raise ValueError("fallback consent scope flags are invalid")
+                if set(entry) != {"models", "routing", "native_fallback", "delegation_fallback", "fallback_consent"}:
+                    raise ValueError("profile entry fields are invalid")
+                models = _models(entry["models"], allow_empty_model=True)
+                routing = _routing(entry["routing"], custom_ids)
+                native_fallback = self._validate_native_fallback(entry["native_fallback"])
+                delegation_fallback = self._validate_delegation_fallback(entry["delegation_fallback"])
+                raw_consent = entry["fallback_consent"]
+                if not isinstance(raw_consent, dict) or set(raw_consent) != {"native", "delegation"}:
+                    raise ValueError("fallback consent must define native and delegation")
+                consent = {
+                    "native": fallback_policy.validate_consent(raw_consent["native"]),
+                    "delegation": fallback_policy.validate_consent(raw_consent["delegation"]),
+                }
+                if any(item is not None and item["allow_task_rerun"] is not False for item in consent.values()):
+                    raise ValueError("fallback consent scope flags are invalid")
                 normalized[name] = {
                     "models": models,
                     "routing": routing,
@@ -1130,11 +1024,7 @@ class Service:
                 }
             except (TypeError, ValueError, KeyError) as exc:
                 raise ServiceError("settings profile entry is invalid") from exc
-        # Schema-1 reads are normalized only in memory. Persistence occurs only
-        # through an explicit settings apply or the existing initializer.
-        if data["schema"] == SLOT_SCHEMA and _store_schema(normalized) != SLOT_SCHEMA:
-            raise ServiceError("settings schema is invalid")
-        return {"schema": data["schema"], "revision": data["revision"], "profiles": normalized, "custom_slots": custom}
+        return {"schema": STORE_SCHEMA, "revision": data["revision"], "profiles": normalized, "custom_slots": custom}
 
     def _validate_native_fallback(self, value: Any) -> dict[str, Any] | None:
         if value is None:
@@ -1427,14 +1317,9 @@ class Service:
             provider = main["provider"]
         return _route({"provider": provider, "model": model or main["model"], "reasoning": effort or main["reasoning"] or "medium"})
 
-    def _default_routing(self, enabled: bool = False, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
-        fallback = fallback or {"enabled": False, "heavy": None, "light": None}
-        return {
-            "enabled": enabled,
-            "heavy": {"follow": "main", "custom": None},
-            "light": {"follow": "delegation", "custom": None},
-            "fallback": fallback,
-        }
+    @staticmethod
+    def _default_routing(enabled: bool = False) -> dict[str, Any]:
+        return {"enabled": enabled, "slots": {}}
 
     def _initial_routing(self, profile: str) -> dict[str, Any]:
         """Installed, unconfigured profiles default on without persisting a migration."""
@@ -1451,16 +1336,9 @@ class Service:
     def _check_primary_routes(routing: dict[str, Any], models: dict[str, dict[str, str]]) -> None:
         if not routing["enabled"]:
             return
-        heavy = models["main"] if routing["heavy"]["follow"] == "main" else routing["heavy"]["custom"]
-        light = models["delegation"] if routing["light"]["follow"] == "delegation" else routing["light"]["custom"]
-        # Heavy/Light are task roles, not a requirement for separate models.
-        # Validate both routes while allowing the same provider/model/effort.
-        _route(heavy)
-        _route(light)
-        declared = routing.get("slots", {})
-        tiers = {**slot_model.SLOT_TIERS, **{slot: "heavy" for slot in declared if slot_model.is_custom_slot(slot)}}
-        for slot in declared:
-            _route(slot_model.slot_route(routing, models, slot, tiers))
+        known = (*slot_model.BUILTIN_SLOTS, *(slot for slot in routing["slots"] if slot_model.is_custom_slot(slot)))
+        for slot in routing["slots"]:
+            _route(slot_model.slot_route(routing, models, slot, known))
 
     @staticmethod
     def _check_live_routes(routing: dict[str, Any], live: dict[str, dict[str, str]]) -> None:
@@ -1469,8 +1347,7 @@ class Service:
         A follow route to a role that is not verified is not validated here: it resolves to no route
         and only the tasks that follow it are refused at dispatch. Custom routes are always checked.
         """
-        declarations = [routing["heavy"], routing["light"], *(routing.get("slots") or {}).values()]
-        for declaration in declarations:
+        for declaration in routing["slots"].values():
             if declaration["follow"] == "custom":
                 _route(declaration["custom"])
             elif declaration["follow"] in live:
@@ -1601,47 +1478,6 @@ class Service:
         if mirror != after[name]["models"]:
             changes.append({"profile": name, "field": "settings.models", "before": after[name]["models"], "after": mirror})
             after[name]["models"] = mirror
-
-    @staticmethod
-    def _check_changed_routing_fallbacks(before: dict, after: dict) -> None:
-        """Validate final primaries, including retained spares, without adopting them."""
-        def primary_ids(entry):
-            routing, models = entry["routing"], entry["models"]
-            return tuple(
-                (route["provider"].casefold(), route["model"].casefold())
-                for role, model_role in (("heavy", "main"), ("light", "delegation"))
-                for route in [models[model_role] if routing[role]["follow"] == model_role else routing[role]["custom"]]
-            )
-        for name, entry in after.items():
-            fallback = entry["routing"]["fallback"]
-            if not fallback["enabled"]:
-                continue
-            old = before.get(name)
-            primaries = primary_ids(entry)
-            if old is not None and primaries == primary_ids(old) and fallback == old["routing"]["fallback"]:
-                continue
-            spares = tuple((fallback[role]["provider"].casefold(), fallback[role]["model"].casefold()) for role in ("heavy", "light"))
-            if spares[0] == spares[1]:
-                raise ValueError("enabled Heavy and Light fallbacks must be distinct")
-            if any(primary == spare for primary, spare in zip(primaries, spares)):
-                raise ValueError("fallback route must differ from its final primary route")
-
-    def _fallback_for(self, profile: str, fallbacks: dict[str, Any] | None) -> dict[str, Any]:
-        if not fallbacks:
-            return {"enabled": False, "heavy": None, "light": None}
-        raw = fallbacks.get(profile) if profile in fallbacks else fallbacks
-        if not isinstance(raw, dict):
-            raise ValueError("fallbacks must map profiles to Heavy/Light routes")
-        if "fallback" in raw and set(raw) <= {"fallback"}:
-            raw = raw["fallback"]
-        enabled = raw.get("enabled", bool(raw.get("heavy") and raw.get("light")))
-        heavy = None if raw.get("heavy") is None else _route(raw["heavy"])
-        light = None if raw.get("light") is None else _route(raw["light"])
-        if not isinstance(enabled, bool):
-            raise ValueError("fallback enabled must be boolean")
-        if enabled and (heavy is None or light is None):
-            raise ValueError("enabled fallback requires explicit Heavy and Light routes")
-        return {"enabled": enabled, "heavy": heavy, "light": light}
 
     def _read_native_snapshot(self, profile: str) -> effective_config.NativeFallbackSnapshot:
         """Read one profile's effective native keys and provenance through Hermes helpers."""
@@ -1865,22 +1701,7 @@ class Service:
         }
 
     def _fallback_dto(self, profile: str, entry: dict[str, Any]) -> dict[str, Any]:
-        native = self._native_status(profile, entry)
-        delegation = self._delegation_status(profile, entry)
-        routing_value = entry["routing"]["fallback"]
-        consent = entry["fallback_consent"].get("routing")
-        if not fallback_policy.consent_matches(profile, "routing", routing_value, consent):
-            consent = None
-        return {
-            "native": native,
-            "routing": {
-                "enabled": routing_value["enabled"],
-                "heavy": copy.deepcopy(routing_value["heavy"]),
-                "light": copy.deepcopy(routing_value["light"]),
-                "consent": copy.deepcopy(consent),
-            },
-            "delegation": delegation,
-        }
+        return {"native": self._native_status(profile, entry), "delegation": self._delegation_status(profile, entry)}
 
     def _read_auxiliary_snapshot(self, profile: str, keys: tuple[str, ...] | list[str] | None = None) -> effective_config.NativeFallbackSnapshot:
         """The auxiliary fallback_chain keys of one profile (both by default; a plan reads only the
@@ -2087,7 +1908,7 @@ class Service:
         value = _read_json(self.root / STATE_RELATIVE)
         return value if isinstance(value, dict) else None
 
-    def initialize(self, routing_profiles: list[str], fallbacks: dict | None = None) -> dict[str, Any]:
+    def initialize(self, routing_profiles: list[str]) -> dict[str, Any]:
         if not isinstance(routing_profiles, list):
             raise ValueError("routing_profiles must be a list")
         discovered = self._discover_profiles()
@@ -2104,22 +1925,20 @@ class Service:
                     actual = self._actual_models(name)
                     entries[name] = {
                         "models": actual,
-                        "routing": self._default_routing(name in selected, self._fallback_for(name, fallbacks)),
+                        "routing": self._default_routing(name in selected),
                         "native_fallback": None,
                         "delegation_fallback": None,
-                        "fallback_consent": {"native": None, "routing": None, "delegation": None},
+                        "fallback_consent": {"native": None, "delegation": None},
                     }
                 else:
                     item = copy.deepcopy(entries[name])
                     item["routing"]["enabled"] = name in selected
-                    if fallbacks is not None and item["routing"]["fallback"] == {"enabled": False, "heavy": None, "light": None}:
-                        item["routing"]["fallback"] = self._fallback_for(name, fallbacks)
                     entries[name] = item
                 self._check_primary_routes(entries[name]["routing"], entries[name]["models"])
             changed = stored is None or entries != stored["profiles"]
             revision = (stored["revision"] if stored else 0) + (1 if changed else 0)
             custom = (stored or {}).get("custom_slots") or []
-            data = _store_payload(_store_schema(entries, custom), revision, entries, custom)
+            data = _store_payload(revision, entries, custom)
             if changed:
                 _atomic_write(self.store_path, _json_bytes(data))
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -2203,7 +2022,6 @@ class Service:
             "slot_capabilities": {
                 "schema": 1,
                 "slots": list(slot_model.BUILTIN_SLOTS),
-                "tiers": dict(slot_model.SLOT_TIERS),
                 "purposes": dict(slot_model.PURPOSE_SLOTS),
                 "follows": list(slot_model.FOLLOWS),
                 "blocking_profiles": self._slot_blocking_profiles(discovered),
@@ -2240,7 +2058,7 @@ class Service:
                 "routing": routing,
                 "native_fallback": None,
                 "delegation_fallback": None,
-                "fallback_consent": {"native": None, "routing": None, "delegation": None},
+                "fallback_consent": {"native": None, "delegation": None},
             }
         else:
             routing = entry["routing"]
@@ -2267,13 +2085,10 @@ class Service:
             "native_delegation": native_service.status(self, name),
             "role_intro": self._role_intro(name),
             "initial_setup": native_service.initial_setup_status(self, name),
-            "timeouts": {
-                **timeouts.timeout_status(
-                    self._profile_home(name),
-                    enforcement_available=self._timeout_enforcement_available(name),
-                ),
-                "split_routing_supported": self._timeout_role_enforcement_available(name),
-            },
+            "timeouts": timeouts.timeout_status(
+                self._profile_home(name),
+                enforcement_available=self._timeout_enforcement_available(name),
+            ),
         }
 
     def _slot_capable(self, profile: str) -> bool:
@@ -2302,7 +2117,7 @@ class Service:
         return {
             "schema": 1,
             "capable": self._slot_capable(profile),
-            "stored": [slot for slot in slot_model.slot_ids(custom) if slot in routing.get("slots", {})],
+            "stored": [slot for slot in slot_model.slot_ids(custom) if slot in routing["slots"]],
             "declarations": slot_model.effective_declarations(routing, custom),
         }
 
@@ -2332,41 +2147,21 @@ class Service:
         native, model_roles = self._native_models(profile)
         # Every role is present; an unverified one is None so whatever follows it is None too.
         models = {role: copy.deepcopy(native.get(role)) for role in MODEL_ROLES}
-        heavy = models["main"] if routing["heavy"]["follow"] == "main" else routing["heavy"]["custom"]
-        light = models["delegation"] if routing["light"]["follow"] == "delegation" else routing["light"]["custom"]
         enabled = routing["enabled"] and not ROUTING_SKILL_IDS.intersection(self._read_disabled(profile))
-        consent = entry.get("fallback_consent", {}).get("routing") if entry else None
-        approved = routing["fallback"]["enabled"] and fallback_policy.consent_matches(
-            profile, "routing", routing["fallback"], consent
-        )
         limits = timeouts.read_timeouts(self._profile_home(profile))
-        config = {
+        known = slot_model.slot_ids(custom)
+        return {
             "enabled": enabled,
-            "heavy": copy.deepcopy(heavy),
-            "light": copy.deepcopy(light),
             "model_roles": model_roles,
-            # What each task slot runs on. Heavy/Light above remain for
-            # historical readers and for a slot that has never been set.
+            # What each task slot runs on, and for how long (seconds; 0 means no limit).
             "slots": slot_model.resolved_slots(routing, models, custom),
-            "slot_tiers": slot_model.slot_tiers(custom),
             "purpose_slots": slot_model.purpose_slots(custom),
-            "purpose_roles": slot_model.purpose_roles(custom),
             "custom_slots": copy.deepcopy(custom),
-            "fallback": dict(routing["fallback"]),
             "revision": revision,
-            "light_timeout_seconds": timeouts.routed_seconds(limits, "light"),
-            "heavy_timeout_seconds": timeouts.routed_seconds(limits, "heavy"),
+            "slot_timeout_seconds": {slot: timeouts.slot_seconds(limits, slot) for slot in known},
             "delegate_timeout_seconds": limits["delegate_total_seconds"],
             "timeout_revision": limits["revision"],
-            "fallback_policy": {
-                "trigger": fallback_policy.ROUTING_TRIGGER,
-                "max_retries": fallback_policy.ROUTING_MAX_RETRIES,
-                "approved": approved,
-            },
         }
-        if limits["schema"] == 1:
-            config["timeout_seconds"] = limits["routed_total_seconds"]
-        return config
 
     def _fresh_profile_entry(self, profile: str, entries: dict[str, Any]) -> dict[str, Any]:
         if profile in entries:
@@ -2377,36 +2172,26 @@ class Service:
             "routing": self._initial_routing(profile),
             "native_fallback": None,
             "delegation_fallback": None,
-            "fallback_consent": {"native": None, "routing": None, "delegation": None},
+            "fallback_consent": {"native": None, "delegation": None},
         }
 
-    def _timeout_code_support(self, profile: str) -> dict[str, bool]:
-        """Observe bounded base/split support without executing plugin code."""
+    def _timeout_enforcement_available(self, profile: str) -> bool:
+        """Installed code that enforces per-slot limits (static, never executed) plus proven Python allow."""
         try:
             self._require_profile(profile)
-            base, split = installation.timeout_code_support(
-                self._profile_home(profile), self.root, self.store_path
-            )
-        except (OSError, TypeError, ValueError, RuntimeError):
-            return {"base": False, "split": False}
-        return {"base": bool(base), "split": bool(split)}
-
-    def _timeout_python_enabled(self, profile: str) -> bool:
-        try:
-            self._require_profile(profile)
-            return installation.timeout_python_enabled(self._profile_home(profile))
+            home = self._profile_home(profile)
+            return (installation.timeout_code_support(home, self.root, self.store_path)
+                    and installation.timeout_python_enabled(home))
         except (OSError, TypeError, ValueError, RuntimeError):
             return False
 
-    def _timeout_enforcement_available(self, profile: str) -> bool:
-        """Compatibility predicate: supported base code plus proven Python allow."""
-        return self._timeout_code_support(profile)["base"] and self._timeout_python_enabled(profile)
-
-    def _timeout_role_enforcement_available(self, profile: str) -> bool:
-        """Split timeout eligibility additionally needs its literal AST marker."""
-        return self._timeout_code_support(profile)["split"] and self._timeout_python_enabled(profile)
-
     def _prepare_timeout_updates(self, updates: Any, discovered: list[str], *, partial: bool = False) -> list[dict[str, Any]]:
+        """Runtime limit updates, one per profile.
+
+        A full update names `delegate_total_seconds` and the whole `slot_seconds`. A partial save
+        (marker) may name either field; its `slot_seconds` is a patch merged over the target's own
+        limits, where null removes a slot's own limit (the slot then gets the default).
+        """
         if not isinstance(updates, list):
             raise ValueError("timeout_updates must be a list")
         result: list[dict[str, Any]] = []
@@ -2415,25 +2200,11 @@ class Service:
             if not isinstance(update, dict) or not {"profile", "expected_revision"} <= set(update):
                 raise ValueError("timeout update has unknown or missing fields")
             raw_values = {key: value for key, value in update.items() if key not in {"profile", "expected_revision"}}
-            # A partial save sends only the split fields it changes; each is merged over the target's
-            # own current values below. Any other shape is validated exactly as before.
-            subset = partial and bool(raw_values) and set(raw_values) < timeouts._SPLIT_TIMEOUT_FIELDS
-            submitted: dict[str, float] = {}
-            values: dict[str, float] = {}
-            if subset:
-                submitted = {key: timeouts.validate_seconds(value) for key, value in raw_values.items()}
-            else:
-                values = timeouts.validate_policy_values(raw_values)
-            split_update = subset or "routed_total_seconds" not in values
             profile = self._require_profile(update["profile"], discovered)
             if profile in seen:
                 raise ValueError("timeout updates must target each profile only once")
             seen.add(profile)
-            supported = (
-                self._timeout_role_enforcement_available(profile)
-                if split_update else self._timeout_enforcement_available(profile)
-            )
-            if not supported:
+            if not self._timeout_enforcement_available(profile):
                 raise ValueError("timeout enforcement is unavailable for this profile")
             revision = update["expected_revision"]
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
@@ -2443,13 +2214,25 @@ class Service:
             current = timeouts.read_timeouts(home)
             if digest != timeouts.timeout_digest(home) or revision != current["revision"]:
                 raise RevisionConflict("timeout settings changed; reload before preview")
-            if not split_update and current["schema"] == 2:
-                raise ValueError("legacy timeout updates cannot target split settings")
-            before_values = timeouts.policy_values(current, split=split_update)
-            if subset:
-                # write_required and the written document are the merged three values; the per-target
-                # expected_revision/digest compare-and-set is unchanged.
-                values = timeouts.validate_policy_values({**before_values, **submitted})
+            before_values = timeouts.policy_values(current)
+            if partial:
+                if not raw_values or set(raw_values) - {"delegate_total_seconds", "slot_seconds"}:
+                    raise ValueError("a partial timeout update names delegate_total_seconds or slot_seconds")
+                merged = copy.deepcopy(before_values)
+                if "delegate_total_seconds" in raw_values:
+                    merged["delegate_total_seconds"] = raw_values["delegate_total_seconds"]
+                if "slot_seconds" in raw_values:
+                    patch = raw_values["slot_seconds"]
+                    if not isinstance(patch, dict) or not patch:
+                        raise ValueError("slot_seconds of a partial save must name at least one slot")
+                    for slot, seconds in patch.items():
+                        if seconds is None:
+                            merged["slot_seconds"].pop(slot, None)
+                        else:
+                            merged["slot_seconds"][slot] = seconds
+                values = timeouts.validate_policy_values(merged)
+            else:
+                values = timeouts.validate_policy_values(raw_values)
             result.append({"profile": profile, "key": "model-router.timeouts", "before": digest,
                            "before_values": before_values, "expected_revision": revision,
                            "after": values, "write_required": values != before_values})
@@ -2458,12 +2241,7 @@ class Service:
     def _check_timeout_write(self, item: dict[str, Any]) -> None:
         profile = self._require_profile(item["profile"])
         home = self._profile_home(profile)
-        split_update = "routed_total_seconds" not in item.get("after", {})
-        supported = (
-            self._timeout_role_enforcement_available(profile)
-            if split_update else self._timeout_enforcement_available(profile)
-        )
-        if not supported:
+        if not self._timeout_enforcement_available(profile):
             raise RevisionConflict("timeout enforcement changed since preview")
         if timeouts.timeout_digest(home) != item["before"] or timeouts.read_timeouts(home)["revision"] != item["expected_revision"]:
             raise RevisionConflict("timeout settings changed since preview")
@@ -2474,11 +2252,6 @@ class Service:
     # stable code the page maps to its "changed elsewhere, reload" state. Clients that send no
     # `expected` keep the previous behaviour (revision, preview snapshots and apply CAS only).
     PAGE_EXPECTATION_FIELDS = ("models", "actual_models", "routing", "native_fallback", "auxiliary_fallback")
-
-    @staticmethod
-    def _partial_routing_expectation(value: Any) -> bool:
-        """The routing expectation of a partial save: the switch and only the slots it writes."""
-        return type(value) is dict and "heavy" not in value and "light" not in value
 
     @staticmethod
     def _valid_page_expectation(field: str, value: Any, partial: bool = False) -> bool:
@@ -2503,21 +2276,15 @@ class Service:
 
         if field in {"models", "actual_models"}:
             return type(value) is dict and set(value) <= set(MODEL_ROLES) and all(route(item) for item in value.values())
-        if field == "routing" and partial and Service._partial_routing_expectation(value):
-            # Partial save: `slots` holds only the slot ids the save writes, each the stored
-            # declaration the page froze (null: not stored). Heavy/Light are not written, not compared.
-            return (set(value) == {"enabled", "slots", "skill_enabled"} and type(value["enabled"]) is bool and
+        if field == "routing":
+            # {enabled, slots, skill_enabled}. A full save freezes every stored slot declaration; a
+            # partial save only the slot ids it writes (null: not stored).
+            return (type(value) is dict and set(value) == {"enabled", "slots", "skill_enabled"} and type(value["enabled"]) is bool and
                     (value["skill_enabled"] is None or type(value["skill_enabled"]) is bool) and
                     type(value["slots"]) is dict and len(value["slots"]) <= 32 and
-                    all(text(key, 64) and (key in slot_model.BUILTIN_SLOTS or slot_model.is_custom_slot(key)) and (item is None or declaration(item))
+                    all(text(key, 64) and (key in slot_model.BUILTIN_SLOTS or slot_model.is_custom_slot(key))
+                        and ((partial and item is None) or declaration(item))
                         for key, item in value["slots"].items()))
-        if field == "routing":
-            return (type(value) is dict and set(value) == {"enabled", "heavy", "light", "slots", "skill_enabled"} and
-                    type(value["enabled"]) is bool and value["skill_enabled"] in (True, False, None) and
-                    (value["skill_enabled"] is None or type(value["skill_enabled"]) is bool) and
-                    all(value[key] is None or declaration(value[key]) for key in ("heavy", "light")) and
-                    (value["slots"] is None or (type(value["slots"]) is dict and len(value["slots"]) <= 32 and
-                                                all(text(key, 64) and declaration(item) for key, item in value["slots"].items()))))
         if field == "native_fallback":
             return (type(value) is dict and set(value) == {"enabled", "chain", "actual_chain"} and
                     (value["enabled"] is None or type(value["enabled"]) is bool) and chain(value["chain"]) and chain(value["actual_chain"]))
@@ -2567,8 +2334,7 @@ class Service:
                 skill_enabled: bool | None = not ROUTING_SKILL_IDS.intersection(self._read_disabled(profile))
             except ServiceError:
                 skill_enabled = None
-            return {"enabled": bool(routing.get("enabled")), "heavy": routing.get("heavy"),
-                    "light": routing.get("light"), "slots": routing.get("slots"), "skill_enabled": skill_enabled}
+            return {"enabled": bool(routing["enabled"]), "slots": routing["slots"], "skill_enabled": skill_enabled}
         if field == "auxiliary_fallback":
             auxiliary = self._auxiliary_status(profile)
             return {task: {"chain": item["chain"], "actual_chain": item["actual_chain"]} for task, item in auxiliary.items()}
@@ -2583,8 +2349,8 @@ class Service:
 
         `role_subset` (the model settings wire): `models`/`actual_models` are compared only for the
         roles the page froze, the ones it edits, so a sibling role changed elsewhere never blocks it.
-        `partial` (partial_save_schema): a routing expectation without Heavy/Light compares the
-        switch and only the slot ids it names, so a sibling slot changed elsewhere never blocks it.
+        `partial` (partial_save_schema): a routing expectation compares the switch and only the slot
+        ids it names, so a sibling slot changed elsewhere never blocks it.
         """
         if items is None:
             return
@@ -2610,7 +2376,7 @@ class Service:
                     current = {task: current.get(task) for task in item[field]}
                 if role_subset and field in {"models", "actual_models"} and isinstance(current, dict):
                     current = {role: current[role] for role in item[field] if role in current}
-                if partial and field == "routing" and self._partial_routing_expectation(item[field]) and isinstance(current, dict):
+                if partial and field == "routing" and isinstance(current, dict):
                     stored_slots = current.get("slots") or {}
                     current = {"enabled": current.get("enabled"), "skill_enabled": current.get("skill_enabled"),
                                "slots": {slot: stored_slots.get(slot) for slot in item[field].get("slots") or {}}}
@@ -2633,8 +2399,8 @@ class Service:
             raise ValueError("preview body has unknown or missing fields")
         if "model_settings_schema" in body and (type(body["model_settings_schema"]) is not int or body["model_settings_schema"] != MODEL_SETTINGS_SCHEMA):
             raise ValueError("model_settings_schema must be 1")
-        # Partial section saves: slot declarations merged per target, optional Heavy/Light, a subset
-        # of the split timeout fields, and routing expectations narrowed to the slots written.
+        # Partial section saves: slot declarations merged per target, a patch of runtime limits, and
+        # routing expectations narrowed to the slots written.
         partial = _partial_save(body)
         # The model settings wire: `models` names only the roles the page edits, written, compared and
         # read back per role; every other role of every target is left exactly as its config has it.
@@ -2656,7 +2422,7 @@ class Service:
         discovered = self._discover_profiles()
         profile = self._require_profile(body["profile"], discovered)
         page_expected = self._parse_page_expectations(body["expected"], discovered, partial=partial) if "expected" in body else None
-        if page_expected is not None and any(isinstance(update, dict) and set(update) & {"routing_fallback", "delegation_fallback"} for update in fallback_updates):
+        if page_expected is not None and any(isinstance(update, dict) and "delegation_fallback" in update for update in fallback_updates):
             raise ValueError("expected covers the conversation fallback only")
         raw_timeout_updates = body.get("timeout_updates", [])
         if not isinstance(raw_timeout_updates, list):
@@ -2702,36 +2468,17 @@ class Service:
                 raise ValueError("model_settings_schema saves require expected values for every model target")
         else:
             submitted_models, delegation_kept = _submitted_models(body["models"]) if scope in {None, "models"} else (None, False)
-        # The retired routed-job fallback is written only by fallback_preview. A client may omit
-        # routing.fallback; the stored value is then kept as it is. One that sends it must send the
-        # stored value unchanged (older pages), in every save scope.
         routing_body = body["routing"]
-        fallback_submitted = isinstance(routing_body, dict) and "fallback" in routing_body
-        if isinstance(routing_body, dict) and not fallback_submitted:
-            routing_body = {**routing_body, "fallback": {"enabled": False, "heavy": None, "light": None}}
         if partial and scope in {None, "routing"}:
             submitted_routing = _partial_routing(routing_body)
-        elif scope is None:
+        elif scope in {None, "routing"}:
             submitted_routing = _routing(routing_body)
-        elif scope == "routing":
-            if not isinstance(routing_body, dict) or set(routing_body) - {"slots"} != {"enabled", "heavy", "light", "fallback"}:
-                raise ValueError("routing must define enabled, heavy, light, and fallback")
-            # Validate membership and Heavy/Light declarations here; a submitted fallback is only
-            # checked to equal the stored value below (it is never written by this request).
-            submitted_routing = _routing({
-                "enabled": routing_body["enabled"],
-                "heavy": routing_body["heavy"],
-                "light": routing_body["light"],
-                "fallback": {"enabled": False, "heavy": None, "light": None},
-                **({"slots": routing_body["slots"]} if "slots" in routing_body else {}),
-            })
         else:
             submitted_routing = None
         if submitted_routing is not None and submitted_routing["enabled"] != (profile in selected):
             raise ValueError("routing.enabled must match routing_profiles membership")
-        # A client that predates slots omits the key; its save must leave any
-        # stored slot declarations alone instead of clearing what it cannot see.
-        slots_submitted = submitted_routing is not None and isinstance(body["routing"], dict) and "slots" in body["routing"]
+        # A partial save names only the slots it writes; a full save names every stored slot.
+        slots_submitted = submitted_routing is not None and "slots" in submitted_routing
 
         store_digest = self._store_file_digest()
         stored = self._load_store()
@@ -2777,13 +2524,6 @@ class Service:
                     if touched:
                         raise
             after = copy.deepcopy(projected)
-        if fallback_submitted:
-            # Compare with the stored value, or the initial one for a profile without a stored entry
-            # (the initial routing fallback is always the disabled default). Never resolve the
-            # profile's models for this: a timeout-only save must not fail on an unrelated model.
-            stored_fallback = entries[profile]["routing"]["fallback"] if profile in entries else self._default_routing()["fallback"]
-            if _routing_fallback(routing_body["fallback"]) != stored_fallback:
-                raise ValueError("routing.fallback can only be changed by fallback_preview")
         if submitted_routing is not None and submitted_routing.get("slots"):
             blocking = self._slot_blocking_profiles(discovered)
             if blocking:
@@ -2817,8 +2557,8 @@ class Service:
                     # if they change.
                     desired = {role: submitted_models[role] if role != "delegation" else self._kept_role_route(name, role, submitted_models["main"])
                                for role in MODEL_ROLES}
-                    # The store keeps its own canonical delegation route exactly (legacy Light and
-                    # slot routing read it); only a profile without a stored entry gets the resolved one.
+                    # The store keeps its own canonical delegation route exactly (slot routing reads
+                    # it); only a profile without a stored entry gets the resolved one.
                     stored_delegation = (entries.get(name) or {}).get("models", {}).get("delegation")
                     store_models = {**desired, "delegation": copy.deepcopy(stored_delegation)} if stored_delegation is not None else desired
                     readback_models[name] = copy.deepcopy(desired)
@@ -2869,28 +2609,12 @@ class Service:
             if name in routing_target_set:
                 routing_validation_names.add(name)
                 new_routing = copy.deepcopy(entry["routing"])
-                # A partial save that omits Heavy/Light leaves each target's own declaration.
-                for tier in ("heavy", "light"):
-                    if not partial or tier in submitted_routing:
-                        new_routing[tier] = copy.deepcopy(submitted_routing[tier])
                 if slots_submitted and partial:
                     # Only the submitted slots change; the rest keep their stored declaration and an
-                    # absent slot stays absent. Another profile's stored slot that follows the
-                    # delegation model is kept exactly (the page names it as skipped for that slot).
-                    merged = _merge_partial_slots(entry["routing"].get("slots"), submitted_routing["slots"], keep_legacy=name != profile)
-                    new_routing.pop("slots", None)
-                    if merged:
-                        new_routing["slots"] = merged
+                    # absent slot stays absent.
+                    new_routing["slots"] = _merge_partial_slots(entry["routing"]["slots"], submitted_routing["slots"])
                 elif slots_submitted:
-                    # A copy to another profile keeps that profile's stored slots that follow the
-                    # delegation model (an earlier setting the page no longer offers) exactly.
-                    kept_legacy = {} if name == profile else {
-                        slot: copy.deepcopy(declaration) for slot, declaration in (entry["routing"].get("slots") or {}).items()
-                        if isinstance(declaration, dict) and declaration.get("follow") == "delegation"}
-                    new_routing.pop("slots", None)
-                    merged = {**copy.deepcopy(submitted_routing.get("slots") or {}), **kept_legacy}
-                    if merged:
-                        new_routing["slots"] = merged
+                    new_routing["slots"] = _ordered_slots(copy.deepcopy(submitted_routing["slots"]))
                 new_routing["enabled"] = new_enabled
                 if entry["routing"] != new_routing:
                     changes.append({"profile": name, "field": "routing", "before": entry["routing"], "after": new_routing})
@@ -2938,8 +2662,6 @@ class Service:
                     continue
                 live = prospective_models[name] if name in prospective_models else self._native_models(name)[0]
                 self._check_live_routes(entry["routing"], live)
-            if not fallback_updates:
-                self._check_changed_routing_fallbacks(entries, after)
         elif scope in {None, "models", "routing"}:
             if scope is None:
                 route_validation_names = set(after)
@@ -2951,8 +2673,6 @@ class Service:
                 entry = after.get(name)
                 if entry is not None:
                     self._check_primary_routes(entry["routing"], entry["models"])
-            if not fallback_updates:
-                self._check_changed_routing_fallbacks(entries, after)
         # The models every explicit model target must resolve to after apply, recorded before an
         # unchanged target's projected entry is dropped below (a NOOP target has no entry to read).
         # The model settings wire reads back only the roles it edits (approved_roles).
@@ -2982,17 +2702,11 @@ class Service:
                     if isinstance(update.get("auxiliary_fallback"), dict):
                         needed.setdefault(update["profile"], set()).update(f"auxiliary_fallback.{task}" for task in update["auxiliary_fallback"])
             held_by_profile = {item["profile"]: item for item in page_expected}
-            if partial and isinstance(submitted_routing, dict) and {"heavy", "light"} & set(submitted_routing):
-                # A narrowed expectation never compares Heavy/Light, so a partial save that writes them
-                # must freeze them: every routing target needs the full routing expectation form.
-                for name in sorted(routing_target_set):
-                    if self._partial_routing_expectation(held_by_profile.get(name, {}).get("routing")):
-                        raise ValueError(f"expected must cover routing.heavy and routing.light of {name}")
             if partial and slots_submitted:
                 # A narrowed routing expectation must name every slot this save writes to that profile.
                 for name in sorted(needed):
                     held = held_by_profile.get(name, {}).get("routing")
-                    if ("routing" in needed[name] and name in routing_target_set and self._partial_routing_expectation(held)
+                    if ("routing" in needed[name] and name in routing_target_set and isinstance(held, dict)
                             and not set(submitted_routing["slots"]) <= set(held.get("slots") or {})):
                         raise ValueError(f"expected must cover routing.slots of {name}")
             self._check_page_expectations(page_expected, entries, needed, role_subset=native_wire, partial=partial)
@@ -3075,14 +2789,11 @@ class Service:
             changes.append({"profile": "*", "field": "custom_slots", "before": copy.deepcopy(current), "after": copy.deepcopy(definitions)})
         after = copy.deepcopy(entries)
         for name, entry in after.items():
-            slots = entry["routing"].get("slots") or {}
+            slots = entry["routing"]["slots"]
             gone = sorted(set(slots) & removed)
             if not gone:
                 continue
-            kept = {slot: value for slot, value in slots.items() if slot not in removed}
-            entry["routing"].pop("slots", None)
-            if kept:
-                entry["routing"]["slots"] = kept
+            entry["routing"]["slots"] = {slot: value for slot, value in slots.items() if slot not in removed}
             changes.append({"profile": name, "field": "routing.slots", "before": {slot: slots[slot] for slot in gone}, "after": None})
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
@@ -3127,7 +2838,7 @@ class Service:
                 raise ServiceError("custom slot plan is inconsistent")
         new_revision = revision + 1
         profiles = self._preserve_untouched_entries(after, (current or {}).get("profiles") or {}, plan["store_digest"], definitions)
-        next_store = _store_payload(_store_schema(after, definitions), new_revision, profiles, definitions)
+        next_store = _store_payload(new_revision, profiles, definitions)
 
         def store_unchanged() -> None:
             if self._store_file_digest() != plan["store_digest"]:
@@ -3257,7 +2968,7 @@ class Service:
             raise ValueError("model_settings_schema must be 1")
         native_wire = (base_plan.get("model_settings_schema") == MODEL_SETTINGS_SCHEMA) if base_plan is not None else "model_settings_schema" in body
         if "expected" in body and isinstance(body["updates"], list) and any(
-                isinstance(update, dict) and set(update) & {"routing_fallback", "delegation_fallback"} for update in body["updates"]):
+                isinstance(update, dict) and "delegation_fallback" in update for update in body["updates"]):
             raise ValueError("expected covers the conversation fallback only")
         expected = body["expected_revision"]
         if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
@@ -3273,9 +2984,9 @@ class Service:
         parsed_updates: list[tuple[str, dict[str, Any]]] = []
         seen_profiles: set[str] = set()
         for update in updates:
-            if not isinstance(update, dict) or not set(update) <= {"profile", "native_fallback", "routing_fallback", "delegation_fallback", "auxiliary_fallback"} or "profile" not in update:
+            if not isinstance(update, dict) or not set(update) <= {"profile", "native_fallback", "delegation_fallback", "auxiliary_fallback"} or "profile" not in update:
                 raise ValueError("each update must contain profile and known fallback scopes")
-            if not (set(update) & {"native_fallback", "routing_fallback", "delegation_fallback", "auxiliary_fallback"}):
+            if not (set(update) & {"native_fallback", "delegation_fallback", "auxiliary_fallback"}):
                 raise ValueError("each update must change at least one fallback scope")
             profile = self._require_profile(update["profile"], discovered)
             if profile in seen_profiles:
@@ -3288,15 +2999,6 @@ class Service:
                     raise ValueError("native_fallback must define enabled and chain")
                 if scopes["native"]["enabled"] and not scopes["native"]["chain"]:
                     raise ValueError("enabled native fallback requires at least one chain entry")
-            if "routing_fallback" in update:
-                raw = update["routing_fallback"]
-                if not isinstance(raw, dict) or set(raw) != {"enabled", "heavy", "light"} or not isinstance(raw["enabled"], bool):
-                    raise ValueError("routing_fallback must define enabled, heavy, and light")
-                heavy = None if raw["heavy"] is None else _route(raw["heavy"])
-                light = None if raw["light"] is None else _route(raw["light"])
-                if raw["enabled"] and (heavy is None or light is None):
-                    raise ValueError("enabled routing fallback requires Heavy and Light routes")
-                scopes["routing"] = {"enabled": raw["enabled"], "heavy": heavy, "light": light}
             if "delegation_fallback" in update:
                 scopes["delegation"] = self._validate_delegation_fallback(update["delegation_fallback"])
                 if scopes["delegation"] is None:
@@ -3316,8 +3018,8 @@ class Service:
                 raise ValueError("each confirmation must define profile, scope, cost, and rerun flags")
             profile = self._require_profile(item["profile"], discovered)
             scope = item["scope"]
-            if scope not in {"native", "routing", "delegation", "auxiliary"}:
-                raise ValueError("confirmation scope must be native, routing, delegation, or auxiliary")
+            if scope not in {"native", "delegation", "auxiliary"}:
+                raise ValueError("confirmation scope must be native, delegation, or auxiliary")
             pair = (profile, scope)
             if pair in confirmation_map:
                 raise ValueError("confirmations must not contain duplicate profile scopes")
@@ -3334,8 +3036,7 @@ class Service:
         for (profile, scope), confirmation in confirmation_map.items():
             if confirmation["allow_additional_cost"] is not True:
                 raise ValueError("fallback confirmation must allow additional cost")
-            expected_rerun = scope == "routing"
-            if confirmation["allow_task_rerun"] is not expected_rerun:
+            if confirmation["allow_task_rerun"] is not False:
                 raise ValueError("fallback confirmation retry flag does not match its fixed execution path")
 
         store_digest = self._store_file_digest()
@@ -3473,31 +3174,6 @@ class Service:
                                 "before": raw_pair_view(raw, legacy=legacy_source),
                                 "after": target,
                             })
-                elif scope == "routing":
-                    old_fallback = entry["routing"]["fallback"]
-                    heavy_primary = entry["models"]["main"] if entry["routing"]["heavy"]["follow"] == "main" else entry["routing"]["heavy"]["custom"]
-                    light_primary = entry["models"]["delegation"] if entry["routing"]["light"]["follow"] == "delegation" else entry["routing"]["light"]["custom"]
-                    if desired["enabled"]:
-                        heavy_id = (desired["heavy"]["provider"].casefold(), desired["heavy"]["model"].casefold())
-                        light_id = (desired["light"]["provider"].casefold(), desired["light"]["model"].casefold())
-                        if heavy_id == light_id:
-                            raise ValueError("enabled Heavy and Light fallbacks must be distinct")
-                        if heavy_id == (heavy_primary["provider"].casefold(), heavy_primary["model"].casefold()) or light_id == (light_primary["provider"].casefold(), light_primary["model"].casefold()):
-                            raise ValueError("fallback route must differ from its primary route")
-                    already_approved = fallback_policy.consent_matches(profile, scope, desired, old_consent)
-                    needs_consent = desired["enabled"] and not already_approved
-                    if needs_consent and confirmation is None:
-                        raise ValueError("routing fallback requires cost and fresh-task rerun confirmation")
-                    new_consent = (
-                        fallback_policy.make_consent(profile, scope, desired, source="explicit")
-                        if confirmation is not None
-                        else old_consent if fallback_policy.consent_matches(profile, scope, desired, old_consent)
-                        else None
-                    )
-                    if old_fallback != desired:
-                        changes.append({"profile": profile, "field": "routing.fallback", "before": old_fallback, "after": desired})
-                    entry["routing"]["fallback"] = desired
-                    entry["fallback_consent"]["routing"] = new_consent
                 elif scope == "delegation":
                     try:
                         delegated_snapshot = self._read_delegation_snapshot(profile)
@@ -3543,12 +3219,6 @@ class Service:
                         "after": new_source,
                     })
 
-        # Only the profiles whose routing this plan changes (a combined base plan validated its own).
-        # Native/auxiliary/delegation spare models never depend on another profile's routes.
-        for name, scopes in parsed_updates:
-            if "routing" in scopes and name in after:
-                self._check_primary_routes(after[name]["routing"], after[name]["models"])
-        self._check_changed_routing_fallbacks(entries, after)
         state_changed = after != entries
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
@@ -3736,7 +3406,7 @@ class Service:
             new_revision = revision + 1 if plan["state_changed"] else revision
             custom = (current or {}).get("custom_slots") or []
             next_profiles = self._preserve_untouched_entries(plan["after"], (current or {}).get("profiles") or {}, plan["store_digest"], custom)
-            next_store = _store_payload(_store_schema(plan["after"], custom), new_revision, next_profiles, custom)
+            next_store = _store_payload(new_revision, next_profiles, custom)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             profiles_to_backup = sorted({item["profile"] for item in plan["writes"]})
             timeout_writes = [item for item in plan.get("timeout_writes", []) if item.get("write_required", True)]
@@ -3814,9 +3484,7 @@ class Service:
                     if not item.get("write_required", True):
                         self._check_timeout_write(item)
                         continue
-                    if set(item["after"]) == timeouts._SPLIT_TIMEOUT_FIELDS and not self._timeout_role_enforcement_available(item["profile"]):
-                        raise RevisionConflict("role timeout enforcement changed before final readback")
-                    if set(item["after"]) == timeouts._LEGACY_TIMEOUT_FIELDS and not self._timeout_enforcement_available(item["profile"]):
+                    if not self._timeout_enforcement_available(item["profile"]):
                         raise RevisionConflict("timeout enforcement changed before final readback")
                     observed = timeouts.read_timeouts(self._profile_home(item["profile"]))
                     if observed["revision"] != item["expected_revision"] + 1 or any(observed[key] != value for key, value in item["after"].items()):

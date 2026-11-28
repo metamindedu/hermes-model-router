@@ -11,21 +11,15 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_DELEGATE_TOTAL_SECONDS = 0
-DEFAULT_ROUTED_TOTAL_SECONDS = 3600
-
-_LEGACY_SCHEMA = 1
-_SCHEMA = 2
+# Literal marker read statically by profile readiness: this code enforces per-slot limits.
+SLOT_TIMEOUTS_SUPPORTED = True
+# The schema of this file; any other schema is refused (fail closed).
+_SCHEMA = 3
 _RELATIVE_PATH = Path("plugin-data") / "model-router" / "timeouts.json"
 _LOCK_NAME = ".timeouts.lock"
-_LEGACY_TIMEOUT_FIELDS = frozenset({"delegate_total_seconds", "routed_total_seconds"})
-_SPLIT_TIMEOUT_FIELDS = frozenset({
-    "delegate_total_seconds", "routed_light_total_seconds", "routed_heavy_total_seconds",
-})
-_LEGACY_TIMEOUT_ORDER = ("delegate_total_seconds", "routed_total_seconds")
-_SPLIT_TIMEOUT_ORDER = (
-    "delegate_total_seconds", "routed_light_total_seconds", "routed_heavy_total_seconds",
-)
+_FIELDS = ("delegate_total_seconds", "slot_seconds")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
+_SLOT_LIMIT = 32
 
 
 def validate_seconds(value: Any) -> float:
@@ -41,14 +35,24 @@ def validate_seconds(value: Any) -> float:
     return result
 
 
+def validate_slot_seconds(value: Any) -> dict[str, float]:
+    """Per-slot runtime limits: built-in or well-formed custom slot ids, each in seconds."""
+    from .slots import BUILTIN_SLOTS, is_custom_slot
+    if not isinstance(value, dict) or len(value) > _SLOT_LIMIT:
+        raise ValueError("slot_seconds must map slots to seconds")
+    if any(not isinstance(key, str) or (key not in BUILTIN_SLOTS and not is_custom_slot(key)) for key in value):
+        raise ValueError("slot_seconds names an unknown slot")
+    ordered = [*(slot for slot in BUILTIN_SLOTS if slot in value), *sorted(key for key in value if key not in BUILTIN_SLOTS)]
+    return {slot: validate_seconds(value[slot]) for slot in ordered}
+
+
 def _defaults() -> dict[str, Any]:
-    # Missing settings stay on the exact legacy document until an explicit
-    # change is made; reading a profile never performs a schema migration.
+    # Missing settings read as defaults; reading never writes the file.
     return {
-        "schema": _LEGACY_SCHEMA,
+        "schema": _SCHEMA,
         "revision": 0,
         "delegate_total_seconds": float(DEFAULT_DELEGATE_TOTAL_SECONDS),
-        "routed_total_seconds": float(DEFAULT_ROUTED_TOTAL_SECONDS),
+        "slot_seconds": {},
     }
 
 
@@ -141,17 +145,15 @@ def _normalize_document(value: Any) -> dict[str, Any]:
         raise ValueError("timeout settings must be an object")
     schema = value.get("schema")
     revision = value.get("revision")
-    if isinstance(schema, bool) or not isinstance(schema, int) or schema not in {_LEGACY_SCHEMA, _SCHEMA}:
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema != _SCHEMA:
         raise ValueError("timeout settings schema is unsupported")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         raise ValueError("timeout settings revision is invalid")
-    fields = _LEGACY_TIMEOUT_ORDER if schema == _LEGACY_SCHEMA else _SPLIT_TIMEOUT_ORDER
-    if set(value) != {"schema", "revision", *fields}:
+    if set(value) != {"schema", "revision", *_FIELDS}:
         raise ValueError("timeout settings fields are invalid")
-    normalized = {"schema": schema, "revision": revision}
-    for field in fields:
-        normalized[field] = validate_seconds(value[field])
-    return normalized
+    return {"schema": schema, "revision": revision,
+            "delegate_total_seconds": validate_seconds(value["delegate_total_seconds"]),
+            "slot_seconds": validate_slot_seconds(value["slot_seconds"])}
 
 
 def _parse(payload: bytes) -> dict[str, Any]:
@@ -185,64 +187,27 @@ def _digest(payload: bytes | None) -> str:
     return "MISSING" if payload is None else hashlib.sha256(payload).hexdigest()
 
 
-def validate_policy_values(values: Any) -> dict[str, float]:
-    """Validate a complete legacy two-value or split three-value policy."""
-    if not isinstance(values, dict):
-        raise ValueError("timeout policy values must be an object")
-    fields = set(values)
-    if fields == _LEGACY_TIMEOUT_FIELDS:
-        selected = _LEGACY_TIMEOUT_ORDER
-    elif fields == _SPLIT_TIMEOUT_FIELDS:
-        selected = _SPLIT_TIMEOUT_ORDER
-    else:
-        raise ValueError("timeout policy values must contain exactly a complete supported shape")
-    return {field: validate_seconds(values[field]) for field in selected}
+def validate_policy_values(values: Any) -> dict[str, Any]:
+    """Validate a complete policy: the ordinary delegation limit and the per-slot limits."""
+    if not isinstance(values, dict) or set(values) != set(_FIELDS):
+        raise ValueError("timeout policy values must contain delegate_total_seconds and slot_seconds")
+    return {"delegate_total_seconds": validate_seconds(values["delegate_total_seconds"]),
+            "slot_seconds": validate_slot_seconds(values["slot_seconds"])}
 
 
-def policy_values(settings: Any, split: bool = True) -> dict[str, float]:
-    """Return validated policy values, projecting legacy routed time to both roles.
-
-    With ``split=False`` the legacy two-field shape is returned only when it can
-    represent the settings without collapsing distinct Heavy/Light budgets.
-    """
-    if not isinstance(split, bool):
-        raise ValueError("split must be boolean")
+def policy_values(settings: Any) -> dict[str, Any]:
+    """Return the validated policy values of a timeout document."""
     try:
         state = _normalize_document(settings)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("timeout settings are invalid") from exc
-    if state["schema"] == _LEGACY_SCHEMA:
-        if not split:
-            return {
-                "delegate_total_seconds": state["delegate_total_seconds"],
-                "routed_total_seconds": state["routed_total_seconds"],
-            }
-        routed = state["routed_total_seconds"]
-        return {
-            "delegate_total_seconds": state["delegate_total_seconds"],
-            "routed_light_total_seconds": routed,
-            "routed_heavy_total_seconds": routed,
-        }
-    if split:
-        return {
-            "delegate_total_seconds": state["delegate_total_seconds"],
-            "routed_light_total_seconds": state["routed_light_total_seconds"],
-            "routed_heavy_total_seconds": state["routed_heavy_total_seconds"],
-        }
-    if state["routed_light_total_seconds"] != state["routed_heavy_total_seconds"]:
-        raise ValueError("distinct routed budgets cannot be represented by the legacy policy shape")
-    return {
-        "delegate_total_seconds": state["delegate_total_seconds"],
-        "routed_total_seconds": state["routed_light_total_seconds"],
-    }
+    return {field: state[field] for field in _FIELDS}
 
 
-def routed_seconds(settings: Any, role: str) -> float:
-    """Return the validated Heavy or Light routed budget in seconds."""
-    if not isinstance(role, str) or role not in {"light", "heavy"}:
-        raise ValueError("role must be light or heavy")
-    values = policy_values(settings, split=True)
-    return values[f"routed_{role}_total_seconds"]
+def slot_seconds(settings: Any, slot: str) -> float:
+    """One slot's runtime limit in seconds; a slot without its own limit gets the default."""
+    from .slots import DEFAULT_SLOT_SECONDS
+    return policy_values(settings)["slot_seconds"].get(slot, DEFAULT_SLOT_SECONDS)
 
 
 def _validate_revision(value: Any) -> int:
@@ -276,7 +241,6 @@ def write_timeouts(
 ) -> dict[str, Any]:
     """CAS-write changed profile limits under a task-scoped cross-process lock."""
     clean_values = validate_policy_values(values)
-    split_update = set(clean_values) == _SPLIT_TIMEOUT_FIELDS
     revision = _validate_revision(expected_revision)
     if not isinstance(expected_digest, str) or (
         expected_digest != "MISSING" and _DIGEST_RE.fullmatch(expected_digest) is None
@@ -294,20 +258,8 @@ def write_timeouts(
             state = _defaults() if current is None else current
             if _digest(current_payload) != expected_digest or state["revision"] != revision:
                 raise RuntimeError("timeout settings changed; reload before writing")
-
-            if not split_update and state["schema"] == _SCHEMA:
-                raise RuntimeError("legacy timeout updates cannot overwrite split settings")
-
-            if split_update:
-                current_values = policy_values(state, split=True)
-                if current_values == clean_values:
-                    return state
-                updated_schema = _SCHEMA
-            else:
-                current_values = policy_values(state, split=False)
-                if current_values == clean_values:
-                    return state
-                updated_schema = _LEGACY_SCHEMA
+            if policy_values(state) == clean_values:
+                return state
 
             # Re-read and validate immediately before replacement so a writer
             # that does not cooperate with this lock is less likely to be lost.
@@ -317,7 +269,7 @@ def write_timeouts(
             if latest is not None and latest["revision"] != revision:
                 raise RuntimeError("timeout settings changed; reload before writing")
 
-            updated = {"schema": updated_schema, "revision": revision + 1, **clean_values}
+            updated = {"schema": _SCHEMA, "revision": revision + 1, **clean_values}
             payload = _json_bytes(updated)
             _paths(home)
             _atomic_write(target, payload)
@@ -342,14 +294,15 @@ def timeout_status(home: Path, *, enforcement_available: bool = True) -> dict[st
     except RuntimeError:
         # Unknown stored values are not defaults. Let older/new UI fail closed
         # and show unavailable state rather than inventing a numeric readback.
-        state = {"schema": None, "revision": None,
-                 "delegate_total_seconds": None, "routed_total_seconds": None}
+        state = {"schema": None, "revision": None, "delegate_total_seconds": None, "slot_seconds": None}
         valid = False
         warnings.append("timeouts_invalid")
     if not enforcement_available:
         warnings.append("enforcement_unavailable")
+    from .slots import DEFAULT_SLOT_SECONDS
     return {
         **state,
+        "default_slot_seconds": DEFAULT_SLOT_SECONDS,
         "editable": valid and enforcement_available,
         "warnings": warnings,
     }

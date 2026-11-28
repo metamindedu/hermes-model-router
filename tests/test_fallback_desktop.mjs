@@ -8,14 +8,14 @@ const helperEnd = source.indexOf('\nfunction Field(', helperStart)
 assert.ok(helperStart >= 0 && helperEnd > helperStart, 'pure helper block should remain identifiable')
 const helperSource = source.slice(helperStart, helperEnd).replace(/^export\s+/gm, '')
 const helpers = new Function(`${helperSource}\nreturn {
-  ROUTING_FALLBACK_PRESETS, SUPPORTED_FALLBACK_CAPABILITIES,
+  SUPPORTED_FALLBACK_CAPABILITIES,
   deepClone, sameValue, copyProfileDraft,
-  fallbackCapabilitiesSupported, copyNativeFallbackDraft, copyRoutingFallbackDraft,
-  applyRoutingFallbackPresetDraft, moveChainEntry, nativeFallbackModeDraft, nativeFallbackTargetReason,
+  fallbackCapabilitiesSupported, copyNativeFallbackDraft,
+  moveChainEntry, nativeFallbackModeDraft, nativeFallbackTargetReason,
   buildModelSectionFallbackBody, foldedRouteIdentity, FALLBACK_PROVIDER_RE, FALLBACK_MODEL_RE,
   selectFallbackTargets, selectFallbackSourceTarget, reconcileFallbackTargets, editableFallbackTargets,
   fallbackConsentReady, fallbackTargetNeedsConsent, nativeFallbackValidation,
-  routeIdentity, primaryRouteForFallback, routingFallbackValidation,
+  routeIdentity,
   buildFallbackPreviewBody, fallbackPreviewMatchesScope, buildCombinedPreviewBody, previewFieldLabel, fallbackScopeTitle,
   DELEGATION_FALLBACK_MODES, validDelegationFallbackState, copyDelegationFallbackDraft, delegationFallbackValidation
 }`)()
@@ -26,32 +26,26 @@ const consent = scope => ({
   selection_digest: `digest-${scope}`,
   source: 'explicit',
   allow_additional_cost: true,
-  allow_task_rerun: scope === 'routing'
+  allow_task_rerun: false
 })
 const nativeState = (overrides = {}) => ({
   managed: true, editable: true, enabled: false, chain: [], actual_chain: [], drift: false, warnings: [], consent: null,
   ...overrides
 })
-const routingState = (overrides = {}) => ({ enabled: false, heavy: null, light: null, consent: null, ...overrides })
 const profile = (name, overrides = {}) => ({
   name,
   models: {
     main: route('primary', `${name}-main`, 'high'),
-    delegation: route('primary', `${name}-light`, 'medium'),
+    delegation: route('primary', `${name}-delegate`, 'medium'),
     compression: route('primary', `${name}-compress`, 'medium'),
     title: route('primary', `${name}-title`, 'none')
   },
   actual_models: {
     main: route('primary', `${name}-main`, 'high'),
-    delegation: route('primary', `${name}-light`, 'medium')
+    delegation: route('primary', `${name}-delegate`, 'medium')
   },
-  routing: {
-    enabled: true,
-    heavy: { follow: 'main', custom: null },
-    light: { follow: 'delegation', custom: null },
-    fallback: { enabled: false, heavy: null, light: null }
-  },
-  fallbacks: { native: nativeState(), routing: routingState() },
+  routing: { enabled: true, slots: {} },
+  fallbacks: { native: nativeState() },
   drift: [],
   ...overrides
 })
@@ -181,9 +175,8 @@ function draftSpares(h, chain = SPARES) {
 }
 const lastPreview = h => h.calls.filter(call => call.operation === 'preview').at(-1)
 const lastFallback = h => h.calls.filter(call => call.operation === 'fallback-preview').at(-1)
-const routingExpectation = { enabled: true, heavy: { follow: 'main', custom: null }, light: { follow: 'delegation', custom: null }, slots: null, skill_enabled: true }
 const offExpectation = { enabled: false, chain: [], actual_chain: [] }
-const timeoutDto = revision => ({ schema: 1, revision, delegate_total_seconds: 0, routed_total_seconds: 3600, editable: true, split_routing_supported: true, warnings: [] })
+const timeoutDto = revision => ({ schema: 3, revision, delegate_total_seconds: 0, slot_seconds: {}, default_slot_seconds: 7200, editable: true, warnings: [] })
 
 test('the Fast inheritance note stays readonly; the long spare-model status copy is gone', () => {
   const h = harness()
@@ -201,19 +194,10 @@ test('the Fast inheritance note stays readonly; the long spare-model status copy
   assert.equal(h.calls.length, 0)
 })
 
-test('the model and conversation spare-model presets are removed; routing presets only fill drafts', () => {
+test('the model and spare-model presets and the routed-job spare models are removed', () => {
   assert.doesNotMatch(source, /MODEL_PRESETS|applyModelPresetDraft|selectedModelPreset/)
   assert.doesNotMatch(source, /NATIVE_FALLBACK_PRESETS|applyNativeFallbackPresetDraft|native-fallback-preset-/)
-  const routeOff = { enabled: false, heavy: null, light: null }
-  const routeDraft = helpers.applyRoutingFallbackPresetDraft(routeOff, 'non-openai')
-  assert.equal(routeDraft.enabled, false)
-  assert.deepEqual(routeDraft.heavy, route('xiaomi', 'mimo-v2.6-pro'))
-  assert.deepEqual(routeDraft.light, route('deepseek', 'deepseek-flash'))
-  assert.deepEqual(helpers.applyRoutingFallbackPresetDraft(routeOff, 'openai-api'), {
-    enabled: false,
-    heavy: route('openai-api', 'gpt-6-astra'),
-    light: route('openai-api', 'gpt-5.6-luna')
-  })
+  assert.doesNotMatch(source, /ROUTING_FALLBACK_PRESETS|RoutingFallback|routingFallback|routing_fallback|routing-fallback|fallbacks\.routing|routing_trigger|routing_execution|routing_max_retries/)
   const h = harness()
   assert.equal([...walk(h.tree)].some(node => String(node.props?.id || '').startsWith('native-fallback-preset-')), false)
 })
@@ -237,17 +221,14 @@ test('new/changed, external-ownership, legacy-approved, and off changes get exac
   assert.equal(helpers.fallbackTargetNeedsConsent('native', { fallbacks: { native: nativeState({ managed: false, enabled: true, chain: sameNative.chain, consent: consent('native') }) } }, sameNative), true)
   assert.equal(helpers.fallbackTargetNeedsConsent('native', currentNative, { enabled: true, chain: [{ provider: 'x', model: 'new' }] }), true)
   assert.equal(helpers.fallbackTargetNeedsConsent('native', currentNative, { enabled: false, chain: [] }), false)
-  const routeValue = { enabled: true, heavy: route('a', 'heavy'), light: route('b', 'light') }
-  const approvedRouting = { fallbacks: { routing: routingState({ ...routeValue, consent: consent('routing') }) } }
-  assert.equal(helpers.fallbackTargetNeedsConsent('routing', approvedRouting, routeValue), false)
-  assert.equal(helpers.fallbackTargetNeedsConsent('routing', { fallbacks: { routing: routingState(routeValue) } }, routeValue), true)
-  assert.equal(helpers.fallbackTargetNeedsConsent('routing', approvedRouting, { ...routeValue, enabled: false }), false)
-  assert.equal(helpers.fallbackConsentReady({ ...consent('routing'), allow_task_rerun: false }, 'routing'), false)
+  // No scope reruns a task: a consent that allows one is not this page's consent.
+  assert.equal(helpers.fallbackConsentReady(consent('native'), 'native'), true)
+  assert.equal(helpers.fallbackConsentReady({ ...consent('native'), allow_task_rerun: true }, 'native'), false)
 })
 
 test('fallback preview DTO updates exactly one scope and requires scope-specific consent', () => {
   const changedNative = profile('changed')
-  const retainedNative = profile('retained', { fallbacks: { native: nativeState({ enabled: true, chain: [{ provider: 'x', model: 'm' }], consent: consent('native') }), routing: routingState() } })
+  const retainedNative = profile('retained', { fallbacks: { native: nativeState({ enabled: true, chain: [{ provider: 'x', model: 'm' }], consent: consent('native') }) } })
   const nativeValue = { enabled: true, chain: [{ provider: 'x', model: 'm' }] }
   const nativeBody = helpers.buildFallbackPreviewBody(9, 'native', ['changed', 'retained'], nativeValue, [changedNative, retainedNative], true, false)
   assert.deepEqual(nativeBody, {
@@ -258,32 +239,23 @@ test('fallback preview DTO updates exactly one scope and requires scope-specific
     ],
     confirmations: [{ profile: 'changed', scope: 'native', allow_additional_cost: true, allow_task_rerun: false }]
   })
-  const routingValue = { enabled: true, heavy: route('api', 'heavy'), light: route('api', 'light') }
-  const routingBody = helpers.buildFallbackPreviewBody(10, 'routing', ['changed'], routingValue, [changedNative], true, true)
-  assert.deepEqual(routingBody, {
-    expected_revision: 10,
-    updates: [{ profile: 'changed', routing_fallback: routingValue }],
-    confirmations: [{ profile: 'changed', scope: 'routing', allow_additional_cost: true, allow_task_rerun: true }]
-  })
-  assert.deepEqual(Object.keys(routingBody), ['expected_revision', 'updates', 'confirmations'])
-  assert.equal('native_fallback' in routingBody.updates[0], false)
+  assert.deepEqual(Object.keys(nativeBody), ['expected_revision', 'updates', 'confirmations'])
+  // Any scope other than the conversation one writes the stored delegation value, never a routing one.
+  const other = helpers.buildFallbackPreviewBody(10, 'delegation', ['changed'], { mode: 'off', chain: [] }, [changedNative])
+  assert.deepEqual(other.updates, [{ profile: 'changed', delegation_fallback: { mode: 'off', chain: [] } }])
 })
 
 test('fixed capabilities, chain constraints, role IDs, and stale scope matching are fail-closed', () => {
   assert.equal(helpers.fallbackCapabilitiesSupported(helpers.SUPPORTED_FALLBACK_CAPABILITIES), true)
-  assert.equal(helpers.fallbackCapabilitiesSupported({ ...helpers.SUPPORTED_FALLBACK_CAPABILITIES, routing_max_retries: 2 }), false)
+  assert.deepEqual(Object.keys(helpers.SUPPORTED_FALLBACK_CAPABILITIES), ['native_trigger', 'native_execution', 'native_reasoning'])
+  assert.equal(helpers.fallbackCapabilitiesSupported({ ...helpers.SUPPORTED_FALLBACK_CAPABILITIES, native_execution: 'fresh_task' }), false)
   assert.equal(helpers.fallbackCapabilitiesSupported(null), false)
   assert.equal(helpers.nativeFallbackValidation({ enabled: true, chain: [] }).length > 0, true)
   assert.equal(helpers.nativeFallbackValidation({ enabled: true, chain: Array.from({ length: 6 }, (_, index) => ({ provider: `p${index}`, model: `m${index}` })) }).includes('최대 5개'), true)
   assert.equal(helpers.nativeFallbackValidation({ enabled: false, chain: [{ provider: 'x', model: 'm' }, { provider: 'x', model: 'm' }] }).includes('중복'), true)
-  const baseRow = profile('claire')
-  const primary = profile('claire').actual_models.main
-  assert.match(helpers.routingFallbackValidation({ enabled: true, heavy: primary, light: route('other', 'light') }, [profile('claire')]), /Heavy 기본 경로/)
-  assert.match(helpers.routingFallbackValidation({ enabled: true, heavy: route('a', 'same'), light: route('a', 'same') }), /서로 달라야/)
-  assert.deepEqual(helpers.primaryRouteForFallback(baseRow, 'heavy'), baseRow.actual_models.main)
   const preview = { scopeKey: 'A', generation: 4, profile: 'claire', scope: 'native' }
   assert.equal(helpers.fallbackPreviewMatchesScope(preview, 'A', 4, 'claire', 'native'), true)
-  assert.equal(helpers.fallbackPreviewMatchesScope(preview, 'A', 4, 'claire', 'routing'), false)
+  assert.equal(helpers.fallbackPreviewMatchesScope(preview, 'A', 4, 'claire', 'delegation'), false)
   assert.equal(helpers.fallbackPreviewMatchesScope(preview, 'B', 4, 'claire', 'native'), false)
 })
 
@@ -528,10 +500,9 @@ test('the whole-page save carries the spare models once, to the model targets', 
   assert.equal(selectNode(h, 'native-fallback-mode').props.disabled, false, 'a confirmed save reloads and unlocks by itself')
 })
 
-test('the stored routed-job and default-delegation values are never written with the spare models', async () => {
+test('the stored default-delegation values are never written with the spare models', async () => {
   const data = delegationStatus()
   const claire = data.profiles.find(row => row.name === 'claire')
-  claire.fallbacks.routing = routingState({ enabled: true, heavy: route('api', 'kept-heavy'), light: route('api', 'kept-light'), consent: consent('routing') })
   claire.fallbacks.delegation = delegationState({ mode: 'custom', chain: [{ provider: 'kept', model: 'kept-spare' }], actual_mode: 'custom', actual_chain: [{ provider: 'kept', model: 'kept-spare' }] })
   const h = harness(data)
   for (const id of ['fallback-management', 'routing-fallback-enabled', 'routing-fallback-save', 'routing-fallback-target-claire', 'routing-fallback-preset-openai-api',
@@ -848,20 +819,19 @@ test('delegation consent binds non-off modes, has no fresh-task flag, and payloa
   assert.deepEqual(body.confirmations, [])
 })
 
-test('stored routing and delegation fallback drafts are never part of a combined body, even when changed and copied', () => {
+test('a stored delegation fallback draft is never part of a combined body, even when changed and copied', () => {
   const status = delegationStatus()
   const draft = helpers.copyProfileDraft(status.profiles[1])
-  const routing = { enabled: true, heavy: route('api', 'heavy'), light: route('api', 'light') }
   const delegation = { mode: 'custom', chain: [{ provider: 'xiaomi', model: 'test' }] }
   const result = helpers.buildCombinedPreviewBody(12, 'claire', draft, [], ['default', 'claire', 'other'],
-    { native: null, routing, delegation }, { native: null, routing: { enabled: false, heavy: null, light: null }, delegation: { mode: 'default', chain: [] } },
-    { routing: ['claire', 'other'], delegation: ['other'] }, status.profiles, true, { routing: true, delegation: true })
+    { native: null, delegation }, { native: null, delegation: { mode: 'default', chain: [] } },
+    { delegation: ['other'] }, status.profiles, true, { delegation: true })
   assert.deepEqual(result.errors, [])
   assert.equal('fallback_updates' in result.body, false)
   assert.equal('fallback_confirmations' in result.body, false)
   assert.equal(helpers.fallbackScopeTitle('native'), '대화 예비 모델')
   assert.equal(helpers.previewFieldLabel('native_fallback'), '대화 예비 모델')
-  for (const field of ['routing.fallback', 'delegation_fallback', 'fallback_consent.routing']) assert.match(helpers.previewFieldLabel(field), /이전/)
+  for (const field of ['delegation_fallback', 'fallback_consent.delegation']) assert.match(helpers.previewFieldLabel(field), /이전/)
 })
 
 function globalButton(h, label) {
@@ -931,21 +901,6 @@ test('a saved spare-model copy is not repeated on a later model-only save', asyn
   await h.click('model-section-save')
   await h.flush()
   assert.deepEqual(lastFallback(h).body.updates.map(update => update.profile), ['claire'])
-})
-
-test('unchanged saved routing fallback is checked against changed main model in whole-page handler', async () => {
-  const data = delegationStatus()
-  const spare = { enabled: true, heavy: route('api', 'saved-heavy'), light: route('api', 'saved-light') }
-  const row = data.profiles.find(x => x.name === 'claire')
-  row.fallbacks.routing = routingState({ ...spare, consent: consent('routing') })
-  row.routing.fallback = spare
-  const h = harness(data)
-  edit(h, 'model-main-provider', 'api')
-  edit(h, 'model-main-model', 'saved-heavy')
-  globalButton(h, '저장')
-  await h.flush()
-  assert.equal(h.calls.length, 0)
-  assert.match(text(h.tree), /claire에 보관된 이전 작업 방식의 예비 모델과 겹칩니다/)
 })
 
 test('one catalog choice edits provider and model of a spare entry in the same turn; a retained callback stays rejected', async () => {

@@ -97,7 +97,6 @@ def test_requested_then_background_refusals_and_units(env):
     assert pre(r, {'tasks': tasks}) is None
     initial = rows(r)
     assert [x['requested']['kind'] for x in initial] == ['model', 'profile', 'model']
-    assert [x['requested']['role'] for x in initial] == ['light', None, 'heavy']
     assert [x['requested']['slot'] for x in initial] == ['code-complex', None, 'verify-complex']
     assert all(x['status'] == 'requested' for x in initial)
     payload = {'status': 'dispatched', 'mode': 'background', 'count': 2, 'delegation_id': 'whole',
@@ -142,12 +141,12 @@ def test_route_is_runtime_report_not_request_or_response(env):
     args = {'tasks': [{'goal': 'one', 'purpose': 'implementation'}, {'goal': 'two'}]}
     pre(r, args)
     post(r, {'results': [{'task_index': 0, 'status': 'completed', 'model': 'actual/model',
-                          'summary': 'PRIVATE', 'route': {'backend': 'model-router-auto', 'label': 'model:heavy'}},
+                          'summary': 'PRIVATE', 'route': {'backend': 'model-router-auto', 'label': 'model:design'}},
                          {'task_index': 1, 'status': 'failed', 'model': 'unknown',
-                          'route': {'backend': 'other', 'label': 'model:light'}}]}, args)
+                          'route': {'backend': 'other', 'label': 'model:code-complex'}}]}, args)
     one, two = rows(r)
-    assert one['requested']['role'] == 'light'
-    assert one['observed']['role'] == 'heavy'
+    assert one['requested']['slot'] == 'code-complex'
+    assert one['observed']['slot'] == 'design'
     assert one['observed']['evidence'] == 'runtime_reported'
     assert one['observed']['model'] == 'actual/model'
     assert two['observed']['evidence'] == 'unknown'
@@ -705,7 +704,7 @@ def test_reload_keeps_an_in_flight_execution_and_old_hooks_never_double_count(en
         r.api_post(session_id='child', usage={'input_tokens': 5, 'output_tokens': 1, 'cache_read_tokens': 3})
         r.pre(tool_name='terminal', args={}, session_id='child', conversation_id='child', tool_call_id='t-2')
     (row,) = rows(r2)
-    assert row['requested']['kind'] == 'model' and row['requested']['role'] == 'heavy'
+    assert row['requested']['kind'] == 'model' and row['requested']['slot'] == 'verify-complex'
     assert row['requested']['purpose'] == 'independent-review'
     assert (row['subagent_id'], row['delegation_id']) == ('sa-0', 'deleg-1')
     assert row['status'] == 'running' and row['api_call_count'] == 2 and row['tool_count'] == 2
@@ -760,8 +759,9 @@ def test_reload_discards_incompatible_state_to_unknown(env, monkeypatch, corrupt
     _review_child(r1)
     holder = sys.modules['hermes_model_router_runtime_state']
     entry = holder.execution_roster[os.path.normcase(str(home.resolve()))]
+    assert entry['schema'] == 'execution-roster/2'
     if corrupt == 'schema':
-        entry['schema'] = 'execution-roster/0'
+        entry['schema'] = 'execution-roster/1'
     elif corrupt == 'row':
         next(iter(entry['state']['rows'].values())).pop('requested')
     elif corrupt == 'child':
@@ -927,7 +927,7 @@ def test_an_advisor_call_gets_its_own_advise_row_bound_to_its_child(env, registr
     registry['_rosters'] = [r]
     advise_pre(r)
     [row] = rows(r)
-    assert row['requested'] == {'kind': 'model', 'role': 'heavy', 'profile': None, 'purpose': 'advise', 'slot': 'advise'}
+    assert row['requested'] == {'kind': 'model', 'profile': None, 'purpose': 'advise', 'slot': 'advise'}
     assert row['status'] == 'requested' and 'PRIVATE_Q' not in json.dumps(row)
     r.start(parent_session_id='segment-1', child_session_id='adv-child', child_subagent_id='sa-adv', child_goal=ADVISOR_GOAL)
     assert rows(r)[0]['subagent_id'] == 'sa-adv' and rows(r)[0]['delegation_id'] is None

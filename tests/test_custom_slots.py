@@ -7,12 +7,12 @@ import pytest
 from agent.delegation_provider import DelegationRouteError
 
 from model_router import execution_roster, native_delegation as nd, native_settings as ns, native_watchdog, slots
-from model_router.service import CUSTOM_SCHEMA, SCHEMA, SLOT_SCHEMA, RevisionConflict, Service, ServiceError
+from model_router.service import STORE_SCHEMA, RevisionConflict, Service, ServiceError
 from test_service import find_profile, route, make_models
 from test_slots import setup, FakeService, env  # noqa: F401 (pytest fixture)
 
-THREE_D = {'id': 'custom:3d-graphics', 'label': '3D·그래픽', 'description': 'Blender Python·Three.js 코드와 렌더 결과 검수', 'tier': 'heavy'}
-WRITING = {'id': 'custom:ko-writing', 'label': '한국어 글쓰기', 'description': '자연스러운 한국어 원고 작성과 윤문', 'tier': 'light'}
+THREE_D = {'id': 'custom:3d-graphics', 'label': '3D·그래픽', 'description': 'Blender Python·Three.js 코드와 렌더 결과 검수'}
+WRITING = {'id': 'custom:ko-writing', 'label': '한국어 글쓰기', 'description': '자연스러운 한국어 원고 작성과 윤문'}
 
 
 def define(service, definitions):
@@ -55,9 +55,9 @@ def test_definitions_are_validated_strictly():
         [{**THREE_D, 'label': 'para\u2029separator'}],
         [{**THREE_D, 'label': 'lone\ud800surrogate'}],
         [{**THREE_D, 'label': '\U0001f469\u200d\U0001f4bb 코딩'}],
-        [{**THREE_D, 'tier': 'medium'}],
+        [{**THREE_D, 'tier': 'heavy'}],
         [{**THREE_D, 'extra': 1}],
-        [{k: v for k, v in THREE_D.items() if k != 'tier'}],
+        [{k: v for k, v in THREE_D.items() if k != 'description'}],
         {'custom:3d': THREE_D},
     ]
     for value in bad:
@@ -69,9 +69,8 @@ def test_definitions_are_validated_strictly():
 def test_slot_tables_add_custom_slots_after_the_builtins():
     defs = [THREE_D, WRITING]
     assert slots.slot_ids(defs) == (*slots.BUILTIN_SLOTS, THREE_D['id'], WRITING['id'])
-    assert slots.slot_tiers(defs) == {**slots.SLOT_TIERS, THREE_D['id']: 'heavy', WRITING['id']: 'light'}
     assert list(slots.purpose_slots(defs))[:len(slots.PURPOSE_SLOTS)] == list(slots.PURPOSE_SLOTS)
-    assert slots.purpose_slots(defs)[THREE_D['id']] == THREE_D['id'] and slots.purpose_roles(defs)[WRITING['id']] == 'light'
+    assert slots.purpose_slots(defs)[THREE_D['id']] == THREE_D['id'] and slots.purpose_slots(defs)[WRITING['id']] == WRITING['id']
     declaration = {'follow': 'custom', 'custom': route('p', 'm', 'high')}
     # Syntactic check without the definitions, exact check with them.
     assert slots.validate_slots({THREE_D['id']: declaration}, lambda r: r) == {THREE_D['id']: declaration}
@@ -83,25 +82,26 @@ def test_slot_tables_add_custom_slots_after_the_builtins():
 
 # ---- storage ------------------------------------------------------------------------------------
 
-def test_defining_slots_writes_the_custom_schema_and_removing_them_restores_the_old_one(tmp_path, monkeypatch):
+def test_defining_and_removing_custom_slots_keeps_the_one_store_schema(tmp_path, monkeypatch):
     service, cli, body = setup(tmp_path, monkeypatch)
     before = copy.deepcopy(cli.values)
     preview, receipt = define(service, [THREE_D, WRITING])
     assert receipt['status'] == 'applied'
     assert [c['field'] for c in preview['changes']] == ['custom_slots']
     stored = json.loads(service.store_path.read_text())
-    assert stored['schema'] == CUSTOM_SCHEMA and stored['custom_slots'] == [THREE_D, WRITING]
+    assert stored['schema'] == STORE_SCHEMA and stored['custom_slots'] == [THREE_D, WRITING]
     status = service.status()
     assert status['slot_capabilities']['custom_slots'] == [THREE_D, WRITING]
     assert status['slot_capabilities']['custom_slot_limit'] == 4 and status['slot_capabilities']['custom_slots_supported'] is True
     row = find_profile(status, 'p1')
     models = make_models('1')
-    # A never-set custom slot shows and runs through its tier, like a built-in one.
+    # A never-set custom slot shows and runs on the main model for two hours, like a built-in one.
     assert row['slots']['declarations'][THREE_D['id']] == {'follow': 'main', 'custom': None}
-    assert row['slots']['declarations'][WRITING['id']] == {'follow': 'delegation', 'custom': None}
+    assert row['slots']['declarations'][WRITING['id']] == {'follow': 'main', 'custom': None}
     config = service.routing_config('p1')
-    assert config['slots'][THREE_D['id']] == models['main'] and config['slots'][WRITING['id']] == models['delegation']
-    assert config['purpose_roles'][THREE_D['id']] == 'heavy' and config['slot_tiers'][WRITING['id']] == 'light'
+    assert config['slots'][THREE_D['id']] == models['main'] and config['slots'][WRITING['id']] == models['main']
+    assert config['purpose_slots'][THREE_D['id']] == THREE_D['id']
+    assert config['slot_timeout_seconds'][THREE_D['id']] == config['slot_timeout_seconds'][WRITING['id']] == 7200
     assert cli.values == before  # definitions are plugin settings, never profile config writes
     # Same definitions again: nothing to change.
     preview, receipt = define(service, [THREE_D, WRITING])
@@ -109,7 +109,7 @@ def test_defining_slots_writes_the_custom_schema_and_removing_them_restores_the_
     preview, receipt = define(service, [])
     assert receipt['status'] == 'applied'
     stored = json.loads(service.store_path.read_text())
-    assert stored['schema'] == SCHEMA and 'custom_slots' not in stored
+    assert stored['schema'] == STORE_SCHEMA and stored['custom_slots'] == []
 
 
 def test_a_custom_slot_model_is_saved_per_profile_and_removed_with_its_definition(tmp_path, monkeypatch):
@@ -122,7 +122,7 @@ def test_a_custom_slot_model_is_saved_per_profile_and_removed_with_its_definitio
     body['expected_revision'] = service.status()['revision']
     assert service.apply(service.preview(body)['plan_id'])['status'] == 'applied'
     stored = json.loads(service.store_path.read_text())
-    assert stored['schema'] == CUSTOM_SCHEMA and stored['profiles']['p1']['routing']['slots'] == {THREE_D['id']: declaration}
+    assert stored['schema'] == STORE_SCHEMA and stored['profiles']['p1']['routing']['slots'] == {THREE_D['id']: declaration}
     assert service.routing_config('p1')['slots'][THREE_D['id']] == declaration['custom']
     assert service.routing_config('p2')['slots'][THREE_D['id']] == make_models('2')['main']
     row = find_profile(service.status(), 'p1')
@@ -142,7 +142,7 @@ def test_a_custom_slot_model_is_saved_per_profile_and_removed_with_its_definitio
     assert stored['custom_slots'] == [WRITING] and list(stored['profiles']['p1']['routing']['slots']) == [WRITING['id']]
     preview, receipt = define(service, [])
     stored = json.loads(service.store_path.read_text())
-    assert 'slots' not in stored['profiles']['p1']['routing'] and stored['schema'] == SCHEMA
+    assert stored['profiles']['p1']['routing']['slots'] == {} and stored['schema'] == STORE_SCHEMA
 
 
 def test_built_in_slots_keep_working_beside_custom_ones(tmp_path, monkeypatch):
@@ -152,9 +152,10 @@ def test_built_in_slots_keep_working_beside_custom_ones(tmp_path, monkeypatch):
     body['routing']['slots'] = {'design': {'follow': 'custom', 'custom': route('operator', 'planner', 'high')}}
     assert service.apply(service.preview(body)['plan_id'])['status'] == 'applied'
     stored = json.loads(service.store_path.read_text())
-    assert stored['schema'] == CUSTOM_SCHEMA and stored['custom_slots'] == [THREE_D]
+    assert stored['schema'] == STORE_SCHEMA and stored['custom_slots'] == [THREE_D]
     define(service, [])
-    assert json.loads(service.store_path.read_text())['schema'] == SLOT_SCHEMA
+    stored = json.loads(service.store_path.read_text())
+    assert stored['custom_slots'] == [] and stored['profiles']['p1']['routing']['slots'] == body['routing']['slots']
 
 
 def test_the_store_refuses_inconsistent_custom_data(tmp_path, monkeypatch):
@@ -163,13 +164,12 @@ def test_the_store_refuses_inconsistent_custom_data(tmp_path, monkeypatch):
     good = json.loads(service.store_path.read_text())
     declaration = {'follow': 'main', 'custom': None}
     cases = []
-    case = copy.deepcopy(good); case['custom_slots'] = []; cases.append(case)
-    case = copy.deepcopy(good); case['custom_slots'] = [{**THREE_D, 'tier': 'x'}]; cases.append(case)
-    case = copy.deepcopy(good); case['schema'] = SLOT_SCHEMA; cases.append(case)  # key without the schema
-    case = copy.deepcopy(good); del case['custom_slots']; cases.append(case)  # schema without the key
+    case = copy.deepcopy(good); case['custom_slots'] = [{**THREE_D, 'tier': 'heavy'}]; cases.append(case)
+    case = copy.deepcopy(good); case['schema'] = 4; cases.append(case)  # the v0.17 custom schema
+    case = copy.deepcopy(good); del case['custom_slots']; cases.append(case)
     case = copy.deepcopy(good); case['profiles']['p1']['routing']['slots'] = {WRITING['id']: declaration}; cases.append(case)
-    plain = copy.deepcopy(good); plain['schema'] = SLOT_SCHEMA; del plain['custom_slots']
-    plain['profiles']['p1']['routing']['slots'] = {THREE_D['id']: declaration}; cases.append(plain)
+    empty = copy.deepcopy(good); empty['custom_slots'] = []
+    empty['profiles']['p1']['routing']['slots'] = {THREE_D['id']: declaration}; cases.append(empty)
     for broken in cases:
         service.store_path.write_text(json.dumps(broken), encoding='utf-8')
         with pytest.raises(ServiceError):
@@ -181,7 +181,7 @@ def test_custom_slots_preview_is_bounded_and_gated(tmp_path, monkeypatch):
     revision = service.status()['revision']
     before = service.store_path.read_bytes()
     for bad in ({'custom_slots': [THREE_D]}, {'expected_revision': revision, 'custom_slots': [THREE_D], 'extra': 1},
-                {'expected_revision': True, 'custom_slots': [THREE_D]}, {'expected_revision': revision, 'custom_slots': [{**THREE_D, 'tier': 'x'}]}):
+                {'expected_revision': True, 'custom_slots': [THREE_D]}, {'expected_revision': revision, 'custom_slots': [{**THREE_D, 'tier': 'heavy'}]}):
         with pytest.raises((ValueError, ServiceError)):
             service.custom_slots_preview(bad)
     with pytest.raises(RevisionConflict):
@@ -219,19 +219,19 @@ def custom_env(env, definitions=(THREE_D, WRITING)):
     home, service = env
     defs = list(definitions)
     service.config['slots'] = {**service.config['slots'], **{d['id']: {'provider': 'p', 'model': 'model-for-' + d['id'], 'reasoning': 'high'} for d in defs}}
-    service.config['slot_tiers'] = slots.slot_tiers(defs)
-    service.config['purpose_roles'] = slots.purpose_roles(defs)
-    service._load_store = lambda: {'custom_slots': defs, 'profiles': {}, 'revision': 1, 'schema': CUSTOM_SCHEMA}
+    service.config['purpose_slots'] = slots.purpose_slots(defs)
+    service.config['slot_timeout_seconds'] = {**service.config['slot_timeout_seconds'], THREE_D['id']: 10800, WRITING['id']: 600}
+    service._load_store = lambda: {'custom_slots': defs, 'profiles': {}, 'revision': 1, 'schema': STORE_SCHEMA}
     return home, service
 
 
-def test_a_custom_purpose_runs_on_its_slot_with_its_tier(env, monkeypatch):
+def test_a_custom_purpose_runs_on_its_slot_with_its_own_limit(env, monkeypatch):
     home, service = custom_env(env)
     seen = []
-    monkeypatch.setattr('model_router.native_watchdog.verify_routed_binding', lambda home, goal, role, budget: seen.append((role, budget)) or True)
+    monkeypatch.setattr('model_router.native_watchdog.verify_routed_binding', lambda home, goal, slot, budget: seen.append((slot, budget)) or True)
     provider = nd.ModelRouterProvider(home, lambda: service)
     parameters = provider.task_parameters({})['purpose']
-    assert parameters['enum'] == [*slots.PURPOSE_ROLES, THREE_D['id'], WRITING['id']]
+    assert parameters['enum'] == [*slots.PURPOSE_SLOTS, THREE_D['id'], WRITING['id']]
     hints = json.loads(parameters['description'].split('instructions: ', 1)[1])
     assert hints == [{'purpose': THREE_D['id'], 'label': THREE_D['label'], 'scope': THREE_D['description']},
                      {'purpose': WRITING['id'], 'label': WRITING['label'], 'scope': WRITING['description']}]
@@ -239,11 +239,11 @@ def test_a_custom_purpose_runs_on_its_slot_with_its_tier(env, monkeypatch):
     for definition, budget in ((THREE_D, 10800), (WRITING, 600)):
         result = provider.route_task({'purpose': definition['id'], 'goal': 'goal'}, {})
         assert result == {'provider': 'p', 'model': 'model-for-' + definition['id'], 'reasoning_effort': 'high',
-                          'label': definition['tier'], 'fallback_providers': []}
-        assert seen[-1] == (definition['tier'], budget)
+                          'label': definition['id'], 'fallback_providers': []}
+        assert seen[-1] == (definition['id'], budget)
         auto = nd.ModelRouterAutoProvider(home, lambda: service)
         assert definition['id'] in auto.task_parameters({})['purpose']['enum']
-        assert auto.route_task({'execution': 'model', 'purpose': definition['id'], 'goal': 'g'}, {})['label'] == 'model:' + definition['tier']
+        assert auto.route_task({'execution': 'model', 'purpose': definition['id'], 'goal': 'g'}, {})['label'] == 'model:' + definition['id']
 
 
 def test_an_undefined_or_malformed_custom_purpose_is_refused(env, monkeypatch):
@@ -256,10 +256,10 @@ def test_an_undefined_or_malformed_custom_purpose_is_refused(env, monkeypatch):
         nd.ModelRouterAutoProvider(home, lambda: service).route_task({'execution': 'model', 'purpose': 'custom-3d', 'goal': 'g'}, {})
     # Without readable definitions the enum carries the built-ins only.
     del service._load_store
-    assert provider.task_parameters({})['purpose']['enum'] == list(slots.PURPOSE_ROLES)
+    assert provider.task_parameters({})['purpose']['enum'] == list(slots.PURPOSE_SLOTS)
 
 
-def test_custom_slots_have_no_spare_models_but_a_two_role_block_applies_by_tier(env, monkeypatch):
+def test_custom_slots_have_no_spare_models(env, monkeypatch):
     home, service = custom_env(env)
     provider = nd.ModelRouterProvider(home, lambda: service)
     chain = [{'provider': 'other', 'model': 'spare/v1'}]
@@ -267,16 +267,12 @@ def test_custom_slots_have_no_spare_models_but_a_two_role_block_applies_by_tier(
     assert set(block['fallbacks']) == set(slots.BUILTIN_SLOTS)
     for definition in (THREE_D, WRITING):
         assert provider.route_task({'purpose': definition['id'], 'goal': 'g'}, {'backends': {'model-router': block}})['fallback_providers'] == []
-    legacy = ns.build_policy_block('default', {'heavy': {'mode': 'custom', 'chain': chain}, 'light': {'mode': 'off', 'chain': []}}, True)
-    config = {'backends': {'model-router': legacy}}
-    assert provider.route_task({'purpose': THREE_D['id'], 'goal': 'g'}, config)['fallback_providers'] == chain
-    assert provider.route_task({'purpose': WRITING['id'], 'goal': 'g'}, config)['fallback_providers'] == []
     # A per-slot block naming a custom slot is never valid.
     with pytest.raises(ValueError):
         ns.make_slot_consent('default', 'model-router', THREE_D['id'], chain)
 
 
-def test_the_watchdog_preflight_knows_custom_purpose_tiers(env, monkeypatch):
+def test_the_watchdog_preflight_knows_custom_purpose_limits(env, monkeypatch):
     home, service = custom_env(env)
     monkeypatch.setattr('model_router.service.Service', lambda *a, **k: service)
     monkeypatch.setattr(nd, '_origin', lambda home, service: 'default')
@@ -286,13 +282,13 @@ def test_the_watchdog_preflight_knows_custom_purpose_tiers(env, monkeypatch):
     args = {'tasks': [{'goal': goals[0], 'purpose': THREE_D['id']}, {'goal': goals[1], 'purpose': WRITING['id']},
                       {'goal': goals[2], 'purpose': 'custom:other'}]}
     policies = native_watchdog._routed_policies(home, args)
-    assert policies == {goals[0]: ('heavy', 10800), goals[1]: ('light', 600)}
+    assert policies == {goals[0]: (THREE_D['id'], 10800), goals[1]: (WRITING['id'], 600)}
 
 
 def test_the_status_line_names_a_custom_slot_by_its_label(tmp_path, monkeypatch):
-    custom = {THREE_D['id']: ('heavy', THREE_D['label'])}
+    custom = {THREE_D['id']: THREE_D['label']}
     assert execution_roster._requested({'purpose': THREE_D['id']}, custom) == {
-        'kind': 'model', 'role': 'heavy', 'profile': None, 'purpose': THREE_D['id'], 'slot': THREE_D['id'], 'slot_label': THREE_D['label']}
+        'kind': 'model', 'profile': None, 'purpose': THREE_D['id'], 'slot': THREE_D['id'], 'slot_label': THREE_D['label']}
     assert execution_roster._requested({'purpose': THREE_D['id']}, {})['kind'] == 'unknown'
     assert execution_roster._requested({'purpose': THREE_D['id'], 'profile': 'x'}, custom)['kind'] == 'unknown'
     assert execution_roster._requested({'purpose': THREE_D['id'], 'execution': 'profile'}, custom)['kind'] == 'unknown'
@@ -310,7 +306,7 @@ def test_initialize_keeps_the_definitions(tmp_path, monkeypatch):
     service.store_path.write_text(json.dumps(data), encoding='utf-8')
     service.initialize(['default', 'p1', 'p2'])
     stored = json.loads(service.store_path.read_text())
-    assert stored['schema'] == CUSTOM_SCHEMA and stored['custom_slots'] == [THREE_D]
+    assert stored['schema'] == STORE_SCHEMA and stored['custom_slots'] == [THREE_D]
 
 
 def test_a_partial_save_with_page_expectations_writes_a_custom_slot(tmp_path, monkeypatch):
@@ -349,7 +345,7 @@ def test_a_definition_save_leaves_untouched_profile_entries_byte_for_byte(tmp_pa
     define(service, [THREE_D])
     data = json.loads(service.store_path.read_text())
     # A key the loader adds in memory but this save never changes: the entry is kept as stored.
-    data['profiles']['p2'].pop('delegation_fallback', None)
+    data['profiles']['p2']['models']['title'] = data['profiles']['p2']['models']['main']
     service.store_path.write_text(json.dumps(data), encoding='utf-8')
     raw_p2 = copy.deepcopy(data['profiles']['p2'])
     define(service, [{**THREE_D, 'label': '3D 작업'}])
@@ -427,5 +423,5 @@ def test_the_roster_reads_custom_labels_from_the_store_on_a_delegate_call(tmp_pa
     roster.pre(tool_name='delegate_task', args={'tasks': [{'goal': 'scene', 'purpose': THREE_D['id']}, {'goal': 'x', 'purpose': 'custom:gone'}]},
                session_id='s', conversation_id='r', tool_call_id='c')
     requested = [row['requested'] for row in roster.rows.values()]
-    assert requested[0]['slot_label'] == THREE_D['label'] and requested[0]['role'] == 'heavy'
+    assert requested[0]['slot_label'] == THREE_D['label'] and requested[0]['slot'] == THREE_D['id'] and 'role' not in requested[0]
     assert requested[1]['kind'] == 'unknown'

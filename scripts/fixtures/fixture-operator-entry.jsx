@@ -13,12 +13,12 @@ window.addEventListener('error',event=>window.fixtureErrors.push(String(event.me
 window.addEventListener('unhandledrejection',event=>window.fixtureErrors.push(String(event.reason)))
 const target='specialist-research-fixture-with-long-profile-name'
 const cwd='C:/fixture-only/long-workspace-for-responsive-ui-verification'
-const identity={kind:'unknown',role:null,profile:null,evidence:'unknown'}
+const identity={kind:'unknown',profile:null,slot:null,evidence:'unknown'}
 const data={actions:[],modelCalls:0,leases:0,epoch:7,observerEpoch:1,nativeSequence:1,enabled:false,view:null,revision:'a'.repeat(64),nativeStatus:'running',nativeStartedAt:Date.now()/1000-75}
 window.fixture=data
 const jobs=Object.fromEntries(['A','B'].map(id=>[id,{id:'job-'+id,origin_profile:'coordinator',parent_session_id:'parent-'+id,target_profile:target,execution_mode:'gateway',
  status:'approval_wait',target_session_id:'tool-session-'+id,target_profile_id:'profile-home-'+id,target_instance_id:'instance-'+id,target_authority_epoch:7,target_cwd:cwd,
- admission_id:'admission-'+id,execution_generation:9,result_available:false,can_steer:false,can_approve:false,can_deny:false,can_clarify:false,observed:{kind:'profile',role:null,profile:target,evidence:'runtime_reported'},
+ admission_id:'admission-'+id,execution_generation:9,result_available:false,can_steer:false,can_approve:false,can_deny:false,can_clarify:false,observed:{kind:'profile',slot:null,profile:target,evidence:'runtime_reported'},
  pending_request:{kind:'approval',prompt_id:'approval-'+id,execution_generation:9,text:'격리 검수용 요청 요약입니다. 실제 파일·계정·명령은 사용하지 않습니다.',choices:['once','deny']}}]))
 window.fixtureRoutes=()=>['A','B'].flatMap(id=>[
  {connectionId:id==='A'?'local':'fixture-host-B',mode:id==='A'?'local':'remote',profile:id==='A'?'coordinator':'coordinator-alias',targetProfile:'coordinator'},
@@ -36,7 +36,7 @@ window.fixtureRPC=async(route,method,params)=>{
   return {events,replay_epoch:epoch,epoch,latest_seq:latest,last_sequence:latest,count:events.length,snapshot_required:missing,truncated:missing}
  }
  if(method.endsWith('execution.list'))return {schema:1,origin_profile:'coordinator',supported:true,rows:[
-  {id:'native-'+id,execution_mode:'native',requested:{kind:'model',role:'light'},observed:{kind:'model',role:'heavy',profile:null,evidence:'runtime_reported',model:'fixture-heavy-model-with-long-name-for-layout',provider:'fixture'},conversation_id:'parent-'+id,parent_session_id:'parent-'+id,status:data.nativeStatus,updated_at:Date.now()/1000,subagent_id:'sa-'+id,delegation_id:'deleg-'+id,task_index:0,
+  {id:'native-'+id,execution_mode:'native',requested:{kind:'model',profile:null,purpose:'implementation',slot:'code-complex'},observed:{kind:'model',slot:'code-complex',profile:null,backend:'model-router',evidence:'runtime_reported',model:'fixture-slot-model-with-long-name-for-layout',provider:'fixture'},conversation_id:'parent-'+id,parent_session_id:'parent-'+id,status:data.nativeStatus,updated_at:Date.now()/1000,subagent_id:'sa-'+id,delegation_id:'deleg-'+id,task_index:0,
    child_session_id:'child-'+id,started_at:data.nativeStartedAt,activity_at:Date.now()/1000-4,last_tool:'read_file',tool_count:7,api_call_count:3,duration_seconds:data.nativeStatus==='running'?null:80},
   {id:'profile-'+id,execution_mode:'native',requested:{kind:'profile',profile:target},observed:identity,conversation_id:'parent-'+id,parent_session_id:'parent-'+id,task_index:1,status:'requested',updated_at:1},
   {id:'profile-completed-'+id,execution_mode:'native',requested:{kind:'profile',profile:target},observed:identity,conversation_id:'parent-'+id,parent_session_id:'parent-'+id,task_index:2,status:'completed',updated_at:Date.now()/1000,

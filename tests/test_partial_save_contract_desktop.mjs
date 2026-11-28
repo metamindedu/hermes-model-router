@@ -17,28 +17,27 @@ function api() {
   return new Function('DesktopSDK', ...names, code + `
 return { copyNativeDelegationDraft, copyNativeDelegationBaselines, planNativeDelegationBatch, buildNativeDelegationBatchBody, TASK_SLOTS,
   pageExpectation, pageExpectationsFor, buildModelSectionPreviewBody, buildScopedPreviewBody, slotRoutingForSave, editedSlotIds,
-  partialSlotSkips, mergePartialSlots, profileRoutesPatch, mergeProfileRoutes, changedTimeoutFields, copyProfileDraft, submittedEditCoverage, modelSectionWriteSet, PARTIAL_SAVE_SCHEMA }`)(
+  mergePartialSlots, profileRoutesPatch, mergeProfileRoutes, changedTimeoutFields, copyProfileDraft, submittedEditCoverage, modelSectionWriteSet, PARTIAL_SAVE_SCHEMA }`)(
     {}, ...names.map(n => ['jsx', 'jsxs'].includes(n) ? ((type, props) => ({ type, props })) : n))
 }
 const a = api()
 const FIXTURE = new URL('./fixtures/partial_save_contract.json', import.meta.url)
 const NAMES = ['default', 'p1', 'p2']
 const route = (provider, model, reasoning) => ({ provider, model, reasoning })
-const offRoles = () => ({ heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } })
 const offSlots = () => Object.fromEntries(a.TASK_SLOTS.map(slot => [slot.id, { mode: 'off', chain: [] }]))
 const spare = model => ({ mode: 'custom', chain: [{ provider: 'spare-service', model }] })
 
 // ---- '/delegation-preview' (the Python fixture of tests/test_native_service.py) ----
-// A seed: backend, optional routes, and the stored policy block: `slot` ('off' or {slot: model}) a
-// per-slot block, `twoRole` an all-off two-role block.
+// A seed: backend, optional routes, and the stored per-slot policy block `slot` ('off' or
+// {slot: model}); without it nothing is stored (policy_schema 0).
 function dtoFor(name, seed) {
   const routes = seed.routes ? structuredClone(seed.routes) : { profiles: [], default: null }
   const slotPolicy = offSlots()
   if (seed.slot && seed.slot !== 'off') for (const [id, model] of Object.entries(seed.slot)) slotPolicy[id] = spare(model)
   return { schema: 1, supported: true, editable: true, backend: seed.backend, digest: `digest:${name}`,
     role_intro_inheritance: { schema: 1, supported: true }, auto_supported: true,
-    policy: offRoles(), auto_policy: offRoles(), slot_policy: slotPolicy, auto_slot_policy: offSlots(),
-    policy_schema: seed.twoRole ? 1 : seed.slot ? 2 : 0, auto_policy_schema: 0, slot_policy_supported: true,
+    slot_policy: slotPolicy, auto_slot_policy: offSlots(),
+    policy_schema: seed.slot ? 2 : 0, auto_policy_schema: 0, slot_policy_supported: true,
     profile_routes: routes, warnings: [] }
 }
 
@@ -59,11 +58,11 @@ function nativeCase(name, description, seeds, origin, targets, part, edit, copyA
 // `models` is a placeholder the Python side replaces with the real status models (a routing- or
 // timeout-scope save sends the loaded baseline models, which the service does not write).
 const PLACEHOLDER_MODELS = { main: route('placeholder', 'main', 'high'), compression: route('placeholder', 'main', 'high'), title: route('placeholder', 'main', 'high') }
+// A slot never set is shown as following the main model (it runs on it).
 function storeRow(name, stored, timeouts = null) {
-  const declarations = Object.fromEntries(a.TASK_SLOTS.map(slot => [slot.id, stored?.[slot.id] || { follow: slot.tier === 'heavy' ? 'main' : 'delegation', custom: null }]))
+  const declarations = Object.fromEntries(a.TASK_SLOTS.map(slot => [slot.id, stored?.[slot.id] || { follow: 'main', custom: null }]))
   return { name, models: structuredClone(PLACEHOLDER_MODELS), actual_models: structuredClone(PLACEHOLDER_MODELS),
-    routing: { enabled: true, heavy: { follow: 'main', custom: null }, light: { follow: 'delegation', custom: null },
-      fallback: { enabled: false, heavy: null, light: null }, ...(stored ? { slots: structuredClone(stored) } : {}) },
+    routing: { enabled: true, slots: structuredClone(stored || {}) },
     slots: { schema: 1, capable: true, declarations, stored: Object.keys(stored || {}) }, drift: [], ...(timeouts ? { timeouts } : {}) }
 }
 function snapshotFor(rows, origin, extra) {
@@ -82,17 +81,16 @@ function slotCase(name, description, seeds, origin, targets, edit, copyAll = fal
   snapshot.draft.routing = a.slotRoutingForSave(snapshot.draft, true, copyAll ? null : edited)
   const { body, errors } = a.buildScopedPreviewBody(snapshot, 'routing')
   assert.deepEqual(errors, [])
-  const submitted = Object.keys(body.routing.slots || {})
   return { kind: 'store', name, description, origin, seeds, edited,
-    skips: Object.fromEntries(targets.map(target => [target, a.partialSlotSkips(rows.find(row => row.name === target), submitted, origin)])),
-    merged: Object.fromEntries(targets.map(target => [target, a.mergePartialSlots(seeds[target] || null, body.routing.slots, target !== origin)])),
+    merged: Object.fromEntries(targets.map(target => [target, a.mergePartialSlots(seeds[target] || null, body.routing.slots)])),
     body: withExpected(body, rows) }
 }
 
-// The untouched default profile reports the earlier single routed limit.
-const untouched = () => ({ schema: 1, revision: 0, delegate_total_seconds: 0, routed_total_seconds: 3600, editable: true, split_routing_supported: true, warnings: [] })
-const split = (revision, delegate, light, heavy) => ({ schema: 2, revision, delegate_total_seconds: delegate, routed_light_total_seconds: light,
-  routed_heavy_total_seconds: heavy, editable: true, split_routing_supported: true, warnings: [] })
+// Time limits (timeouts schema 3): the ordinary delegation limit and the slots that have their own
+// limit; every other slot runs with the 2-hour default. The untouched default profile has none.
+const untouched = () => ({ schema: 3, revision: 0, delegate_total_seconds: 0, slot_seconds: {}, default_slot_seconds: 7200, editable: true, warnings: [] })
+const limits = (revision, delegate, slotSeconds) => ({ schema: 3, revision, delegate_total_seconds: delegate, slot_seconds: slotSeconds,
+  default_slot_seconds: 7200, editable: true, warnings: [] })
 function timeoutCase(name, description, seeds, origin, targets, edit, copyAll = false) {
   const rows = NAMES.map(profile => storeRow(profile, null, seeds[profile]))
   const snapshot = snapshotFor(rows, origin, { routingTargets: [], timeoutTargets: targets, timeoutCopyAll: copyAll,
@@ -107,8 +105,8 @@ function timeoutCase(name, description, seeds, origin, targets, edit, copyAll = 
 
 export function contractCases() {
   return [
-    nativeCase('native-slot-spare-patch', 'Only the edited slot spare model goes to each target; a target with nothing stored starts from all off; a two-role target is skipped.',
-      { default: { backend: 'model-router', slot: 'off' }, p1: { backend: 'model-router', slot: { 'code-complex': 'p1-own-spare' } }, p2: { backend: 'model-router', twoRole: true } },
+    nativeCase('native-slot-spare-patch', 'Only the edited slot spare model goes to each target; a target with nothing stored starts from all off; a target stored on another method is skipped.',
+      { default: { backend: 'model-router', slot: 'off' }, p1: { backend: 'model-router', slot: { 'code-complex': 'p1-own-spare' } }, p2: { backend: 'model-router-auto' } },
       'default', ['default', 'p1', 'p2'], 'native', draft => { draft.slotPolicy.design = spare('design-spare') }),
     nativeCase('native-slot-spare-off-patch', 'Switching one stored custom slot off sends that slot only, without cost confirmation.',
       { default: { backend: 'model-router', slot: { design: 'old-spare', 'verify-complex': 'kept-spare' } }, p1: { backend: 'model-router' }, p2: { backend: 'model-router' } },
@@ -137,22 +135,25 @@ export function contractCases() {
       }),
     slotCase('slot-merge', 'One edited slot merges over each target; unsent slots keep their declaration, absent ones stay absent.',
       { p1: { 'verify-simple': { follow: 'custom', custom: route('operator', 'p1-checker', 'low') } },
-        p2: { 'computer-use': { follow: 'custom', custom: route('operator', 'p2-screen', 'medium') }, 'code-simple': { follow: 'delegation', custom: null } } },
+        p2: { 'computer-use': { follow: 'custom', custom: route('operator', 'p2-screen', 'medium') }, 'code-simple': { follow: 'main', custom: null } } },
       'p1', ['p1', 'p2'], slots => { slots.design = { follow: 'custom', custom: route('operator', 'designer', 'high') } }),
-    slotCase('slot-legacy-collision', 'A submitted slot that another target stores as following the delegation model is kept there.',
-      { p1: { 'code-simple': { follow: 'custom', custom: route('operator', 'p1-coder', 'low') } }, p2: { 'code-simple': { follow: 'delegation', custom: null } } },
+    slotCase('slot-overwrite', 'A submitted slot replaces the declaration another target stores for it.',
+      { p1: { 'code-simple': { follow: 'custom', custom: route('operator', 'p1-coder', 'low') } }, p2: { 'code-simple': { follow: 'custom', custom: route('operator', 'p2-coder', 'medium') } } },
       'p1', ['p1', 'p2'], slots => { slots['code-simple'] = { follow: 'main', custom: null } }),
     slotCase('slot-copy-all', 'Copy-all sends every slot (the earlier slot map), merged per target.',
       { p1: { design: { follow: 'custom', custom: route('operator', 'copied-designer', 'high') }, 'code-complex': { follow: 'main', custom: null },
         'code-simple': { follow: 'main', custom: null }, 'verify-simple': { follow: 'custom', custom: route('operator', 'copied-checker', 'low') },
         'verify-complex': { follow: 'main', custom: null }, 'computer-use': { follow: 'main', custom: null } },
-        p2: { 'verify-complex': { follow: 'custom', custom: route('operator', 'p2-reviewer', 'xhigh') }, 'code-simple': { follow: 'delegation', custom: null } } },
+        p2: { 'verify-complex': { follow: 'custom', custom: route('operator', 'p2-reviewer', 'xhigh') }, 'code-simple': { follow: 'main', custom: null } } },
       'p1', ['p1', 'p2'], () => {}, true),
     timeoutCase('timeout-one-field', 'Only the changed time limit goes to each target; the others keep their own values.',
-      { default: untouched(), p1: split(1, 60, 1800, 7200), p2: split(1, 30, 4000, 5000) },
+      { default: untouched(), p1: limits(1, 60, { 'code-simple': 1800, design: 7200 }), p2: limits(1, 30, { 'code-simple': 4000, 'verify-complex': 5000 }) },
       'p1', ['p1', 'p2'], timeouts => { timeouts.delegate_total_minutes = 5 }),
-    timeoutCase('timeout-copy-all', 'Copy-all sends all three values.',
-      { default: untouched(), p1: split(1, 60, 1800, 7200), p2: split(1, 30, 4000, 5000) },
+    timeoutCase('timeout-slot-patch', 'One slot limit set and one cleared (null: back to the 2-hour default) are a patch over each target\'s own limits.',
+      { default: untouched(), p1: limits(1, 60, { 'code-simple': 1800, design: 7200 }), p2: limits(1, 30, { 'code-simple': 4000, 'verify-complex': 5000 }) },
+      'p1', ['p1', 'p2'], timeouts => { timeouts.slot_minutes['code-simple'] = 45; timeouts.slot_minutes.design = '' }),
+    timeoutCase('timeout-copy-all', 'Copy-all sends the ordinary limit and every slot, null for a slot without its own limit.',
+      { default: untouched(), p1: limits(1, 60, { 'code-simple': 1800, design: 7200 }), p2: limits(1, 30, { 'code-simple': 4000, 'verify-complex': 5000 }) },
       'p1', ['p2'], () => {}, true)
   ]
 }
@@ -188,16 +189,18 @@ test('every partial body carries the literal marker and only the changed parts',
   // The automatic target keeps its own (hidden) default.
   assert.deepEqual(routes.map(update => 'default' in update.profile_routes_patch), [true, true, false])
   const merge = cases['slot-merge'].body
-  assert.deepEqual(Object.keys(merge.routing).sort(), ['enabled', 'slots'], 'no Heavy/Light')
+  assert.deepEqual(Object.keys(merge.routing).sort(), ['enabled', 'slots'], 'routing is {enabled, slots} only')
   assert.deepEqual(Object.keys(merge.routing.slots), ['design'])
   assert.deepEqual(merge.expected.map(item => [item.profile, Object.keys(item.routing.slots)]), [['default', ['design']], ['p1', ['design']], ['p2', ['design']]])
-  assert.deepEqual(cases['slot-legacy-collision'].skips, { p1: [], p2: ['code-simple'] })
+  assert.deepEqual(cases['slot-overwrite'].merged.p2, { 'code-simple': { follow: 'main', custom: null } })
   assert.equal(Object.keys(cases['slot-copy-all'].body.routing.slots).length, 7)
-  assert.deepEqual(cases['slot-copy-all'].skips, { p1: [], p2: ['code-simple'] })
-  assert.deepEqual(cases['timeout-one-field'].body.timeout_updates.map(update => Object.keys(update).sort()),
-    Array(2).fill(['delegate_total_seconds', 'expected_revision', 'profile']))
-  assert.deepEqual(Object.keys(cases['timeout-copy-all'].body.timeout_updates[0]).sort(),
-    ['delegate_total_seconds', 'expected_revision', 'profile', 'routed_heavy_total_seconds', 'routed_light_total_seconds'])
+  assert.deepEqual(cases['timeout-one-field'].body.timeout_updates, [
+    { profile: 'p1', expected_revision: 1, delegate_total_seconds: 300 }, { profile: 'p2', expected_revision: 1, delegate_total_seconds: 300 }])
+  assert.deepEqual(cases['timeout-slot-patch'].body.timeout_updates, [
+    { profile: 'p1', expected_revision: 1, slot_seconds: { design: null, 'code-simple': 2700 } },
+    { profile: 'p2', expected_revision: 1, slot_seconds: { design: null, 'code-simple': 2700 } }])
+  assert.deepEqual(cases['timeout-copy-all'].body.timeout_updates, [{ profile: 'p2', expected_revision: 1, delegate_total_seconds: 60,
+    slot_seconds: Object.fromEntries(a.TASK_SLOTS.map(slot => [slot.id, { 'code-simple': 1800, design: 7200 }[slot.id] ?? null])) }])
 })
 
 test('without the capability the same builders keep the earlier full bodies', () => {
@@ -213,7 +216,7 @@ test('without the capability the same builders keep the earlier full bodies', ()
   snapshot.draft.routing = a.slotRoutingForSave(snapshot.draft, true)
   const { body } = a.buildScopedPreviewBody(snapshot, 'routing')
   assert.equal('partial_save_schema' in body, false)
-  assert.deepEqual(Object.keys(body.routing).sort(), ['enabled', 'heavy', 'light', 'slots'])
+  assert.deepEqual(Object.keys(body.routing).sort(), ['enabled', 'slots'])
   assert.equal(Object.keys(body.routing.slots).length, 7)
 })
 
@@ -230,7 +233,10 @@ test('an edit counts as saved only when the partial body carried it as drafted',
   assert.equal(a.submittedEditCoverage(view, [store({ design: { follow: 'main', custom: null } })]).has('routing.slots'), false)
   const timeouts = fields => ({ operation: '/preview', body: { partial_save_schema: 1, save_scope: 'timeouts', timeout_updates: [{ profile: 'p1', expected_revision: 1, ...fields }] } })
   assert.ok(a.submittedEditCoverage(view, [timeouts({ delegate_total_seconds: 60 })]).has('timeouts'))
-  assert.equal(a.submittedEditCoverage(view, [timeouts({ routed_light_total_seconds: 60 })]).has('timeouts'), false)
+  assert.equal(a.submittedEditCoverage(view, [timeouts({ slot_seconds: { design: 60 } })]).has('timeouts'), false)
+  const slotView = { ...view, timeoutFields: ['slot:design'] }
+  assert.ok(a.submittedEditCoverage(slotView, [timeouts({ slot_seconds: { design: null } })]).has('timeouts'), 'a cleared slot limit is carried as null')
+  assert.equal(a.submittedEditCoverage(slotView, [timeouts({ slot_seconds: { 'code-simple': 60 } })]).has('timeouts'), false)
   const native = patch => ({ operation: '/delegation-preview', part: 'native', body: { partial_save_schema: 1, updates: [{ profile: 'p1', slot_policy_patch: patch }] } })
   assert.ok(a.submittedEditCoverage(view, [native({ design: spare('d') })]).has('native.slotPolicy'))
   assert.equal(a.submittedEditCoverage(view, [native({ design: spare('other') })]).has('native.slotPolicy'), false)

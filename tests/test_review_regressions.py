@@ -59,4 +59,4 @@ def test_native_plugin_cli_transport_in_isolated_home(tmp_path):
     line=next(v for v in result.stdout.splitlines() if v.startswith('MODEL_ROUTER_JSON:'))
     response=json.loads(line.split(':',1)[1])
     assert response['current_profile']=='default'
-    assert response['profiles'][0]['actual_models']['main']['model']=='heavy-test'
+    assert response['profiles'][0]['actual_models']['main']['model']=='main-test'

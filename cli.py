@@ -16,18 +16,7 @@ def main(argv=None):
     p = sub.add_parser("apply"); p.add_argument("--plan-id", required=True)
     p = sub.add_parser("initialize")
     p.add_argument("--routing-profiles", nargs="*", required=True)
-    p.add_argument("--fallbacks-file")
-    p = sub.add_parser("route")
-    p.add_argument("--purpose", required=True, choices=["implementation", "mechanical", "preliminary-review", "plan", "semantic-final", "independent-review"])
-    p.add_argument("--prompt-file", required=True)
-    p.add_argument("--cwd", required=True)
-    p.add_argument("--timeout", type=int, default=None, help="Per-job total seconds; omitted uses profile setting, 0 disables the plugin total limit")
-    p.add_argument("--title", help="Public Background task title (1–96 characters; no secrets)")
-    p = sub.add_parser("job-status"); p.add_argument("--job-id", required=True)
     args = parser.parse_args(argv)
-    if args.action == "route":
-        print(json.dumps({"error": "start_retired", "message": "New jobs use native delegate_task; no process was started."}))
-        return 2
     try:
         from model_router.service import Service
         service = Service()
@@ -43,13 +32,8 @@ def main(argv=None):
             result = service.initial_setup_preview(json.loads(Path(args.file).read_text(encoding="utf-8")))
         elif args.action == "apply":
             result = service.apply(args.plan_id)
-        elif args.action == "initialize":
-            fallbacks = json.loads(Path(args.fallbacks_file).read_text(encoding="utf-8")) if args.fallbacks_file else None
-            result = service.initialize(args.routing_profiles, fallbacks=fallbacks)
         else:
-            from model_router.routing import Router
-            router = Router(service)
-            result = router.status(args.job_id)
+            result = service.initialize(args.routing_profiles)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if isinstance(result, dict) and (result.get("status") in {"failed", "partial", "unverified"} or result.get("error")):
             return 2

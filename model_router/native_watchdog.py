@@ -42,7 +42,7 @@ def _dispatch_backend(parent: Any) -> str:
 
 def _routed_policies(home: Path, args: Mapping[str, Any], backend: str = 'model-router', ordinary_total: int | float = 0) -> dict[str, tuple[str, int | float]]:
     """Preflight the native-normalized goals before *any* child can be built."""
-    from .native_delegation import PURPOSE_ROLES, auto_execution, _origin, _timeout
+    from .native_delegation import PURPOSE_SLOTS, auto_execution, _origin, _timeout
     from .service import Service
     from tools.delegate_tool_tasks import _normalize_task_list
     service = Service()
@@ -73,31 +73,32 @@ def _routed_policies(home: Path, args: Mapping[str, Any], backend: str = 'model-
             if execution == 'model' and config.get('enabled') is not True:
                 continue
         # Custom purposes are known from the routing config (the store's defined custom slots).
-        roles = config.get('purpose_roles') or PURPOSE_ROLES
-        role = (roles.get(purpose) if isinstance(purpose, str) else None) if execution == 'model' else 'profile'
+        slots = config.get('purpose_slots') or PURPOSE_SLOTS
+        slot = (slots.get(purpose) if isinstance(purpose, str) else None) if execution == 'model' else 'profile'
         if not isinstance(goal, str):
             raise ValueError('invalid routed task')
-        if role is None:
+        if slot is None:
             # Native per-task validation/provider refusal owns this task. It
             # must not prevent valid siblings from being routed.
             continue
-        budget = task.get('total_timeout_seconds', config.get(role + '_timeout_seconds') if execution == 'model' else ordinary_total)
+        limits = config.get('slot_timeout_seconds') or {}
+        budget = task.get('total_timeout_seconds', limits.get(slot) if execution == 'model' else ordinary_total)
         if not _timeout(budget):
             continue  # provider refuses it before a child can be constructed
-        policy = (role, budget)
+        policy = (slot, budget)
         if goal in policies and policies[goal] != policy:
             raise ValueError('ambiguous routed goal')
         policies[goal] = policy
     return policies
 
 
-def verify_routed_binding(home: Path, goal: Any, role: str, budget: int | float) -> bool:
+def verify_routed_binding(home: Path, goal: Any, slot: str, budget: int | float) -> bool:
     """A route may proceed only in its verified, same-process native dispatch."""
     binding = _ACTIVE_DISPATCH.get()
     try:
         return bool(binding is not None and not binding.closed and not binding.watchdog.closed
                     and binding.routed_policies is not None and isinstance(goal, str)
-                    and binding.routed_policies.get(goal) == (role, budget)
+                    and binding.routed_policies.get(goal) == (slot, budget)
                     and _home_key(_canonical_home(home)) == binding.watchdog._home_key
                     and binding.watchdog._same_home()
                     and binding.watchdog.get_active_parent() is binding.parent_agent
@@ -380,7 +381,7 @@ class NativeWatchdog:
                         binding.routed_policies = _routed_policies(self.home, kwargs.get('args'), backend, total_seconds)
                     token = _ACTIVE_DISPATCH.set(binding)
                     binding.context = contextvars.copy_context()
-                    if routed and any(budget > 0 for _role, budget in binding.routed_policies.values()):
+                    if routed and any(budget > 0 for _slot, budget in binding.routed_policies.values()):
                         with self._lock:
                             self._pending_dispatches.add(id(binding))
                         self._ensure_scheduler(binding.context)

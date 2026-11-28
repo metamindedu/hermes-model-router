@@ -69,8 +69,8 @@ def test_delegation_custom_requires_own_consent_and_changes_only_own_key(tmp_pat
     updated = row(service)
     assert updated["models"] == before_row["models"]
     assert updated["routing"] == before_row["routing"]
-    for scope in ("native", "routing"):
-        assert updated["fallbacks"][scope] == before_row["fallbacks"][scope]
+    assert set(updated["fallbacks"]) == {"native", "delegation"}
+    assert updated["fallbacks"]["native"] == before_row["fallbacks"]["native"]
     assert updated["fallbacks"]["delegation"]["consent"]["allow_task_rerun"] is False
 
 
@@ -122,15 +122,21 @@ def test_native_update_does_not_rewrite_explicit_delegation_chain(tmp_path):
     assert config(path)["delegation"] == before
 
 
-def test_old_schema2_delegation_defaults_are_readonly(tmp_path):
+@pytest.mark.parametrize("schema", [1, 2, 3, 4, 5])
+def test_missing_delegation_fields_are_refused_without_writes(tmp_path, schema):
     service, path = setup(tmp_path)
     store = json.loads(service.store_path.read_text(encoding="utf-8"))
+    store["schema"] = schema
     for entry in store["profiles"].values():
         entry.pop("delegation_fallback", None)
         entry.get("fallback_consent", {}).pop("delegation", None)
     service.store_path.write_text(json.dumps(store), encoding="utf-8")
     before = path.read_bytes(), service.store_path.read_bytes()
-    assert row(service)["fallbacks"]["delegation"]["managed"] is False
+    reason = "settings schema is invalid" if schema < 5 else "settings profile entry is invalid"
+    with pytest.raises(ServiceError, match=reason) as exc:
+        service.status()
+    if schema == 5:
+        assert str(exc.value.__cause__) == "profile entry fields are invalid"
     assert before == (path.read_bytes(), service.store_path.read_bytes())
 
 
@@ -177,7 +183,7 @@ def test_model_apply_preserves_delegation_policy_and_consent(tmp_path):
     assert service.apply(plan['plan_id'])['status'] == 'applied'
     before = row(service)['fallbacks']['delegation']
     proposal = payload(service)
-    proposal['models']['main']['model'] = 'new-heavy-model'
+    proposal['models']['main']['model'] = 'new-main-model-x'
     proposal['model_targets'] = ['default']
     plan = service.preview(proposal)
     assert service.apply(plan['plan_id'])['status'] == 'applied'

@@ -12,27 +12,21 @@ const models = {
   compression: route('openai-codex', 'gpt-6-luna-900k', 'medium'),
   title: route('openai-codex', 'gpt-6-luna', 'none')
 }
-const routing = {
-  enabled: true,
-  heavy: { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') },
-  light: { follow: 'delegation', custom: null },
-  fallback: { enabled: false, heavy: null, light: null }
-}
+// v0.18.0 routing: {enabled, slots} where `slots` holds only stored slot declarations.
+const routing = { enabled: true, slots: {} }
 const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
-const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex', 'advise'].includes(id) ? 'heavy' : 'light']))
+const ownModelSlots = ['design', 'verify-complex', 'advise']
 const offSlots = () => Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }]))
-// Heavy slots are custom here and Light slots follow the main model. A slot still following the
-// delegation model (an earlier setting) has its own fixture, legacySlotFixture, below.
-const declarations = () => Object.fromEntries(slotIds.map(id => [id, slotTiers[id] === 'heavy'
-  ? { follow: 'custom', custom: route('operator', 'independent-heavy', 'high') } : { follow: 'main', custom: null }]))
+// Three slots are set to a model of their own here; the others follow the main model.
+const declarations = () => Object.fromEntries(slotIds.map(id => [id, ownModelSlots.includes(id)
+  ? { follow: 'custom', custom: route('operator', 'independent-slot-model', 'high') } : { follow: 'main', custom: null }]))
 const fixture = () => ({ revision: 7, current_profile: 'claire', recent_apply: null,
   readiness_context: { schema: 1, base_identity: 'd'.repeat(64), source_profile: 'claire', release: null },
-  slot_capabilities: { schema: 1, slots: slotIds, tiers: slotTiers, purposes: {}, follows: ['main', 'delegation', 'custom'], blocking_profiles: [] },
+  slot_capabilities: { schema: 1, slots: slotIds, purposes: {}, follows: ['main', 'custom'], blocking_profiles: [] },
   profiles: ['default', 'claire', 'other'].map(name => ({ name, models: structuredClone(models),
     actual_models: structuredClone(models), routing: { ...structuredClone(routing), enabled: name === 'claire' }, drift: [],
     slots: { schema: 1, capable: true, stored: [], declarations: declarations() },
     native_delegation: { schema: 1, supported: true, editable: true, backend: 'default', digest: 'a'.repeat(64),
-      policy: { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } },
       slot_policy: offSlots(), auto_slot_policy: offSlots(), policy_schema: 0, auto_policy_schema: 0, slot_policy_supported: true,
       profile_routes: { profiles: [], default: null }, role_intro_inheritance: { schema: 1, supported: true, code_identity: 'e'.repeat(64), activation: 'new_session_or_supported_rebuild' }, warnings: [] },
     role_intro: { schema: 1, state: 'available', default_description: `Role of ${name}`, default_source: 'profile_metadata', description_auto: false, digest: 'f'.repeat(64) } })) })
@@ -140,7 +134,7 @@ function harness(options = {}) {
     select(id, value) { find(node => node.type === 'Select' && [...walk(node)].some(child => child.props?.id === id)).props.onValueChange(value); render() } }
 }
 
-const setupReadiness = (state = 'missing') => ({ schema: 1, state, files: state === 'missing' ? 'missing' : 'complete', python: state === 'ready' ? 'enabled' : 'not_enabled', base_supported: state === 'ready', split_supported: state === 'ready', explicit_opt_out: false, managed_selection: false, version: state === 'ready' ? '0.4.8' : null, identity: (state === 'ready' ? '2' : '1').repeat(64), reason_codes: state === 'missing' ? ['package_missing'] : [] })
+const setupReadiness = (state = 'missing') => ({ schema: 1, state, files: state === 'missing' ? 'missing' : 'complete', python: state === 'ready' ? 'enabled' : 'not_enabled', base_supported: state === 'ready', explicit_opt_out: false, managed_selection: false, version: state === 'ready' ? '0.4.8' : null, identity: (state === 'ready' ? '2' : '1').repeat(64), reason_codes: state === 'missing' ? ['package_missing'] : [] })
 const setupFixture = () => ({ ...fixture(), readiness_context: { schema: 1, base_identity: 'a'.repeat(64), source_profile: 'claire', release: { catalog_name: 'model-router', version: '0.4.8', ref: 'b'.repeat(40) } }, profiles: fixture().profiles.map(row => ({ ...row, readiness: setupReadiness('ready') })).concat([{ ...structuredClone(fixture().profiles[2]), name: 'future', readiness: setupReadiness() }]) })
 function setupStorage() {
   const values = new Map()
@@ -287,8 +281,7 @@ test('model edits stay in the draft until saved and do not alter custom routes; 
   assert.equal(h.calls.length, 0)
   h.click('global-save'); await h.flush()
   const payload = h.calls.find(c => c.operation === 'preview').body
-  const { fallback: _retired, ...routingWithoutFallback } = routing
-  assert.deepEqual(payload.routing, { ...routingWithoutFallback, slots: declarations() })
+  assert.deepEqual(payload.routing, { enabled: true, slots: declarations() }, 'routing is {enabled, slots} only')
   assert.deepEqual(payload.routing_profiles, ['claire'])
   assert.deepEqual(payload.model_targets, ['claire'])
   assert.deepEqual(payload.routing_targets, [])
@@ -437,7 +430,6 @@ function profileFixture(backend = 'model-router-profiles') {
     row.native_delegation.digest = ['a', 'b', 'c'][index].repeat(64)
     row.native_delegation.backend = backend
     row.native_delegation.auto_supported = true
-    row.native_delegation.auto_policy = { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } }
   })
   return data
 }
@@ -448,14 +440,13 @@ const autoFixture = () => {
     if (row.name !== 'claire') row.native_delegation.backend = 'model-router-profiles'
     row.routing.enabled = true
     row.native_delegation.auto_supported = true
-    row.native_delegation.auto_policy = { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } }
   }
   return data
 }
 
 test('automatic mode is chosen and saved in the model section; profile access waits for its own section', async () => {
   const data = autoFixture()
-  data.profiles[1].native_delegation.policy.heavy = { mode: 'custom', chain: [{ provider: 'old', model: 'old-spare' }] }
+  data.profiles[1].native_delegation.slot_policy.design = { mode: 'custom', chain: [{ provider: 'old', model: 'old-spare' }] }
   const h = harness({ data })
   h.select('native-delegation-backend', 'model-router-auto')
   assert.deepEqual(h.calls, [])
@@ -648,7 +639,7 @@ test('each slot shows its own editable model next to its spare switching, follow
   assert.match(text(h.byId('native-default-explanation')), /작업 위임/)
   h.select('native-delegation-backend', 'model-router')
   assert.equal(h.selectValue('slot-design-follow'), 'custom')
-  assert.equal(h.byId('slot-design-model').props.value, 'independent-heavy')
+  assert.equal(h.byId('slot-design-model').props.value, 'independent-slot-model')
   assert.equal(h.selectValue('slot-code-complex-follow'), 'main')
   assert.equal(text(h.byId('slot-code-complex-resolved')), models.main.model)
   for (const id of slotIds) assert.equal(h.selectValue(`slot-${id}-fallback-mode`), 'off')
@@ -702,8 +693,7 @@ test('native bulk save carries every target own frozen digest and no unrelated m
   assert.equal(store.models.main.model, 'bulk-main')
   assert.deepEqual(store.model_targets, ['default', 'claire', 'other'])
   assert.deepEqual(store.routing_targets, ['default', 'claire', 'other'])
-  assert.deepEqual(store.routing.slots, declarations())
-  assert.deepEqual(store.routing.heavy, routing.heavy); assert.deepEqual(store.routing.light, routing.light)
+  assert.deepEqual(store.routing, { enabled: true, slots: declarations() })
   assert.deepEqual(store.routing_profiles, ['default', 'claire', 'other'])
   assert.equal(Object.hasOwn(store, 'timeout_updates'), false)
 })
@@ -813,9 +803,9 @@ test('AI result cannot overwrite later manual description or a different loaded 
 
 test('profile section bulk save preserves each target stored method and spare policy', async () => {
   const data = profileFixture()
-  data.profiles[2].native_delegation.policy.light = { mode: 'custom', chain: [{ provider: 'existing-service', model: 'existing-spare' }] }
+  data.profiles[2].native_delegation.slot_policy['code-simple'] = { mode: 'custom', chain: [{ provider: 'existing-service', model: 'existing-spare' }] }
   data.profiles[0].native_delegation.backend = 'model-router-auto'
-  data.profiles[0].native_delegation.auto_policy.heavy = { mode: 'custom', chain: [{ provider: 'own', model: 'own-auto-spare' }] }
+  data.profiles[0].native_delegation.auto_slot_policy.design = { mode: 'custom', chain: [{ provider: 'own', model: 'own-auto-spare' }] }
   const h = harness({ data })
   h.click('profile-target-all')
   h.check('native-profile-other', true)
@@ -1129,7 +1119,7 @@ test('slot basis switching edits the draft only: custom is pre-filled from the f
   assert.deepEqual(h.calls, [])
 })
 
-test('a slot-only change is one routing-scoped store save carrying every slot and the untouched tier pair', async () => {
+test('a slot-only change is one routing-scoped store save carrying every slot', async () => {
   const h = harness({ data: slotFixture() })
   h.select('slot-computer-use-follow', 'custom')
   h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
@@ -1141,7 +1131,7 @@ test('a slot-only change is one routing-scoped store save carrying every slot an
   assert.deepEqual(Object.keys(body.routing.slots), slotIds)
   assert.deepEqual(body.routing.slots['computer-use'], { follow: 'custom', custom: route('screen-service', 'screen-model', models.main.reasoning) })
   assert.deepEqual(body.routing.slots.design, declarations().design)
-  assert.deepEqual(body.routing.heavy, routing.heavy); assert.deepEqual(body.routing.light, routing.light)
+  assert.deepEqual(Object.keys(body.routing).sort(), ['enabled', 'slots'])
   assert.deepEqual(body.routing_targets, ['claire'])
   assert.deepEqual(body.model_targets, [])
   assert.deepEqual(body.routing_profiles, ['default', 'claire', 'other'])
@@ -1170,18 +1160,20 @@ test('slot models are read-only and left out of every store body while another i
   h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   const store = h.calls.filter(call => call.operation === 'preview').at(-1).body
   assert.equal(store.save_scope, 'models')
-  assert.equal(Object.hasOwn(store.routing, 'slots'), false)
+  // The full form always names the slot map: the stored one as loaded (none here), never the cards.
+  assert.deepEqual(store.routing, { enabled: true, slots: {} })
+  assert.deepEqual(store.routing_targets, [])
   const g = harness({ data }); g.input('model-main-model', 'whole-page'); g.click('global-save'); await g.flush()
-  assert.equal(Object.hasOwn(g.calls[0].body.routing, 'slots'), false)
+  assert.deepEqual(g.calls[0].body.routing.slots, {})
+  assert.deepEqual(g.calls[0].body.routing_targets, [])
 })
 
-test('a profile whose plugin predates slots shows no slot cards and keeps its stored two-role spare policy', async () => {
+test('a profile whose plugin predates slots shows no slot cards and sends no spare policy', async () => {
   const data = slotFixture(); delete data.slot_capabilities
   for (const row of data.profiles) {
     delete row.slots
     for (const key of ['slot_policy', 'auto_slot_policy', 'policy_schema', 'auto_policy_schema', 'slot_policy_supported']) delete row.native_delegation[key]
   }
-  data.profiles[1].native_delegation.policy.heavy = { mode: 'custom', chain: [{ provider: 'kept', model: 'kept-spare' }] }
   const h = harness({ data })
   assert.match(text(h.byId('slot-update-note')), /업데이트/)
   assert.throws(() => h.byId('slot-design-follow'))
@@ -1234,8 +1226,7 @@ test('priority buttons reorder a slot spare chain and the model section save sen
   assert.deepEqual(h.calls[0].body.updates[0].slot_policy['code-complex'], { mode: 'off', chain: [] })
 })
 
-const CAPABILITIES = { native_trigger: 'hermes_runtime', native_execution: 'continue_conversation', native_reasoning: 'profile_overrides',
-  routing_trigger: 'subscription_exhaustion_before_tools', routing_execution: 'fresh_task', routing_max_retries: 1 }
+const CAPABILITIES = { native_trigger: 'hermes_runtime', native_execution: 'continue_conversation', native_reasoning: 'profile_overrides' }
 const nativeSpares = (overrides = {}) => ({ managed: true, editable: true, enabled: false, chain: [], actual_chain: [], drift: false, warnings: [], consent: null, ...overrides })
 const withSpares = data => {
   data.fallback_capabilities = { ...CAPABILITIES }
@@ -1338,13 +1329,11 @@ test('a non-model method leaves every target spare policy in its stored shape', 
   const data = slotFixture()
   data.profiles[0].native_delegation.policy_schema = 2
   data.profiles[0].native_delegation.slot_policy.design = { mode: 'custom', chain: [{ provider: 'own', model: 'own-slot-spare' }] }
-  data.profiles[2].native_delegation.policy_schema = 1
-  data.profiles[2].native_delegation.policy.light = { mode: 'custom', chain: [{ provider: 'own', model: 'own-role-spare' }] }
   const h = harness({ data })
   h.select('native-delegation-backend', 'model-router-profiles'); h.click('model-target-all')
   h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
-  // No spare models on screen for a non-model method: every target's stored policy (two-role, per
-  // slot or absent) is left to the writer.
+  // No spare models on screen for a non-model method: every target's stored policy (per slot or
+  // absent) is left to the writer.
   assert.deepEqual(h.calls[0].body.updates.map(row => row.profile), ['default', 'claire', 'other'])
   for (const update of h.calls[0].body.updates) {
     assert.equal(update.backend, 'model-router-profiles')
@@ -1425,16 +1414,14 @@ test('profiles with task routing off get a separate re-enable save that changes 
   assert.deepEqual([...walk(h.byId('routing-reenable'))].filter(node => node.type === 'Checkbox').map(node => node.props.id), ['routing-reenable-default', 'routing-reenable-other'])
   assert.equal(h.byId('routing-reenable-save').props.disabled, true)
   h.check('routing-reenable-other', true)
-  h.select('slot-code-simple-follow', 'main'); h.input('model-main-model', 'unsaved-main')
+  h.select('slot-code-simple-follow', 'custom'); h.input('model-main-model', 'unsaved-main')
   h.click('routing-reenable-save'); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['preview', 'apply'])
   const body = h.calls[0].body
   assert.equal(body.save_scope, 'routing')
   assert.deepEqual(body.routing_profiles, ['claire', 'other'])
   assert.deepEqual(body.routing_targets, [])
-  assert.equal(Object.hasOwn(body.routing, 'slots'), false)
-  assert.deepEqual(body.routing.heavy, routing.heavy); assert.deepEqual(body.routing.light, routing.light)
-  assert.equal(body.routing.enabled, true)
+  assert.deepEqual(body.routing, { enabled: true, slots: {} }, 'the stored slots as loaded, never the slot-card draft')
   assert.deepEqual(body.model_targets, [])
   assert.equal(JSON.stringify(body).includes('unsaved-main'), false)
   const g = harness({ data })
@@ -1449,7 +1436,7 @@ test('a review slot on the same model as complex code says so without blocking t
   const h = harness({ data: slotFixture() })
   assert.throws(() => h.byId('slot-verify-same-model-note'))
   h.select('slot-code-complex-follow', 'custom')
-  h.input('slot-code-complex-provider', 'operator'); h.input('slot-code-complex-model', 'independent-heavy')
+  h.input('slot-code-complex-provider', 'operator'); h.input('slot-code-complex-model', 'independent-slot-model')
   assert.match(text(h.byId('slot-verify-same-model-note')), /같은 모델/)
   assert.equal(h.byId('model-section-save').props.disabled, false)
 })
@@ -1477,7 +1464,7 @@ test('a hand-picked target list persists, but its copy intent ends with a profil
 
 test('reverting a slot edit cancels its implicit copy: the save is role models only', async () => {
   const h = harness({ data: slotFixture() })
-  h.input('slot-design-model', 'temporary-edit'); h.input('slot-design-model', 'independent-heavy')
+  h.input('slot-design-model', 'temporary-edit'); h.input('slot-design-model', 'independent-slot-model')
   h.input('model-main-model', 'model-only')
   h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['preview', 'apply'])
@@ -1650,7 +1637,8 @@ test('a profile without slot support in a model mode keeps every target stored p
     for (const key of ['policy', 'slot_policy', 'allow_additional_cost']) assert.equal(Object.hasOwn(update, key), false)
   }
   const store = h.calls.filter(call => call.operation === 'preview').at(-1).body
-  assert.equal(Object.hasOwn(store.routing, 'slots'), false)
+  assert.deepEqual(store.routing.slots, {}, 'the stored slots as loaded')
+  assert.deepEqual(store.routing_targets, [])
 })
 
 test('a target that stops being editable between the click and the fresh status check blocks the whole save', async () => {
@@ -1959,7 +1947,8 @@ test('a slot edit stays unsaved when a refresh makes slots read-only and a model
   h.setResponder(nativeReply); h.click('model-section-save'); await h.flush()
   assert.deepEqual(h.calls.map(call => call.operation), ['preview', 'apply'])
   assert.equal(h.calls[0].body.save_scope, 'models')
-  assert.equal(Object.hasOwn(h.calls[0].body.routing ?? {}, 'slots'), false)
+  assert.deepEqual(h.calls[0].body.routing.slots, {}, 'the stored slots, not the read-only edit')
+  assert.deepEqual(h.calls[0].body.routing_targets, [])
   assert.match(text(h.render()), /자동으로 다시 불러오지 않았습니다/)
   assert.equal(h.byId('slot-design-model').props.value, 'edited-design', 'the slot edit was not reloaded away')
 })
@@ -2201,8 +2190,9 @@ test('more than 64 profiles still save: expected covers every profile without a 
   h.setResponder((operation, body) => operation === 'stage' ? { staged: true } : nativeReply(operation, body))
   h.click('global-save'); await h.flush()
   const stages = h.calls.filter(call => call.operation === 'stage')
-  assert.deepEqual(h.calls.filter(call => call.operation !== 'stage').map(call => call.operation), ['preview', 'apply'], 'sent (staged by size) and applied')
-  const body = JSON.parse(stages.sort((a, b) => a.body.index - b.body.index).map(call => call.body.chunk).join(''))
+  assert.deepEqual(h.calls.filter(call => call.operation !== 'stage').map(call => call.operation), ['preview', 'apply'], 'sent (staged when large) and applied')
+  const preview = h.calls.find(call => call.operation === 'preview').body
+  const body = stages.length ? JSON.parse(stages.sort((a, b) => a.body.index - b.body.index).map(call => call.body.chunk).join('')) : preview
   const expected = body.expected
   assert.equal(expected.length, 70)
   assert.ok(expected.every(item => item.routing && typeof item.routing.skill_enabled === 'boolean'))
@@ -2354,62 +2344,6 @@ test('the page never sends the delegation model: model-section save and whole-pa
   assert.equal(body.models.title.model, 'new-title')
 })
 
-const legacySlotFixture = () => withAux(withSpares(slotFixture()), row => {
-  row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }
-  row.slots.stored = ['code-simple']
-  row.routing.slots = { 'code-simple': { follow: 'delegation', custom: null } }
-})
-
-test('a slot stored as following the delegation model is shown as it is, read-only, and never picked again by the page', () => {
-  const h = harness({ data: legacySlotFixture() })
-  assert.equal(h.selectValue('slot-code-simple-follow'), 'delegation')
-  const [legacy, ...rest] = optionsOf(h, 'slot-code-simple-follow')
-  assert.deepEqual([legacy[0], legacy[2]], ['delegation', true])
-  assert.match(legacy[1], /^작업 위임 모델\(gpt-6-luna-900k\)과 같게 · 이전 설정$/)
-  assert.deepEqual(rest.map(([value, , disabled]) => [value, disabled]), [['main', false], ['custom', false]])
-  assert.equal(text(h.byId('slot-code-simple-resolved')), models.delegation.model, 'it keeps resolving to the stored delegation model')
-  assert.match(text(h.byId('slot-code-simple-legacy-note')), /다른 프로필에는 복사하지 않습니다/)
-  h.select('slot-code-simple-follow', 'delegation')
-  assert.equal(h.byId('model-section-save').props.disabled, true, 'nothing changed')
-  // An explicit pick moves away from it; the stored value can be brought back.
-  h.select('slot-code-simple-follow', 'main')
-  assert.equal(h.selectValue('slot-code-simple-follow'), 'main')
-  assert.deepEqual(optionsOf(h, 'slot-code-simple-follow').map(([value]) => value), ['main', 'custom'])
-  h.select('slot-code-simple-follow', 'delegation')
-  assert.equal(h.selectValue('slot-code-simple-follow'), 'main', 'the earlier basis is not a choice any more')
-  h.click('slot-code-simple-follow-revert')
-  assert.equal(h.selectValue('slot-code-simple-follow'), 'delegation')
-  assert.equal(h.byId('model-section-save').props.disabled, true)
-})
-
-test('slot models with a slot still following the delegation model go to the loaded profile only; other targets are named as kept', async () => {
-  const h = harness({ data: legacySlotFixture() })
-  h.select('slot-computer-use-follow', 'custom')
-  h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
-  h.click('model-target-all')
-  assert.match(text(h.byId('model-section-slot-skipped')), /작업 슬롯 모델을 적용하지 않는 프로필: default, other/)
-  assert.match(text(h.byId('model-section-write-other')), /작업 슬롯 모델은 그대로 둠\(이전 설정 ‘작업 위임 모델과 같게’/)
-  h.setResponder(spareReply)
-  h.click('model-section-save'); await h.flush()
-  const store = h.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body
-  assert.deepEqual(store.routing_targets, ['claire'], 'never copied to another profile as delegation')
-  assert.deepEqual(store.routing.slots['code-simple'], { follow: 'delegation', custom: null }, 'kept as stored, never switched')
-  assert.equal(store.routing.slots['computer-use'].custom.model, 'screen-model')
-  // Once the operator picks a basis for it, the slot models copy to the chosen targets again
-  // (here the other profiles have no such slot of their own).
-  const g = harness({ data: withAux(withSpares(slotFixture()), row => {
-    if (row.name === 'claire') { row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }; row.slots.stored = ['code-simple'] }
-  }) })
-  g.select('slot-code-simple-follow', 'main')
-  g.click('model-target-all')
-  assert.throws(() => g.byId('model-section-slot-skipped'))
-  g.setResponder(spareReply)
-  g.click('model-section-save'); await g.flush()
-  const copied = g.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body
-  assert.deepEqual(copied.routing_targets, ['default', 'claire', 'other'])
-  assert.deepEqual(copied.routing.slots['code-simple'], { follow: 'main', custom: null })
-})
-
 test('compression spare models: rows are edited and reordered, and a chain-only save sends only the narrow step', async () => {
   const h = harness({ data: withAux(withSpares(nativeBatchFixture())) })
   assert.equal(h.selectValue('aux-compression-fallback-mode'), 'off')
@@ -2541,23 +2475,6 @@ test('a backend without auxiliary status shows no editor for those spare models 
 })
 
 // ---- v0.13.0 review fixes ----
-test('a copy never overwrites another profile own slot that still follows the delegation model', async () => {
-  const data = withAux(withSpares(slotFixture()), row => {
-    if (row.name === 'other') { row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }; row.slots.stored = ['code-simple'] }
-  })
-  const h = harness({ data })
-  h.select('slot-computer-use-follow', 'custom')
-  h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
-  h.click('model-target-all'); h.check('model-copy-all', true)
-  assert.match(text(h.byId('model-section-slot-skipped')), /작업 슬롯 모델을 적용하지 않는 프로필: other\. 그 프로필에 이전 설정/)
-  assert.match(text(h.byId('model-section-write-other')), /작업 슬롯 모델은 그대로 둠\(이 프로필에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않음\)/)
-  h.setResponder(spareReply)
-  h.click('model-section-save'); await h.flush()
-  const store = h.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body
-  assert.deepEqual(store.routing_targets, ['default', 'claire'], 'other keeps its slot map')
-  assert.ok(store.model_targets.includes('other'), 'and still gets the rest')
-})
-
 test('the whole-page save never turns an on draft without rows into an off write', async () => {
   const data = withAux(withSpares(nativeBatchFixture()), row => {
     if (row.name === 'claire') row.auxiliary_fallbacks.title = auxState('auxiliary.title_generation.fallback_chain', { present: true, chain: [FLASH], actual_chain: [FLASH] })
@@ -2620,60 +2537,27 @@ test('a read-only chain with env values or provider-only entries says so and sho
   assert.equal(h.byId('aux-title-chain-0-provider').props.disabled, true)
 })
 
-test('slot models copy to fresh profiles; only a stored legacy slot of a receiving profile is protected', async () => {
-  // Fresh receivers: nothing stored, their Light slots only shown through the tier default link.
+test('slot models copy to every chosen profile, also one that has slots of its own stored', async () => {
   const data = withAux(withSpares(slotFixture()), row => {
-    if (row.name !== 'claire') {
-      row.slots.stored = []
-      for (const id of slotIds) if (slotTiers[id] === 'light') row.slots.declarations[id] = { follow: 'delegation', custom: null }
+    if (row.name === 'other') {
+      row.slots.stored = ['code-simple']
+      row.slots.declarations['code-simple'] = { follow: 'custom', custom: route('own', 'own-simple', 'low') }
+      row.routing.slots = { 'code-simple': { follow: 'custom', custom: route('own', 'own-simple', 'low') } }
     }
   })
   const h = harness({ data })
   h.select('slot-computer-use-follow', 'custom')
   h.input('slot-computer-use-provider', 'screen-service'); h.input('slot-computer-use-model', 'screen-model')
   h.click('model-target-all')
-  assert.throws(() => h.byId('model-section-slot-skipped'), 'no fresh profile is named as having an earlier setting')
+  assert.throws(() => h.byId('model-section-slot-skipped'), 'no receiver is skipped')
+  assert.match(text(h.byId('model-section-write-other')), /^other: 작업 슬롯 모델 저장/)
   h.setResponder(spareReply)
   h.click('model-section-save'); await h.flush()
-  const store = h.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body
+  const store = h.calls.filter(call => call.operation === 'preview').find(call => call.body.routing_targets?.length).body
   assert.deepEqual(store.routing_targets, ['default', 'claire', 'other'])
-  // The same receiver with that slot explicitly stored is still skipped.
-  const stored = structuredClone(data)
-  stored.profiles.find(row => row.name === 'other').slots.stored = ['code-simple']
-  const g = harness({ data: stored })
-  g.select('slot-computer-use-follow', 'custom')
-  g.input('slot-computer-use-provider', 'screen-service'); g.input('slot-computer-use-model', 'screen-model')
-  g.click('model-target-all')
-  assert.match(text(g.byId('model-section-slot-skipped')), /적용하지 않는 프로필: other\./)
-  g.setResponder(spareReply)
-  g.click('model-section-save'); await g.flush()
-  assert.deepEqual(g.calls.filter(call => call.operation === 'preview').find(call => Object.hasOwn(call.body.routing || {}, 'slots')).body.routing_targets, ['default', 'claire'])
-})
-
-test('copy intent to targets that all keep their stored legacy slot saves the rest and names them', async () => {
-  const data = withAux(withSpares(slotFixture()), row => {
-    if (row.name === 'other') { row.slots.declarations['code-simple'] = { follow: 'delegation', custom: null }; row.slots.stored = ['code-simple'] }
-  })
-  const h = harness({ data })
-  h.click('model-target-none'); h.check('model-target-other', true); h.check('model-copy-all', true)
-  h.input('model-main-model', 'copied-main')
-  assert.equal(h.byId('model-section-save').props.disabled, false, 'copy intent alone does not block')
-  assert.match(text(h.byId('model-section-write-other')), /작업 슬롯 모델은 그대로 둠\(이 프로필에 이전 설정/)
-  h.setResponder(spareReply)
-  h.click('model-section-save'); await h.flush()
-  const stores = h.calls.filter(call => call.operation === 'preview').map(call => call.body)
-  assert.ok(stores.length)
-  for (const store of stores) assert.deepEqual(store.routing_targets || [], [], 'no slot models are sent')
-  assert.ok(stores.some(store => store.model_targets.includes('other')))
-  // An actual slot edit with no target able to take it is blocked with the receiving-side reason.
-  const g = harness({ data })
-  g.click('model-target-none'); g.check('model-target-other', true)
-  g.select('slot-computer-use-follow', 'custom')
-  g.input('slot-computer-use-provider', 'screen-service'); g.input('slot-computer-use-model', 'screen-model')
-  assert.equal(g.byId('model-section-save').props.disabled, true)
-  const reason = text(g.byId('model-section-targets'))
-  assert.match(reason, /선택한 프로필\(other\)에 이전 설정 ‘작업 위임 모델과 같게’인 슬롯이 있어 덮어쓰지 않습니다/)
-  assert.doesNotMatch(reason, /그 슬롯의 모델 기준/)
+  assert.deepEqual(Object.keys(store.routing.slots), slotIds, 'the full form names every slot for every target')
+  assert.deepEqual(store.routing.slots['code-simple'], { follow: 'main', custom: null }, 'the loaded profile’s slot, copied over the receiver’s own')
+  assert.equal(store.routing.slots['computer-use'].custom.model, 'screen-model')
 })
 
 test('each task card names its own read-only cause; a sibling env chain does not lock the other card', () => {
@@ -2697,7 +2581,7 @@ test('each task card names its own read-only cause; a sibling env chain does not
 // ---- v0.15.0: section saves send only changed values (service status `partial_save_schema: 1`) ----
 const partialOn = data => { data.partial_save_schema = 1; return data }
 
-test('partial: a slot-only change sends that slot only, without Heavy/Light, with expectations narrowed to it', async () => {
+test('partial: a slot-only change sends that slot only, with expectations narrowed to it', async () => {
   const h = harness({ data: partialOn(slotFixture()) })
   h.click('model-target-all')
   assert.equal(h.byId('model-copy-all').props.checked, false)
@@ -2732,7 +2616,7 @@ test('partial: copy-all sends every slot and the models; the checkbox resets aft
   const routingBody = stores.find(body => body.routing?.slots)
   assert.equal(routingBody.partial_save_schema, 1)
   assert.deepEqual(Object.keys(routingBody.routing.slots), slotIds)
-  assert.equal(Object.hasOwn(routingBody.routing, 'heavy'), false)
+  assert.deepEqual(Object.keys(routingBody.routing).sort(), ['enabled', 'slots'])
   assert.ok(stores.some(body => body.model_targets?.length === 3), 'the models are copied')
   assert.equal(h.byId('model-copy-all').props.checked, false)
 })
@@ -2851,27 +2735,6 @@ test('partial: a new default a target cannot hold is kept there and named; summa
   assert.match(lines, /claire: 허용 목록 변경\(설명 other\)/)
   assert.match(lines, /default: 이 프로필의 허용 목록에는 바뀌는 값 없음/)
   assert.match(lines, /other: 이 프로필의 허용 목록에는 바뀌는 값 없음/)
-})
-
-test('partial: a stored custom Heavy is kept for the retired routing spare check, so the whole-page save is not falsely blocked (R1)', async () => {
-  const data = partialOn(slotFixture())
-  const claire = data.profiles.find(row => row.name === 'claire')
-  claire.routing.heavy = { follow: 'custom', custom: route('custom-heavy-prov', 'custom-heavy-model', 'high') }
-  claire.fallbacks = claire.fallbacks || {}
-  // Valid as stored: the retired routing spare equals the main model, not the custom Heavy.
-  claire.fallbacks.routing = { enabled: true, editable: true, readonly: false, heavy: { ...claire.models.main },
-    light: route('fb-light-prov', 'fb-light-model', 'low'),
-    consent: { policy_version: 1, selection_digest: 'abc', allow_additional_cost: true, allow_task_rerun: true } }
-  const h = harness({ data })
-  h.select('slot-design-follow', 'custom')
-  h.input('slot-design-provider', 'slot-prov'); h.input('slot-design-model', 'slot-model')
-  assert.doesNotMatch(text(h.render()), /보관된 이전 작업 방식의 예비 모델과 겹칩니다/)
-  assert.equal(h.byId('global-save').props.disabled, false)
-  h.click('global-save'); await h.flush()
-  const body = h.calls.find(call => call.operation === 'preview').body
-  assert.equal(body.partial_save_schema, 1)
-  assert.equal(Object.hasOwn(body.routing, 'heavy'), false)
-  assert.deepEqual(Object.keys(body.routing.slots), ['design'])
 })
 
 test('partial: a hidden spare edit never blocks or annotates a model save to a routing-disabled target (B1 residual)', async () => {

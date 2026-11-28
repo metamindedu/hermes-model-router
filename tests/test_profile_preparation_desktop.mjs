@@ -12,7 +12,7 @@ function load() {
 }
 const id = value => value.repeat(64)
 function readiness(state = 'missing', extra = {}) {
-  return { schema: 1, state, files: state === 'missing' ? 'missing' : 'complete', python: state === 'ready' ? 'enabled' : 'not_enabled', base_supported: state !== 'missing', split_supported: state !== 'missing', explicit_opt_out: false, managed_selection: false, version: state === 'missing' ? null : '0.4.8', identity: id('1'), reason_codes: state === 'missing' ? ['package_missing'] : [], ...extra }
+  return { schema: 1, state, files: state === 'missing' ? 'missing' : 'complete', python: state === 'ready' ? 'enabled' : 'not_enabled', base_supported: state !== 'missing', explicit_opt_out: false, managed_selection: false, version: state === 'missing' ? null : '0.4.8', identity: id('1'), reason_codes: state === 'missing' ? ['package_missing'] : [], ...extra }
 }
 const fixture = () => ({ revision: 1, readiness_context: { schema: 1, base_identity: id('a'), source_profile: 'default', release: { catalog_name: 'model-router', ref: 'b'.repeat(40), version: '0.4.8' } }, profiles: [{ name: 'default', readiness: readiness('ready') }, { name: 'new-profile', readiness: readiness() }, { name: 'second', readiness: readiness('missing', { identity: id('2') }) }] })
 const route = { mode: 'local', connectionId: 'local-one', primary: true, profile: 'default', targetProfile: 'default' }

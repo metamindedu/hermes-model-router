@@ -226,7 +226,6 @@ def _capture(home: Path, root: Path, store_path: Path) -> _Capture:
         "init": (home / PLUGIN_RELATIVE / "model_router" / "__init__.py", MAX_SOURCE_BYTES, home),
         "timeouts": (home / PLUGIN_RELATIVE / "model_router" / "timeouts.py", MAX_SOURCE_BYTES, home),
         "watchdog": (home / PLUGIN_RELATIVE / "model_router" / "native_watchdog.py", MAX_SOURCE_BYTES, home),
-        "routing": (home / PLUGIN_RELATIVE / "model_router" / "routing.py", MAX_SOURCE_BYTES, home),
         "pyproject": (home / PLUGIN_RELATIVE / "pyproject.toml", MAX_SOURCE_BYTES, home),
         "metadata": (home / "plugins" / ".install-metadata.json", MAX_METADATA_BYTES, home),
         "package_json": (home / PLUGIN_RELATIVE / "package.json", None, home),
@@ -291,15 +290,15 @@ def _literal_marker(source: bytes | None) -> bool:
     for node in tree.body:
         if isinstance(node, ast.Assign):
             if any(
-                isinstance(target, ast.Name) and target.id == "ROUTED_ROLE_TIMEOUTS_SUPPORTED"
+                isinstance(target, ast.Name) and target.id == "SLOT_TIMEOUTS_SUPPORTED"
                 for target in node.targets
             ):
                 assignments.append(node.value)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.target.id == "ROUTED_ROLE_TIMEOUTS_SUPPORTED":
+            if node.target.id == "SLOT_TIMEOUTS_SUPPORTED":
                 assignments.append(node.value)
         elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-            if node.target.id == "ROUTED_ROLE_TIMEOUTS_SUPPORTED":
+            if node.target.id == "SLOT_TIMEOUTS_SUPPORTED":
                 assignments.append(None)
     return (
         len(assignments) == 1
@@ -327,13 +326,13 @@ def _code_analysis(capture: _Capture) -> dict[str, Any]:
     reasons: list[str] = []
     if not capture.home_ok:
         return {
-            "files": "unsafe", "base_supported": False, "split_supported": False,
+            "files": "unsafe", "base_supported": False,
             "version": None, "manifest": None, "reasons": ["unsafe_package_path"],
         }
     if capture.config.error == "unsafe" or capture.plugins_dir.error == "unsafe" or capture.package_dir.error == "unsafe" or capture.code_dir.error == "unsafe":
         reasons.append("unsafe_package_path")
         return {
-            "files": "unsafe", "base_supported": False, "split_supported": False,
+            "files": "unsafe", "base_supported": False,
             "version": None, "manifest": None, "reasons": reasons,
         }
     if (
@@ -342,13 +341,13 @@ def _code_analysis(capture: _Capture) -> dict[str, Any]:
         or capture.code_dir.error == "unreadable"
     ):
         return {
-            "files": "partial", "base_supported": False, "split_supported": False,
+            "files": "partial", "base_supported": False,
             "version": None, "manifest": None, "reasons": ["package_unreadable"],
         }
     if not capture.package_dir.present and capture.package_dir.error is None:
         reasons.append("package_missing")
         return {
-            "files": "missing", "base_supported": False, "split_supported": False,
+            "files": "missing", "base_supported": False,
             "version": None, "manifest": None, "reasons": reasons,
         }
 
@@ -358,15 +357,12 @@ def _code_analysis(capture: _Capture) -> dict[str, Any]:
         for name in required_names
     ) or not capture.code_dir.present
     base_unsafe = any(capture.files[name].error == "unsafe" for name in required_names)
-    optional_unsafe = capture.files["routing"].error == "unsafe"
-    any_unsafe = base_unsafe or optional_unsafe
+    any_unsafe = base_unsafe
     if any_unsafe:
         reasons.append("unsafe_package_path")
     if required_missing:
         reasons.append("package_partial")
     if any(capture.files[name].error in {"unreadable", "changed", "oversized"} for name in required_names):
-        reasons.append("package_unreadable")
-    if capture.files["routing"].error in {"unreadable", "changed", "oversized"}:
         reasons.append("package_unreadable")
 
     manifest, manifest_error = _manifest_from_capture(capture)
@@ -394,13 +390,10 @@ def _code_analysis(capture: _Capture) -> dict[str, Any]:
         and not required_missing and not base_unsafe and not source_error
         and manifest is not None and manifest_error is None
     )
-    split_marker = capture.files["routing"]
-    split_supported = bool(
-        base_supported and split_marker.present and split_marker.error is None
-        and _literal_marker(split_marker.data)
-    )
-    if base_supported and not split_supported:
-        reasons.append("split_marker_missing_or_invalid")
+    # Installed code that enforces per-slot runtime limits declares a literal marker in timeouts.py.
+    if base_supported and not _literal_marker(capture.files["timeouts"].data):
+        base_supported = False
+        reasons.append("slot_timeout_marker_missing_or_invalid")
 
     if any_unsafe:
         file_state = "unsafe"
@@ -411,7 +404,6 @@ def _code_analysis(capture: _Capture) -> dict[str, Any]:
     return {
         "files": file_state,
         "base_supported": base_supported,
-        "split_supported": split_supported,
         "version": version,
         "manifest": manifest,
         "reasons": list(dict.fromkeys(reasons)),
@@ -620,12 +612,10 @@ def profile_readiness(service: Any, profile: str, stored: Any) -> dict[str, Any]
 
     python = selection.python
     base_supported = analysis["base_supported"]
-    split_supported = analysis["split_supported"]
     files = analysis["files"]
     if changed:
         state = "unsupported"
         base_supported = False
-        split_supported = False
         identity = None
     elif files == "missing":
         state = "missing"
@@ -649,7 +639,6 @@ def profile_readiness(service: Any, profile: str, stored: Any) -> dict[str, Any]
         "files": files,
         "python": python,
         "base_supported": bool(base_supported),
-        "split_supported": bool(split_supported),
         "explicit_opt_out": bool(opt_out),
         "managed_selection": bool(selection.managed),
         "version": analysis["version"],
@@ -657,13 +646,11 @@ def profile_readiness(service: Any, profile: str, stored: Any) -> dict[str, Any]
     }
 
 
-def timeout_code_support(home: Path, root: Path, store_path: Path) -> tuple[bool, bool]:
-    """Return static base/split support only; selection is checked separately."""
+def timeout_code_support(home: Path, root: Path, store_path: Path) -> bool:
+    """Static per-slot runtime limit support only; selection is checked separately."""
     capture = _capture(Path(home), Path(root), Path(store_path))
     analysis = _code_analysis(capture)
-    if not _stable(capture):
-        return False, False
-    return bool(analysis["base_supported"]), bool(analysis["split_supported"])
+    return _stable(capture) and bool(analysis["base_supported"])
 
 
 def timeout_python_enabled(home: Path) -> bool:

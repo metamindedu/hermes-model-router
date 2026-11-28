@@ -17,13 +17,15 @@ test('small bounded changes stay Main-owned before route discovery or configurat
     assert.match(policy, /at least two substantive, independent workstreams/)
     assert.match(policy, /Do not split a small task artificially/)
     assert.match(policy, /startup, context transfer and coordination/)
-    assert.match(policy, /required Heavy or independent review/)
   }
   // v0.12.0: same-model delegation needs context weight, long runtime or parallel work.
   for (const policy of [canonical, compatibility]) {
     assert.match(policy, /context weight/)
     assert.match(policy, /long runtime/)
-    assert.match(policy, /only when the task needs that slot's role/)
+    assert.match(policy, /when the task needs that slot's work/)
+    // Required reviews are named by purpose, and the retired two-role split is gone from the policy.
+    assert.match(policy, /semantic-final/)
+    assert.doesNotMatch(policy, /\bHeavy\b|\bLight\b/)
   }
   assert.match(canonical, /### When a child is worth it/)
   assert.match(canonical, /Design\/plan: Main-owned/)
@@ -34,22 +36,20 @@ test('small bounded changes stay Main-owned before route discovery or configurat
   assert.match(canonical, /do not discover or query coding_route just to perform local work/)
   assert.match(canonical, /Tests, lint, build and optional review of the same small edit do not count/)
   assert.match(canonical, /Apply the same criteria to native delegate_task/)
-  assert.match(canonical, /A required single Heavy review is an exception/)
   assert.match(canonical, /Small review-driven corrections stay with Main/)
   assert.match(canonical, /User-facing visual\/motion design remains Main-owned/)
-  assert.doesNotMatch(canonical, /Medium: Main or Light implements|Light normally fixes findings/)
 })
 
 test('discovery and settings copy expose the direct-Main default without changing the router API', () => {
   assert.match(registration, /Main handles small bounded changes directly/)
   assert.match(registration, /at least two substantive independent workstreams/)
-  assert.match(registration, /required Heavy\/independent review remains mandatory/)
+  assert.match(registration, /required reviews \(semantic-final, independent-review\) remain mandatory/)
+  assert.match(registration, /Read this profile's task slots: which model each purpose runs on and its runtime limit/)
   assert.match(desktop, /간단한 작업은 메인 모델이 직접 처리/)
   assert.match(desktop, /최종 의미 검토와 독립 검수/)
   // Detailed execution policy remains in the canonical skill/docs, not consumer UI.
   assert.match(readme, /작고 범위가 명확한 수정은 메인 모델이 직접 처리/)
   assert.match(readme, /독립적인 실작업 두 개 이상/)
-  assert.match(readme, /필수 Heavy·독립 검수/)
 })
 
 test('canonical and compatibility skill keep the name and share complex non-coding scope', () => {
@@ -57,7 +57,6 @@ test('canonical and compatibility skill keep the name and share complex non-codi
   assert.match(compatibility, /^name: adaptive-coding-orchestration$/m)
   assert.match(canonical, /coding_route\(action="config"\)/)
   assert.match(canonical, /substantial ambiguity, interdependent evidence, consequential content errors, or repeated conceptual failure/)
-  assert.match(canonical, /Do not route ordinary writing, translation, summaries, simple extraction or one-step lookups to Heavy/)
   assert.match(canonical, /Divide large content work by nonoverlapping subject\/item ranges with saved checkpoints and a concrete time\/retry budget/)
   assert.match(canonical, /Pilot the output before scaling/)
   assert.match(canonical, /Keep external writes serialized under existing approvals/)
@@ -80,16 +79,15 @@ test('settings page explains broad routing scope, default-on installation, and p
   assert.match(readme, /단순 글쓰기·번역·요약·정보 추출/)
 })
 
-test('native routing replaces launch fields while legacy read-only access remains', () => {
+test('native routing replaces launch fields; coding_route only reads the slot settings', () => {
   assert.match(registration, /"name": "coding_route"/)
   assert.match(registration, /register_native_delegation\(ctx, home\)/)
-  assert.match(registration, /"enum": \["config", "status", "join"\]/)
-  assert.doesNotMatch(registration, /"enum": \["config", "start"/)
-  assert.match(registration, /start_retired/)
+  assert.match(registration, /"enum": \["config"\]/)
+  assert.match(registration, /action must be config/)
+  assert.doesNotMatch(registration, /"enum": \["config", "start"|"status", "join"|wait_timeout|job_id/)
   assert.match(registration, /Profile-enabled coding and complex non-coding orchestration/)
   assert.match(canonical, /Native routes \(Hermes >=0.22.5\)/)
   assert.match(canonical, /`model-router-profiles`/)
-  assert.match(canonical, /legacy fresh-task-rerun consent never authorizes/)
   assert.match(read('plugin.yaml'), /requires_hermes: ">=0.23.1"/)
   assert.doesNotMatch(desktop, /시간 초과 시 실행 프로세스를 정리합니다/)
   assert.match(desktop, /중단을 요청하지만, 실제로 멈추기까지 시간이 걸릴/)

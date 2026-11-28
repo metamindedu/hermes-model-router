@@ -24,7 +24,7 @@ OFF = {'mode': 'off', 'chain': [], 'consent': None}
 
 
 def make_guard(tmp_path, *, backend='model-router', route=None, run=None, parent=None, enabled=True):
-    parent = parent or SimpleNamespace(session_id='parent-1', provider='openai-codex', model='gpt-light')
+    parent = parent or SimpleNamespace(session_id='parent-1', provider='openai-codex', model='gpt-main')
     calls = []
 
     def default_run(request, owner, kwargs):
@@ -34,11 +34,11 @@ def make_guard(tmp_path, *, backend='model-router', route=None, run=None, parent
         guard.on_subagent_start(parent_session_id=owner.session_id, child_session_id='child-1',
                                 child_subagent_id='sa-1', child_goal=task['goal'])
         return json.dumps({'results': [{'status': 'completed', 'summary': '{"recommendation": "do A", "confidence": "high"}',
-                                        'schema_valid': True, 'model': 'gpt-heavy', 'route': {'backend': backend},
+                                        'schema_valid': True, 'model': 'gpt-advisor', 'route': {'backend': backend},
                                         'duration_seconds': 3.0}]})
 
     guard = ag.AdviseGuard(tmp_path, get_active_parent=lambda: parent, dispatch_backend=lambda _p: backend,
-                           resolve_route=lambda: route or {'provider': 'openai-codex', 'model': 'gpt-heavy', 'reasoning': 'high'},
+                           resolve_route=lambda: route or {'provider': 'openai-codex', 'model': 'gpt-advisor', 'reasoning': 'high'},
                            run_delegation=run or default_run, routing_enabled=lambda: enabled)
     guard.ready = True
     return guard, parent, calls
@@ -46,42 +46,31 @@ def make_guard(tmp_path, *, backend='model-router', route=None, run=None, parent
 
 # ---- slot table and stored blocks ------------------------------------------------------------
 
-def test_advise_is_a_heavy_builtin_slot_appended_last():
-    assert slots.BUILTIN_SLOTS[-1] == 'advise' and slots.SLOT_TIERS['advise'] == 'heavy'
-    assert list(slots.PURPOSE_SLOTS)[-1] == 'advise'
+def test_advise_is_a_builtin_slot_appended_last():
+    assert slots.BUILTIN_SLOTS[-1] == 'advise'
+    assert list(slots.PURPOSE_SLOTS)[-1] == 'advise' and slots.PURPOSE_SLOTS['advise'] == 'advise'
+    assert not hasattr(slots, 'SLOT_TIERS')
 
 
 @pytest.mark.parametrize('validator', ['settings', 'delegation'])
-def test_a_block_saved_before_advise_existed_still_validates_with_advise_off(validator):
-    chain = [{'provider': 'other', 'model': 'spare/v1'}]
-    old = {'schema': 2, 'fallbacks': {s: dict(OFF) for s in slots.BUILTIN_SLOTS[:6]}}
-    old['fallbacks']['design'] = {'mode': 'custom', 'chain': chain,
-                                  'consent': ns.make_slot_consent('default', 'model-router', 'design', chain)}
-    if validator == 'settings':
-        parsed = ns.validate_slot_policy_block('default', old)
-        assert parsed['advise'] == {'mode': 'off', 'chain': []} and parsed['design']['chain'] == chain
-    else:
-        parsed = nd.validate_native_policy(old, 'default')
-        assert parsed['fallbacks']['advise'] == OFF and nd.slot_continuation_chain(parsed, 'design') == chain
-        assert nd.slot_continuation_chain(parsed, 'advise') == []
-    # Any other incomplete key set is still refused.
+def test_a_block_must_name_every_slot_including_advise(validator):
     validate = ((lambda block: ns.validate_slot_policy_block('default', block)) if validator == 'settings'
                 else (lambda block: nd.validate_native_policy(block, 'default')))
-    for keys in (slots.BUILTIN_SLOTS[:5], (*slots.BUILTIN_SLOTS, 'bogus'), (*slots.BUILTIN_SLOTS[:6], 'bogus')):
+    full = {'schema': 2, 'fallbacks': {s: dict(OFF) for s in slots.BUILTIN_SLOTS}}
+    validate(full)
+    for keys in (slots.BUILTIN_SLOTS[:6], slots.BUILTIN_SLOTS[:5], (*slots.BUILTIN_SLOTS, 'bogus'), (*slots.BUILTIN_SLOTS[:6], 'bogus')):
         with pytest.raises(ValueError):
             validate({'schema': 2, 'fallbacks': {s: dict(OFF) for s in keys}})
 
 
-def test_patching_an_old_block_adds_advise_and_keeps_every_stored_entry():
+def test_patching_a_block_keeps_every_stored_entry():
     chain = [{'provider': 'other', 'model': 'spare/v1'}]
-    old = {'schema': 2, 'fallbacks': {s: dict(OFF) for s in slots.BUILTIN_SLOTS[:6]}}
-    old['fallbacks']['design'] = {'mode': 'custom', 'chain': chain,
-                                  'consent': ns.make_slot_consent('default', 'model-router', 'design', chain)}
-    block = ns.patch_slot_policy_block('default', copy.deepcopy(old), {'advise': {'mode': 'custom', 'chain': chain}}, True)
+    stored = ns.build_slot_policy_block('default', {**ns.default_slot_policy(), 'design': {'mode': 'custom', 'chain': chain}}, True)
+    block = ns.patch_slot_policy_block('default', copy.deepcopy(stored), {'advise': {'mode': 'custom', 'chain': chain}}, True)
     assert list(block['fallbacks']) == list(slots.BUILTIN_SLOTS)
-    assert block['fallbacks']['design'] == old['fallbacks']['design']
+    assert block['fallbacks']['design'] == stored['fallbacks']['design']
     assert block['fallbacks']['advise']['consent'] == ns.make_slot_consent('default', 'model-router', 'advise', chain)
-    untouched = ns.patch_slot_policy_block('default', copy.deepcopy(old), {'code-simple': {'mode': 'off', 'chain': []}}, False)
+    untouched = ns.patch_slot_policy_block('default', copy.deepcopy(stored), {'code-simple': {'mode': 'off', 'chain': []}}, False)
     assert untouched['fallbacks']['advise'] == OFF
 
 
@@ -91,8 +80,8 @@ class FakeService:
     def __init__(self, root):
         self.root = root
         routes = {s: {'provider': 'p', 'model': 'model-for-' + s, 'reasoning': 'high'} for s in slots.BUILTIN_SLOTS}
-        self.config = {'enabled': True, 'heavy': routes['design'], 'light': routes['code-simple'], 'slots': routes,
-                       'heavy_timeout_seconds': 10800, 'light_timeout_seconds': 600}
+        self.config = {'enabled': True, 'slots': routes,
+                       'slot_timeout_seconds': {s: 7200 for s in slots.BUILTIN_SLOTS}}
     def active_profile(self): return 'default'
     def routing_config(self, name): return self.config
     native_route_config = routing_config
@@ -132,7 +121,7 @@ def test_advise_routes_only_for_the_exact_in_flight_goal(env):
         return run(request, owner, kwargs)
     guard, _parent, _ = make_guard(home, run=run_and_copy)
     guard.tool({'question': 'Which?'}, session_id='parent-1')
-    assert seen['route']['model'] == 'model-for-advise' and seen['route']['label'] == 'heavy'
+    assert seen['route']['model'] == 'model-for-advise' and seen['route']['label'] == 'advise'
     # After the call the same goal is refused again, here and in a context copied during the call.
     assert not ag.advisor_call_active(home, seen['goal'])
     assert seen['copied'].run(ag.advisor_call_active, home, seen['goal']) is False
@@ -227,7 +216,7 @@ def test_ask_advisor_dispatches_one_synchronous_advise_task_and_returns_the_answ
     guard, parent, calls = make_guard(tmp_path)
     reply = json.loads(guard.tool({'question': '  Which index?  ', 'context': 'We tried B.'}, session_id='parent-1'))
     assert reply['status'] == 'ok' and 'do A' in reply['advice'] and reply['schema_valid'] is True
-    assert reply['model'] == 'gpt-heavy' and 'not a verified fact' in reply['note']
+    assert reply['model'] == 'gpt-advisor' and 'not a verified fact' in reply['note']
     [request] = calls
     [task] = request['tasks']
     assert task['purpose'] == 'advise' and task['total_timeout_seconds'] == ag.ADVISE_TIMEOUT_SECONDS
@@ -246,7 +235,7 @@ def test_auto_backend_names_model_execution(tmp_path):
 
 
 def test_same_model_is_skipped_without_dispatch(tmp_path):
-    guard, _, calls = make_guard(tmp_path, route={'provider': 'OpenAI-Codex', 'model': 'GPT-LIGHT', 'reasoning': 'high'})
+    guard, _, calls = make_guard(tmp_path, route={'provider': 'OpenAI-Codex', 'model': 'GPT-MAIN', 'reasoning': 'high'})
     reply = json.loads(guard.tool({'question': 'q'}, session_id='parent-1'))
     assert reply['status'] == 'skipped' and reply['reason'] == 'same_model' and calls == []
 
@@ -410,7 +399,7 @@ def test_the_route_gate_refuses_an_asker_other_than_the_calling_parent(env):
         current['parent'] = owner
         seen['asker'] = ag.advisor_call_active(home, goal)
         return json.dumps({'error': 'stop here'})
-    parent = SimpleNamespace(session_id='parent-1', provider='openai-codex', model='gpt-light')
+    parent = SimpleNamespace(session_id='parent-1', provider='openai-codex', model='gpt-main')
     current['parent'] = parent
     guard = ag.AdviseGuard(home, get_active_parent=lambda: current['parent'], dispatch_backend=lambda _p: 'model-router',
                            resolve_route=lambda: {'provider': 'p', 'model': 'm', 'reasoning': 'high'}, run_delegation=run)

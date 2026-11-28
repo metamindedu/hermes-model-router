@@ -12,7 +12,7 @@ import pytest
 
 from model_router import effective_config
 from model_router import service as service_module
-from model_router.routing import RoutingError, _safe_route
+from model_router.native_delegation import safe_route as _safe_route
 from model_router.service import (ExternalChange, MODEL_KEYS, MODEL_SETTINGS_SCHEMA, RevisionConflict, Service,
                                   _project_roles)
 from test_fallback_service import confirmation, setup_service
@@ -29,20 +29,20 @@ def row(status, name="default"):
 
 
 def custom_slots():
-    """Every slot declared: design/verify-complex follow main, code-* follow delegation, one custom."""
+    """Every slot declared: most follow main, two run on their own model."""
     return {
         "design": {"follow": "main", "custom": None},
         "verify-complex": {"follow": "main", "custom": None},
-        "code-complex": {"follow": "delegation", "custom": None},
-        "code-simple": {"follow": "delegation", "custom": None},
+        "code-complex": {"follow": "main", "custom": None},
+        "code-simple": {"follow": "custom", "custom": route("deepseek", "own-coder", "low")},
         "verify-simple": {"follow": "custom", "custom": route("custom-co", "custom-verify", "low")},
         "computer-use": {"follow": "main", "custom": None},
+        "advise": {"follow": "main", "custom": None},
     }
 
 
 def store_slots(service, name="default", slots=None):
     data = json.loads(service.store_path.read_text(encoding="utf-8"))
-    data["schema"] = 3
     data["profiles"][name]["routing"]["slots"] = slots or custom_slots()
     service.store_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -74,7 +74,7 @@ def native_body(service, models, targets=("default",), *, status=None, frozen_ro
         "model_settings_schema": MODEL_SETTINGS_SCHEMA,
         "expected_revision": status["revision"], "profile": "default", "save_scope": "models",
         "models": copy.deepcopy(models), "model_targets": list(targets),
-        "routing": {key: value for key, value in copy.deepcopy(source["routing"]).items() if key != "fallback"},
+        "routing": copy.deepcopy(source["routing"]),
         "routing_profiles": [item["name"] for item in status["profiles"] if item["routing"]["enabled"]],
         "routing_targets": [],
         "expected": [frozen(status, name, frozen_roles or list(models)) for name in targets],
@@ -129,7 +129,7 @@ def test_unresolved_roles_are_omitted_not_fabricated(svc):
     assert "title" not in item["models"] and "compression" not in item["models"]
     assert item["model_roles"]["title"] == {"state": "unverified", "source": "explicit", "editable": True, "reason": "provider_default_model"}
     assert item["model_roles"]["compression"]["reason"] == "invalid"
-    assert item["models"]["main"] == route("openai-codex", "heavy0", "high")
+    assert item["models"]["main"] == route("openai-codex", "main-model0", "high")
 
 
 def test_inheritance_aliases_follow_hermes_resolution():
@@ -178,18 +178,20 @@ def test_managed_role_shows_the_effective_value_read_only(svc, monkeypatch):
 
 # --- dispatch routes ---------------------------------------------------------------------------
 
-def test_native_routes_follow_each_externally_edited_role_and_keep_custom(svc):
+def test_native_routes_follow_an_externally_edited_main_and_keep_custom(svc):
     service, fake, _ = svc
     store_slots(service)
     before = snapshot_bytes(service, fake)
     fake.values["default"]["model.default"] = "edited-main"
     fake.values["default"]["delegation.model"] = "edited-delegation"
     config = service.native_route_config("default")
-    assert config["heavy"] == route("openai-codex", "edited-main", "high")
-    assert config["light"] == route("deepseek", "edited-delegation", "low")
-    assert config["slots"]["design"] == config["slots"]["computer-use"] == config["heavy"]
-    assert config["slots"]["code-complex"] == config["light"]
+    edited = route("openai-codex", "edited-main", "high")
+    assert config["slots"]["design"] == config["slots"]["computer-use"] == config["slots"]["code-complex"] == edited
+    assert config["slots"]["code-simple"] == route("deepseek", "own-coder", "low")
     assert config["slots"]["verify-simple"] == route("custom-co", "custom-verify", "low")
+    # No slot follows the delegation model.
+    assert route("deepseek", "edited-delegation", "low") not in config["slots"].values()
+    assert not {"heavy", "light"} & set(config)
     # Dispatch reads nothing back into the store and writes no config.
     assert snapshot_bytes(service, fake)[0] == before[0] and fake.calls == []
 
@@ -200,7 +202,7 @@ def test_invalid_title_never_blocks_an_independent_follow_route(svc):
     fake.values["default"]["auxiliary.title_generation.provider"] = "${TITLE_PROVIDER}"
     config = service.native_route_config("default")
     assert config["model_roles"]["title"] == {"state": "unverified", "source": "explicit", "editable": False, "reason": "dynamic"}
-    assert config["heavy"] == route("openai-codex", "heavy0", "high")
+    assert config["slots"]["design"] == route("openai-codex", "main-model0", "high")
     assert all(value is not None for value in config["slots"].values())
 
 
@@ -220,7 +222,7 @@ def test_unverifiable_role_blocks_only_its_dependent_follow_routes(svc, key, val
     for slot, follow in follows.items():
         if follow == blocked:
             assert config["slots"][slot] is None
-            with pytest.raises(RoutingError):
+            with pytest.raises(ValueError):
                 _safe_route(config["slots"][slot], "slot")  # what the native provider does: refuse that task
         else:
             assert _safe_route(config["slots"][slot], "slot") == config["slots"][slot]
@@ -232,18 +234,18 @@ def test_managed_and_unavailable_provenance_fail_closed_for_follow_routes_only(s
     store_slots(service)
     monkeypatch.setattr(Service, "_read_model_overlay", lambda self, profile: {"available": False, "managed": {}, "digest": None})
     config = service.native_route_config("default")
-    assert config["heavy"] is None and config["light"] is None
+    assert config["slots"]["design"] is None and config["slots"]["code-complex"] is None
     assert config["slots"]["verify-simple"] == route("custom-co", "custom-verify", "low")
     monkeypatch.setattr(Service, "_read_model_overlay", lambda self, profile: {
         "available": True, "managed": {"model.default": "admin-main"}, "digest": "m"})
     config = service.native_route_config("default")
-    assert config["heavy"] == route("openai-codex", "admin-main", "high")  # trustworthy effective value
+    assert config["slots"]["design"] == route("openai-codex", "admin-main", "high")  # trustworthy effective value
 
 
 def test_external_edit_is_not_a_global_denial_and_the_revision_fence_remains(svc, monkeypatch):
     service, fake, _ = svc
     fake.values["default"]["model.default"] = "outside-edit"
-    assert service.native_route_config("default")["heavy"]["model"] == "outside-edit"
+    assert service.native_route_config("default")["slots"]["design"]["model"] == "outside-edit"
     original = service._load_store
     calls = {"n": 0}
 
@@ -274,7 +276,7 @@ def test_main_change_keeps_inherited_auxiliary_roles_inherited(svc):
     assert item["models"]["compression"] == item["models"]["title"] == route("anthropic", "new-main", "max")
     assert item["model_roles"]["compression"]["source"] == item["model_roles"]["title"]["source"] == "inherited"
     # Delegation (not edited by this wire) is untouched.
-    assert values["delegation.model"] == "light0"
+    assert values["delegation.model"] == "delegation-model0"
 
 
 def test_one_role_save_writes_only_that_role_on_every_target(svc):
@@ -324,7 +326,7 @@ def test_stale_edited_role_refuses_at_preview_and_before_the_first_write_at_appl
     with pytest.raises(ExternalChange) as caught:
         service.preview(copy.deepcopy(request))
     assert (caught.value.profile, caught.value.field) == ("default", "actual_models.main")
-    fake.values["default"]["model.default"] = "heavy0"
+    fake.values["default"]["model.default"] = "main-model0"
     plan = service.preview(copy.deepcopy(request))["plan_id"]
     fake.values["default"]["model.default"] = "changed-after-preview"
     with pytest.raises(ExternalChange):
@@ -382,7 +384,7 @@ def test_native_wire_never_creates_a_store_entry_and_keeps_untargeted_bytes(svc)
 def test_unchanged_native_wire_save_is_a_noop(svc):
     service, fake, _ = svc
     before = snapshot_bytes(service, fake)
-    plan = service.preview(native_body(service, {"main": route("openai-codex", "heavy0", "high")}))
+    plan = service.preview(native_body(service, {"main": route("openai-codex", "main-model0", "high")}))
     assert plan["changes"] == []
     assert service.apply(plan["plan_id"])["status"] == "no_change"
     assert fake.calls == [] and service.store_path.read_bytes() == before[0]
@@ -396,14 +398,14 @@ def test_old_three_role_body_keeps_its_legacy_semantics(svc):
     models["main"]["model"] = "legacy-main"
     request = {"expected_revision": status["revision"], "profile": "default", "save_scope": "models",
                "models": models, "model_targets": ["default"],
-               "routing": {key: value for key, value in copy.deepcopy(item["routing"]).items() if key != "fallback"},
+               "routing": copy.deepcopy(item["routing"]),
                "routing_profiles": ["default"], "routing_targets": []}
     assert service.apply(service.preview(request)["plan_id"])["status"] == "applied"
     # The legacy wire writes every role it carries: the inherited compression role becomes the
     # explicit route the page sent (old semantics, kept for old clients).
     assert fake.values["default"]["model.default"] == "legacy-main"
-    assert (fake.values["default"]["auxiliary.compression.provider"], fake.values["default"]["auxiliary.compression.model"]) == ("openai-codex", "heavy0")
-    assert fake.values["default"]["delegation.model"] == "light0"
+    assert (fake.values["default"]["auxiliary.compression.provider"], fake.values["default"]["auxiliary.compression.model"]) == ("openai-codex", "main-model0")
+    assert fake.values["default"]["delegation.model"] == "delegation-model0"
 
 
 # --- native fallback chain ---------------------------------------------------------------------
@@ -484,13 +486,13 @@ def test_combined_save_compares_the_chain_with_the_prospective_main(svc):
     request["expected"][0]["native_fallback"] = {"enabled": native["enabled"], "chain": native["chain"], "actual_chain": native["actual_chain"]}
     with pytest.raises(ValueError, match="differ from the primary model"):
         service.preview(copy.deepcopy(request))
-    request["fallback_updates"][0]["native_fallback"]["chain"] = chain("heavy0")  # the old main is a fine spare
+    request["fallback_updates"][0]["native_fallback"]["chain"] = chain("main-model0")  # the old main is a fine spare
     plan = service.preview(copy.deepcopy(request))
     assert service.apply(plan["plan_id"])["status"] == "applied"
     assert fake.values["default"]["model.default"] == "next-main"
-    assert fake.values["default"]["fallback_providers"] == chain("heavy0")
+    assert fake.values["default"]["fallback_providers"] == chain("main-model0")
     # Siblings untouched: inherited auxiliary roles and the delegation model.
-    assert fake.values["default"]["auxiliary.compression.model"] == "" and fake.values["default"]["delegation.model"] == "light0"
+    assert fake.values["default"]["auxiliary.compression.model"] == "" and fake.values["default"]["delegation.model"] == "delegation-model0"
 
 
 # --- the production readers --------------------------------------------------------------------
@@ -549,8 +551,7 @@ def routing_expectation(service, name):
     item = row(service.status(), name)
     routing = item["routing"]
     skill_enabled = bool(routing["enabled"]) != ("skills.disabled" in item["drift"])
-    return {"enabled": bool(routing["enabled"]), "heavy": routing.get("heavy"), "light": routing.get("light"),
-            "slots": routing.get("slots"), "skill_enabled": skill_enabled}
+    return {"enabled": bool(routing["enabled"]), "slots": routing.get("slots"), "skill_enabled": skill_enabled}
 
 
 def whole_page_body(service, models, routing_profiles):

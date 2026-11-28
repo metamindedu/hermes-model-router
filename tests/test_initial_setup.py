@@ -18,12 +18,12 @@ def setup_fixture(fixture, monkeypatch):
         (folder / '.install-metadata.json').write_text(json.dumps({'model-router': {
             'revision': 'b' * 40, 'source': 'https://github.com/metamindedu/hermes-model-router', 'pinned': True}}), encoding='utf-8')
     ready = {'schema': 1, 'state': 'ready', 'files': 'complete', 'python': 'enabled',
-             'base_supported': True, 'split_supported': True, 'explicit_opt_out': False,
+             'base_supported': True, 'explicit_opt_out': False,
              'managed_selection': False, 'version': '0.6.0', 'identity': 'a' * 64}
     monkeypatch.setattr('model_router.installation.profile_readiness', lambda *args: copy.deepcopy(ready))
     monkeypatch.setattr(service, 'native_route_config', lambda profile: {'enabled': True,
-        'heavy': {'provider': 'fixture', 'model': 'heavy', 'reasoning': 'high'},
-        'light': {'provider': 'fixture', 'model': 'light', 'reasoning': 'high'}})
+        'slots': {'design': {'provider': 'fixture', 'model': 'main', 'reasoning': 'high'},
+                  'code-simple': {'provider': 'fixture', 'model': 'coder', 'reasoning': 'high'}}})
     return service, calls, writer, ready
 
 
@@ -96,8 +96,8 @@ def test_initial_preserves_explicit_optouts(setup_fixture, monkeypatch, setting)
 def test_initial_never_activates_dormant_paid_continuation(setup_fixture):
     service, calls, _, _ = setup_fixture
     value = config(service)
-    policy = ns.default_policy(); policy['heavy'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'paid'}]}
-    value['delegation']['backends']['model-router-auto'] = ns.build_policy_block('default', policy, True, backend='model-router-auto')
+    policy = ns.default_slot_policy(); policy['design'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'paid'}]}
+    value['delegation']['backends']['model-router-auto'] = ns.build_slot_policy_block('default', policy, True, backend='model-router-auto')
     write_config(service, value)
     assert native.initial_setup_status(service, 'default')['eligible'] is False
     with pytest.raises(ValueError): service.initial_setup_preview(request(service))
@@ -177,23 +177,21 @@ def test_initial_managed_state_and_invalid_routes_are_manual(setup_fixture, monk
     ready['managed_selection'] = True
     assert native.initial_setup_status(service, 'default')['eligible'] is False
     ready['managed_selection'] = False
-    monkeypatch.setattr(service, 'native_route_config', lambda name: {'enabled': True, 'heavy': {}, 'light': {}})
+    monkeypatch.setattr(service, 'native_route_config', lambda name: {'enabled': True, 'slots': {'design': {}}})
     assert native.initial_setup_status(service, 'default')['eligible'] is False
     assert calls == []
 
 
 def test_initial_setup_checks_the_slot_routes_purposes_run_on(setup_fixture, monkeypatch):
     service, calls, _, ready = setup_fixture
-    # The fixture's route config predates slots (no key): it is judged by its tier routes alone.
-    legacy = service.native_route_config('default')
-    assert 'slots' not in legacy
+    current = service.native_route_config('default')
     baseline = native.initial_setup_status(service, 'default')
     assert baseline['eligible'] is True
     planner = {'provider': 'fixture', 'model': 'planner', 'reasoning': 'high'}
-    good = dict(legacy, slots={'design': planner, 'code-simple': legacy['light']})
+    good = dict(current, slots={'design': planner, 'code-simple': current['slots']['code-simple']})
     monkeypatch.setattr(service, 'native_route_config', lambda name: good)
     assert native.initial_setup_status(service, 'default')['action'] == baseline['action']
-    broken = dict(legacy, slots={'design': {}, 'code-simple': legacy['light']})
+    broken = dict(current, slots={'design': {}, 'code-simple': current['slots']['code-simple']})
     monkeypatch.setattr(service, 'native_route_config', lambda name: broken)
     status = native.initial_setup_status(service, 'default')
     assert status['eligible'] is False and status['action'] == 'manual'

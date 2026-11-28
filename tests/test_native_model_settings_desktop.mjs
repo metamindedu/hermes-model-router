@@ -7,7 +7,6 @@ import test from 'node:test'
 const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
 const route = (provider, model, reasoning) => ({ provider, model, reasoning })
 const slotIds = ['design', 'code-complex', 'code-simple', 'verify-simple', 'verify-complex', 'computer-use', 'advise']
-const slotTiers = Object.fromEntries(slotIds.map(id => [id, ['design', 'verify-complex', 'advise'].includes(id) ? 'heavy' : 'light']))
 const offSlots = () => Object.fromEntries(slotIds.map(id => [id, { mode: 'off', chain: [] }]))
 const declarations = () => Object.fromEntries(slotIds.map(id => [id, { follow: 'main', custom: null }]))
 const role = (state = 'verified', source = 'explicit', editable = true, reason = '') => ({ state, source, editable, reason })
@@ -21,19 +20,17 @@ const rowModels = name => ({
 // One native projection for `models` and `actual_models`; the title role is inherited from main.
 const nativeRow = name => ({ name, models: rowModels(name), actual_models: rowModels(name),
   model_roles: { main: role(), delegation: role(), compression: role(), title: role('verified', 'inherited') },
-  routing: { enabled: name === 'claire', heavy: { follow: 'main', custom: null }, light: { follow: 'main', custom: null }, fallback: { enabled: false, heavy: null, light: null } },
+  routing: { enabled: name === 'claire', slots: {} },
   drift: [], slots: { schema: 1, capable: true, stored: [], declarations: declarations() },
   fallbacks: { native: nativeFallback() },
   native_delegation: { schema: 1, supported: true, editable: true, backend: 'default', digest: 'a'.repeat(64),
-    policy: { heavy: { mode: 'off', chain: [] }, light: { mode: 'off', chain: [] } },
     slot_policy: offSlots(), auto_slot_policy: offSlots(), policy_schema: 0, auto_policy_schema: 0, slot_policy_supported: true,
     profile_routes: { profiles: [], default: null }, role_intro_inheritance: { schema: 1, supported: true, code_identity: 'e'.repeat(64), activation: 'new_session_or_supported_rebuild' }, warnings: [] },
   role_intro: { schema: 1, state: 'available', default_description: `Role of ${name}`, default_source: 'profile_metadata', description_auto: false, digest: 'f'.repeat(64) } })
 const nativeStatus = () => ({ model_settings_schema: 1, revision: 7, current_profile: 'claire', recent_apply: null,
   readiness_context: { schema: 1, base_identity: 'd'.repeat(64), source_profile: 'claire', release: null },
-  fallback_capabilities: { native_trigger: 'hermes_runtime', native_execution: 'continue_conversation', native_reasoning: 'profile_overrides',
-    routing_trigger: 'subscription_exhaustion_before_tools', routing_execution: 'fresh_task', routing_max_retries: 1 },
-  slot_capabilities: { schema: 1, slots: slotIds, tiers: slotTiers, purposes: {}, follows: ['main', 'delegation', 'custom'], blocking_profiles: [] },
+  fallback_capabilities: { native_trigger: 'hermes_runtime', native_execution: 'continue_conversation', native_reasoning: 'profile_overrides' },
+  slot_capabilities: { schema: 1, slots: slotIds, purposes: {}, follows: ['main', 'custom'], blocking_profiles: [] },
   profiles: ['default', 'claire', 'other'].map(nativeRow) })
 // The same rows from a service before Hermes-native model settings: no root key, no role metadata.
 const olderStatus = () => {

@@ -8,7 +8,17 @@ import yaml
 from model_router.service import Service, RevisionConflict, SKILL_NAME
 from model_router.timeouts import read_timeouts
 from test_integration import make_home
-from test_role_timeouts import _package
+
+
+def _install_package(home):
+    """A minimal installed package whose timeouts.py declares per-slot limit enforcement."""
+    package = home / "plugins" / "model-router" / "model_router"
+    package.mkdir(parents=True, exist_ok=True)
+    (package.parent / "plugin.yaml").write_text("name: model-router\nversion: 0.18.0\n", encoding="utf-8")
+    (package.parent / "__init__.py").write_text("# native plugin entrypoint fixture\n", encoding="utf-8")
+    (package / "__init__.py").write_text("# installed package fixture\n", encoding="utf-8")
+    (package / "timeouts.py").write_text("SLOT_TIMEOUTS_SUPPORTED = True\n", encoding="utf-8")
+    (package / "native_watchdog.py").write_text("# installed enforcement fixture\n", encoding="utf-8")
 
 
 @pytest.mark.parametrize("raw", [Ellipsis, None, "", "[]", ["unrelated", "unrelated"], '["unrelated", "unrelated"]'])
@@ -22,9 +32,9 @@ def test_first_save_reconciles_uninitialized_skill_list_with_raw_cas(tmp_path, r
     else:
         data["skills"]["disabled"] = raw
     data["unrelated"] = {"keep": "unchanged"}
+    data["plugins"] = {"enabled": ["model-router"], "disabled": []}
     config.write_text(yaml.safe_dump(data), encoding="utf-8")
-    package = _package(root)
-    (package / "routing.py").write_text("ROUTED_ROLE_TIMEOUTS_SUPPORTED = True\n", encoding="utf-8")
+    _install_package(root)
     service = Service(root)
     status = service.status()
     row = status["profiles"][0]
@@ -42,8 +52,7 @@ def test_first_save_reconciles_uninitialized_skill_list_with_raw_cas(tmp_path, r
     else:
         body["timeout_updates"] = [{
             "profile": "default", "expected_revision": 0,
-            "delegate_total_seconds": 120, "routed_light_total_seconds": 1800,
-            "routed_heavy_total_seconds": 7200,
+            "delegate_total_seconds": 120, "slot_seconds": {"design": 7200},
         }]
     plan = service.preview(body)
     # Apply in a fresh instance, like the two separate native CLI requests.
@@ -56,9 +65,9 @@ def test_first_save_reconciles_uninitialized_skill_list_with_raw_cas(tmp_path, r
         assert "unrelated" in actual["skills"]["disabled"]
     if scope is None:
         assert actual["model"]["default"] == "first-save-main"
-        assert read_timeouts(root)["routed_heavy_total_seconds"] == 7200
+        assert read_timeouts(root)["slot_seconds"] == {"design": 7200}
     else:
-        assert actual["model"]["default"] == "heavy-test"
+        assert actual["model"]["default"] == "main-test"
         assert read_timeouts(root)["revision"] == 0
     assert not Service(root).status()["profiles"][0]["drift"]
 

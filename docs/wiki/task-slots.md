@@ -1,44 +1,40 @@
 # 작업 슬롯
 
-위임 작업의 모델은 Heavy/Light 두 등급이 아니라 **슬롯**마다 직접 정한다. 슬롯은 운영자가 모델을 지정하는 단위이고, 목적(`purpose`)은 에이전트가 보내는 값이다. 기존 목적 이름은 그대로이므로 내장 정책은 그대로 쓴다. 단, 슬롯 도입 전 코드로 실행 중인 프로세스는 슬롯 설정을 읽지 못한다(아래 ‘함정’).
+에이전트는 작업의 목적(`purpose`)을 보내고, 프로필은 그 목적에 해당하는 슬롯의 모델과 전체 실행 시간 제한을 정한다. 모든 슬롯에 같은 선택 규칙이 적용된다.
 
-| 슬롯 | 목적 | 등급 |
-|---|---|---|
-| `design` | `plan` | heavy |
-| `code-complex` | `implementation` | light |
-| `code-simple` | `mechanical` | light |
-| `verify-simple` | `preliminary-review` | light |
-| `verify-complex` | `semantic-final`, `independent-review` | heavy |
-| `computer-use` | `computer-use` | light |
-| `advise` | `advise` (`ask_advisor` 도구만) | heavy |
+| 슬롯 | 목적 |
+|---|---|
+| `design` | `plan` |
+| `code-complex` | `implementation` |
+| `code-simple` | `mechanical` |
+| `verify-simple` | `preliminary-review` |
+| `verify-complex` | `semantic-final`, `independent-review` |
+| `computer-use` | `computer-use` |
+| `advise` | `advise` (`ask_advisor` 전용) |
 
-`설계 · 간단` 슬롯은 일부러 두지 않았다. 간단한 설계는 메인이 직접 한다.
+간단한 설계는 메인이 직접 한다. `preliminary-review`는 필수 계획이나 최종 의미 검토·독립 검수를 대신하지 않는다. `computer-use`는 화면 조작에 쓸 모델을 선택할 뿐 부모에게 없는 도구를 부여하지 않는다.
 
-## 등급이 남아 있는 이유
+## 모델과 실행 시간
 
-등급(heavy/light)은 슬롯별로 나누지 않은 것들의 내부 묶음일 뿐이다: 두 개의 실행 시간 제한, watchdog 역할, 런타임 라벨(`model:heavy` / `model:light`), 그리고 한 번도 저장하지 않은 슬롯의 의미. 운영자가 모델을 고르는 대상이 아니다. 필수 검수 규칙은 목적 이름에 묶여 있으므로 슬롯 모델을 바꿔도 규칙은 그대로다.
+각 슬롯 행에서 ‘기본 대화 모델과 같게’(`follow: main`) 또는 ‘직접 지정’(`follow: custom`)을 고른다. 설정한 적 없는 슬롯은 해당 프로필의 현재 Main 모델을 쓴다. `main`은 다음 실행에서 변경된 Main 모델을 따라가고, `custom`은 직접 지정한 모델을 유지한다.
+
+같은 행에 전체 실행 시간 제한을 **분**으로 입력한다. 빈칸이면 2시간(7200초), `0`이면 그 슬롯에 대한 플러그인 전체 시간 제한이 없다. 일반 위임·프로필 위임 시간은 별도다. 자세한 내용은 [[total-runtime-limits]]를 참고한다.
 
 ## 저장 형식
 
-- `settings.json`의 `routing.slots`는 선택 항목이다. 없는 슬롯은 자기 등급의 기존 `routing.heavy` / `routing.light` 선언으로 해석하므로, 건드리지 않은 설치는 이전과 똑같이 동작하고 읽을 때 아무것도 옮기지 않는다.
-- 슬롯 선언은 `{follow: main|delegation|custom, custom}`이다. `main`/`delegation`은 눈에 보이는 모델 역할을 따라가는 연결이고 추상 등급을 따라가는 것이 아니다.
-- 파일 schema는 어떤 프로필이든 `slots`를 가진 동안에만 3이다. 그렇지 않으면 2로 남아 슬롯을 실제로 쓰기 전까지는 이전 버전으로 되돌릴 수 있다.
-- 저장소 파일은 모든 프로필이 공유한다. 한 프로필이 슬롯을 저장하면 다른 프로필에 설치된 패키지도 그 파일을 읽어야 하므로, 설치된 모든 프로필의 패키지가 슬롯을 읽을 수 있을 때만 슬롯 저장을 받는다(`slot_capabilities.blocking_profiles`).
-- 슬롯을 모르는 이전 화면의 저장은 `slots` 키를 보내지 않는다. 이때 저장된 슬롯은 그대로 둔다. 빈 맵 `{}`을 보내야 지워진다.
+기본 Hermes 루트의 `plugin-data/model-router/settings.json`은 모든 프로필이 공유한다. schema 5의 최상위 키는 `schema`, `revision`, `custom_slots`, `profiles`다. `profiles[이름]`은 `models`, `routing: {enabled, slots}`, `native_fallback`, `delegation_fallback`, `fallback_consent: {native, delegation}`을 담는다. 슬롯 선언은 `routing.slots[슬롯 ID]`에 저장한다. 이전 형식은 읽거나 자동 변환하지 않는다. 설정 화면은 오류를 표시하고 라우팅을 거절한다. v0.17에서 올리는 절차는 [설치 안내](../../INSTALL.md)에 있다.
 
-## 슬롯별 예비 모델
+## 사용자지정 슬롯
 
-- 프로필 config의 `delegation.backends.model-router[-auto]` 블록 schema 2는 슬롯 id별 `{mode, chain, consent}`이다. 동의는 슬롯 id·backend·프로필·정확한 체인에 묶인다.
-- schema 1 블록(heavy/light)은 계속 유효하며 등급 단위로 적용한다. 읽을 때 다시 쓰지 않고, 그 동의를 슬롯 동의로 재사용하지 않는다. 슬롯 형태로 저장하는 순간에만 새 동의와 함께 schema 2가 된다.
-- 저장된 블록이 schema 2이면 두 역할 형태의 저장은 거절한다. 이전 화면이 슬롯별 예비 모델을 조용히 지우지 못하게 하기 위해서다.
-- 블록이 깨졌으면 그 블록에 이름이 없는 슬롯의 작업도 거절한다. 약속한 정책 없이 실행하지 않는다.
-- 동의 계산은 설정 쪽(`native_settings`)과 실행 쪽(`native_delegation`)에 따로 있다. 둘이 같은 값을 내는지 테스트로 고정한다.
+운영자는 **사용자지정 슬롯**에서 최대 4개를 정의한다. `custom_slots`는 `{id, label, description}`의 순서 있는 목록이다. 정의는 프로필 공용이지만 모델과 시간 제한은 프로필별이다. 이미지·영상 생성기 대신 해당 작업을 맡을 에이전트 모델을 고르는 설정이다.
 
-## 컴퓨터 유즈
+- `id`: `custom:` 뒤에 영문 소문자·숫자·하이픈 2~32자. 첫 글자는 영문 소문자나 숫자다. ID가 그대로 목적이 되며 저장 후 바꿀 수 없다.
+- `label`: 1~24자. `description`: 한 줄 1~120자. 앞뒤 공백이나 제어·서식 문자는 허용하지 않는다. 이름과 설명은 에이전트에게 지시가 아닌 작업 범위로 전달한다.
+- 정의는 `custom-slots-preview` → `apply`로 저장한다. 삭제하면 모든 프로필에서 그 슬롯의 모델 선언도 함께 제거한다. 새 목적 목록은 새 세션부터 보이며 이미 지운 목적은 실행 시 거절한다.
 
-하위 작업은 부모의 도구를 물려받고, 막히는 것은 재위임·사용자 질문·메모리·메시지 전송·예약뿐이다. 그래서 `computer-use` 목적은 화면 조작에 맞는 모델을 고르게 할 뿐 새 도구를 주지 않는다. 부모 세션에 브라우저·데스크톱 도구가 없으면 이 슬롯으로 보내도 쓸 수 없다.
+## 예비 모델과 자문
 
-## 조언 (v0.16.0)
+`delegation.backends.model-router`와 `delegation.backends.model-router-auto`의 schema 2 블록은 각 내장 슬롯에 `{mode, chain, consent}`를 둔다. 동의는 프로필·백엔드·슬롯·정확한 체인에 묶인다. 사용자지정 슬롯은 예비 모델 없이 실행한다. [[fallback-boundaries]] 참고.
 
 `advise` 슬롯은 위임이 아니라 자문이다. 일하는 에이전트가 `ask_advisor(question, context)`를 부르면 같은 도구 호출 안에서 답을 받아 이어서 일한다.
 
@@ -48,33 +44,6 @@
 - **`delegate_task`로는 못 보낸다:** 목적 enum에는 `advise`가 있지만(코어가 enum 밖 값을 거절하므로), 라우트는 진행 중인 `ask_advisor` 호출의 바로 그 goal에만 열린다. 그 밖에서는 `purpose advise runs only through the ask_advisor tool`로 거절한다.
 - **같은 모델이면 건너뛴다:** `advise` 슬롯이 부모와 같은 제공자·모델로 해석되면 위임하지 않고 `skipped`를 돌려준다.
 - **도구 노출:** 가드 훅 등록에 성공하고 그 프로필의 작업 분담이 켜져 있을 때만 도구가 보인다. 세션의 위임 방식이 `model-router` 또는 `model-router-auto`가 아니면 거절한다. 위임 깊이 여유가 있는 에이전트만 물을 수 있다(기본 `max_spawn_depth: 1`에서 위임된 자식은 `depth_limit`).
-- 자식은 이 대화를 보지 못한다. 필요한 사실·경로·발췌는 `context`로 넘긴다. 조언은 판단 재료이지 검증된 사실이나 승인이 아니며, 필수 Heavy·독립 검수를 대신하지 않는다.
+- 자식은 이 대화를 보지 못한다. 필요한 사실·경로·발췌는 `context`로 넘긴다. 조언은 판단 재료이지 검증된 사실이나 승인이 아니며, 필수 최종 의미 검토나 독립 검수를 대신하지 않는다.
 
-## 사용자지정 슬롯 (v0.17.0)
-
-운영자가 설정 화면의 ‘사용자지정 슬롯’ 섹션에서 최대 4개의 슬롯을 더 만든다. 3D 작업, 영상 편집, 한국어 글쓰기처럼 특정 작업에 맞는 **에이전트 LLM**을 고르는 용도다. 이미지·동영상 생성 모델 자체는 `image_generate` / `video_generate` 설정에 속하며 이 슬롯과 관계없다.
-
-- **정의는 모든 프로필 공용:** `settings.json` 최상위 `custom_slots`에 `[{id, label, description, tier}]` 순서 목록으로 저장한다. 모델은 각 프로필이 작업 슬롯 카드에서 내장 슬롯과 똑같이 고른다(`routing.slots[id]`).
-- **ID:** `custom:` 뒤에 영문 소문자·숫자로 시작하는 2~32자의 영문 소문자·숫자·하이픈. 이 값이 그대로 에이전트가 보내는 목적(`purpose`)이며 저장 뒤에는 바꿀 수 없다. 내장 목적과 겹칠 수 없다.
-- **이름:** 1~24자, **설명:** 한 줄 1~120자. 앞뒤 공백, 그리고 유니코드 범주 Cc(제어)·Cf(서식: 방향 제어·폭 없는 문자·이모지 결합 문자 ZWJ·소프트 하이픈·태그 문자)·Cs(단독 서로게이트)·Zl·Zp(줄/문단 구분자)는 거절한다. 그래서 ZWJ(U+200D)로 여러 이모지를 이어 붙인 결합 이모지(예: 노트북 앞의 사람)는 쓸 수 없다. 이름은 대소문자 무시로 겹칠 수 없다. 설명은 에이전트 프롬프트(목적 필드 설명)에 `untrusted descriptive data` 표시와 함께 JSON으로 들어가므로 지시문이 아니라 작업 범위로 쓴다.
-- **등급:** `heavy` 또는 `light`. 실행 시간 제한, watchdog 역할, 런타임 라벨(`model:heavy`/`model:light`), 한 번도 모델을 정하지 않은 프로필의 기본 모델(heavy → 메인, light → 작업 위임 모델)을 정한다. 필수 Heavy·독립 검수는 여전히 `semantic-final` / `independent-review`로 보내야 하며 사용자지정 heavy 슬롯이 이를 대신하지 않는다.
-- **예비 모델 없음:** 슬롯별 예비 모델 블록(schema 2)은 내장 슬롯 키만 가진다. 사용자지정 슬롯 작업은 `fallback_providers: []`로 실행한다. 이전 두 역할 블록(schema 1)이 저장된 프로필에서는 그 등급의 체인이 적용된다(내장 슬롯과 같은 규칙).
-- **목적 enum은 새 세션부터:** 도구 스키마는 세션을 만들 때 고정된다. 정의를 바꾼 뒤 이미 열린 세션은 이전 enum을 들고 있을 수 있으므로, 실행 시점에 저장된 정의에 없는 `custom:` 목적은 거절한다(코어의 enum 검사 또는 `Model Router route refused`).
-- **삭제:** 정의를 지우면 같은 쓰기에서 모든 프로필의 해당 `routing.slots` 선언도 지운다. 미리보기가 지워지는 프로필을 나열한다. 내장 슬롯은 지울 수 없다.
-- **저장 경로:** 정의는 프로필 설정과 따로 `custom-slots-preview` → `apply`로 저장한다. 개정 번호가 다르면 거절하고, 저장 후 화면은 상태를 다시 불러온다.
-- **저장 schema:** `custom_slots`가 있을 때만 파일 schema가 4다. 모든 정의를 지우면 슬롯 선언 유무에 따라 3 또는 2로 돌아간다. schema 4를 모르는 이전 패키지는 파일 전체를 `settings schema is invalid`로 거절한다(fail-closed).
-- **상태줄:** 사용자지정 슬롯 자식은 `모델 · <이름>`으로 보인다. 이름은 상태줄 요청 시점에 저장된 정의에서 읽는다.
-
-## 함정
-
-- **업데이트 후 재시작 전에 슬롯을 저장하지 않는다.** 저장 가능 여부(`blocking_profiles`)는 디스크의 패키지만 본다. 플러그인을 업데이트했더라도 아직 재시작하지 않은 데스크톱·게이트웨이·열린 세션은 이전 코드를 메모리에 들고 있고, 첫 슬롯 저장(저장소 schema 3) 뒤에는 모든 프로필에 대해 `settings schema is invalid`로 설정 읽기와 목적 라우팅을 거절한다. 슬롯별 예비 모델 저장(config 블록 schema 2) 뒤에는 그 프로필의 작업을 거절한다. 쓰기는 일어나지 않고 재시작하면 풀린다. 설치 순서는 모든 프로필 업데이트 → 모든 Hermes 프로세스 재시작 → 첫 슬롯 저장이다. 화면은 아무 슬롯도 저장된 적이 없을 때 이 안내를 보여 준다.
-- 저장 가능 여부는 preview와 apply 양쪽에서 확인한다. 어떤 프로필의 슬롯을 새로 쓰거나 바꾸는 계획만 apply에서 다시 막고, 슬롯을 지우기만 하는 저장은 막지 않는다(복구 경로).
-- Hermes는 CLI 호출 하나의 출력 중 48,000자까지만 화면에 돌려준다. 프로필이 많으면 상태 전체가 이 한도를 넘으므로 화면은 `status`를 `{"paged": true}`로 불러 30,000자 이하의 묶음으로 나눠 읽고, 개정 번호·설치 식별값·프로필 목록이 모두 같을 때만 이어 붙인다. 본문 없는 `status`는 이전처럼 전체를 한 번에 돌려준다. 미리보기 응답이 40,000자를 넘으면 CLI는 각 변경의 프로필과 항목 이름만 남겨 보내고(`changes_compacted`), 저장된 계획과 apply가 쓰는 값은 그대로다.
-- **사용자지정 슬롯의 첫 저장도 같은 순서를 따른다.** 정의 저장은 설치된 모든 프로필의 `slots.py`가 이 버전과 같을 때만 받는다(preview와 apply 양쪽). 정의를 모두 지우는 저장만은 막지 않는다(복구 경로). 재시작하지 않은 이전 프로세스는 schema 4 파일을 읽지 못해 목적 라우팅을 거절한다.
-- 슬롯을 읽을 수 있는지는 `slots.py` 파일 내용이 같은지로 판단한다. 이후 단계에서 이 파일을 바꾸면 순차 업데이트 도중에는 새 패키지와 이전 패키지가 서로를 ‘읽을 수 없음’으로 본다. v0.16.0이 `advise`를 더하며 이 파일을 바꿨으므로, 모든 프로필을 업데이트하고 재시작할 때까지 슬롯 저장이 막힌다.
-- v0.16.0 이전에 저장한 슬롯별 예비 모델 블록(schema 2)은 여섯 슬롯만 가진다. 이 정확한 키 집합은 계속 유효하며 `advise`는 꺼진 것으로 읽는다(`slots.LEGACY_SLOT_SETS`). 그 밖의 불완전하거나 남는 키 집합은 이전처럼 거절한다. 그 블록에 슬롯 하나를 패치하면 일곱 슬롯 블록으로 저장된다.
-- 요청 본문은 16,384자를 넘으면 백엔드가 읽기 전에 거절한다. 슬롯별 예비 모델은 대상 프로필마다 모든 슬롯(v0.16.0부터 일곱)을 보내므로 대상이 많고 예비 모델이 길면 한도에 닿는다. 화면이 보내기 전에 이유를 알리고 대상을 나눠 저장하도록 안내한다.
-- 실행 경로에서 슬롯 경로가 없는 설정(`slots` 키 없음)은 슬롯 도입 전 형태로 보고 등급 경로로 해석한다. 키가 있으면 반드시 그 값을 쓴다.
-- Python 테스트는 Hermes 인터프리터로 돌린다. `uv run --with pytest`만으로는 `tui_gateway` 등 코어 모듈이 없어 수집 단계에서 실패한다. pytest는 임시 경로에 따로 설치해 프로세스 안에서 `sys.path`에 추가한다(운영 환경에 설치하지 않는다).
-
-See [[model-selection]], [[profile-boundaries]], [[fallback-boundaries]], [[total-runtime-limits]] and [[index]].
+관련: [[model-selection]], [[native-delegation]], [[index]].

@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from model_router import execution_roster, native_delegation, native_settings, routing, scoped_agent, service as service_module
+from model_router import execution_roster, native_delegation, native_settings, service as service_module
 from model_router.service import Service
 from test_service import setup_home, find_profile
 
@@ -14,8 +14,6 @@ PATTERNS = {
     'service.MODEL_RE': service_module.MODEL_RE,
     'native_delegation._MODEL': native_delegation._MODEL,
     'native_settings._MODEL': native_settings._MODEL,
-    'routing.MODEL_TOKEN': routing.MODEL_TOKEN,
-    'scoped_agent.MODEL_RE': scoped_agent.MODEL_RE,
     'execution_roster._MODEL': execution_roster._MODEL,
 }
 
@@ -37,9 +35,10 @@ def test_a_profile_whose_main_model_has_a_variant_tag_routes_purposes(tmp_path, 
     row = find_profile(service.status(), 'default')
     assert row['models']['main']['model'] == 'claude-opus-5-5[1m]'
     config = service.native_route_config('default')
-    assert config['heavy']['model'] == 'claude-opus-5-5[1m]'
-    assert routing._safe_route(config['heavy'], 'heavy')['model'] == 'claude-opus-5-5[1m]'
+    # A never-set slot runs on the main model.
+    assert config['slots']['design']['model'] == 'claude-opus-5-5[1m]'
+    assert native_delegation.safe_route(config['slots']['design'], 'design')['model'] == 'claude-opus-5-5[1m]'
     # A spare model with a variant tag is accepted by the per-slot policy as well.
-    policy = native_settings.validate_policy({role: {'mode': 'custom', 'chain': [{'provider': 'claude-subscription', 'model': 'claude-opus-5[1m]'}]}
-                                              for role in native_settings.ROLES})
+    policy = native_settings.validate_policy({slot: {'mode': 'custom', 'chain': [{'provider': 'claude-subscription', 'model': 'claude-opus-5[1m]'}]}
+                                              for slot in native_settings.BUILTIN_SLOTS})
     assert all(entry['chain'][0]['model'] == 'claude-opus-5[1m]' for entry in policy.values())

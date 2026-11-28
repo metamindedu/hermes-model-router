@@ -4,9 +4,9 @@ import test from 'node:test'
 
 const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
 const route = (provider, model, reasoning = 'high') => ({ provider, model, reasoning })
-const timeoutDto = (revision, delegateTotalSeconds, routedTotalSeconds, editable = true) => ({
-  schema: 1, revision, delegate_total_seconds: delegateTotalSeconds,
-  routed_total_seconds: routedTotalSeconds, editable, split_routing_supported: true, warnings: []
+const timeoutDto = (revision, delegateTotalSeconds, slotSeconds, editable = true) => ({
+  schema: 3, revision, delegate_total_seconds: delegateTotalSeconds,
+  slot_seconds: slotSeconds, default_slot_seconds: 7200, editable, warnings: []
 })
 const profile = (name, timeouts) => ({
   name,
@@ -17,19 +17,9 @@ const profile = (name, timeouts) => ({
     title: route('fixture-provider', `${name}-title`, 'none')
   },
   actual_models: { main: route('fixture-provider', `${name}-main`), delegation: route('fixture-provider', `${name}-delegate`) },
-  routing: {
-    enabled: name === 'claire',
-    heavy: { follow: 'main', custom: null },
-    light: { follow: 'delegation', custom: null },
-    fallback: {
-      enabled: true,
-      heavy: route('saved-heavy-fallback', `${name}-heavy-fallback`),
-      light: route('saved-light-fallback', `${name}-light-fallback`)
-    }
-  },
+  routing: { enabled: name === 'claire', slots: {} },
   fallbacks: {
     native: { managed: true, editable: true, enabled: false, chain: [], actual_chain: [], drift: false, warnings: [], consent: null },
-    routing: { editable: true, enabled: false, heavy: null, light: null, consent: null },
     delegation: { managed: true, editable: true, mode: 'default', chain: [], actual_mode: 'default', actual_chain: [], drift: false, warnings: [], consent: null }
   },
   drift: [], timeouts
@@ -38,13 +28,12 @@ const statusFixture = () => ({
   revision: 12,
   current_profile: 'claire',
   fallback_capabilities: {
-    native_trigger: 'hermes_runtime', native_execution: 'continue_conversation', native_reasoning: 'profile_overrides',
-    routing_trigger: 'subscription_exhaustion_before_tools', routing_execution: 'fresh_task', routing_max_retries: 1
+    native_trigger: 'hermes_runtime', native_execution: 'continue_conversation', native_reasoning: 'profile_overrides'
   },
   profiles: [
-    profile('default', timeoutDto(3, 0, 1800)),
-    profile('claire', timeoutDto(8, 0, 3600)),
-    profile('other', timeoutDto(11, 12, 7200))
+    profile('default', timeoutDto(3, 0, {})),
+    profile('claire', timeoutDto(8, 0, { design: 3600 })),
+    profile('other', timeoutDto(11, 12, { design: 7200 }))
   ]
 })
 
@@ -164,9 +153,8 @@ function harness(initial = statusFixture()) {
 
 function profileRow(h, name) { return h.data().profiles.find(row => row.name === name) }
 function lastPreview(h) { return h.calls.filter(call => call.operation === 'preview').at(-1) }
-function expectedTimeout(profileName, revision, delegate, routed) {
-  return { profile: profileName, expected_revision: revision, delegate_total_seconds: delegate,
-    routed_light_total_seconds: routed, routed_heavy_total_seconds: routed }
+function expectedTimeout(profileName, revision, delegate, slots) {
+  return { profile: profileName, expected_revision: revision, delegate_total_seconds: delegate, slot_seconds: slots }
 }
 
 
@@ -189,7 +177,7 @@ test('timeout targets default to eligible profiles and manual empty selection su
 
 test('timeout target eligibility is DTO-backed; source-only and manual nonempty subset survive source changes and refresh', async () => {
   const data = statusFixture()
-  data.profiles.push(profile('readonly', timeoutDto(15, 99, 99, false)))
+  data.profiles.push(profile('readonly', timeoutDto(15, 99, {}, false)))
   data.profiles.push(profile('unsupported', undefined))
   const h = harness(data)
   for (const name of ['default', 'claire', 'other']) assert.equal(h.byId(`timeout-target-${name}`).props.checked, true)
@@ -230,7 +218,7 @@ function draftConversationSpare(h) {
 test('model section save ignores dirty timeout and re-enable drafts and uses stored routing baselines', async () => {
   const h = harness()
   h.input('model-main-model', 'unsaved-model-draft')
-  h.input('routed-light-total-minutes', '9999')
+  h.input('slot-timeout-design', '9999')
   h.check('routing-reenable-other', true)
   await h.click('model-section-save')
   await h.flush()
@@ -240,8 +228,7 @@ test('model section save ignores dirty timeout and re-enable drafts and uses sto
   assert.deepEqual(body.routing_targets, [])
   assert.deepEqual(body.routing_profiles, ['claire'], 'a ticked re-enable box is not part of the model save')
   assert.equal(body.models.main.model, 'unsaved-model-draft')
-  assert.equal(body.routing.heavy.follow, 'main')
-  assert.equal('fallback' in body.routing, false, 'the stored routed-job fallback is kept by omission, never sent')
+  assert.deepEqual(body.routing, { enabled: true, slots: {} }, 'the loaded routing, nothing else')
   assert.equal('timeout_updates' in body, false)
   assert.equal('fallback_updates' in body, false)
   assert.equal('fallback_confirmations' in body, false)
@@ -266,10 +253,8 @@ test('re-enable save changes activation membership only, with baseline models, r
   assert.deepEqual(body.routing_profiles, ['claire', 'other'])
   // Baseline models of the roles the page edits; the delegation role is never sent.
   assert.deepEqual(body.models, (({ delegation: _kept, ...rest }) => rest)(sourceModels))
-  assert.deepEqual(body.routing.heavy, profileRow(h, 'claire').routing.heavy)
-  assert.deepEqual(body.routing.light, profileRow(h, 'claire').routing.light)
-  assert.equal('slots' in body.routing, false)
-  assert.equal('fallback' in body.routing, false, 'the stored routed-job fallback is kept by omission, never sent')
+  // Membership only: no routing target takes the (empty) slot map of the full form.
+  assert.deepEqual(body.routing, { enabled: true, slots: {} })
   assert.equal('timeout_updates' in body, false)
   assert.equal('fallback_updates' in body, false)
   assert.equal('fallback_confirmations' in body, false)
@@ -286,8 +271,8 @@ test('an explicit timeout target action gives whole-page save one-time permissio
   await h.click('global-save')
   await h.flush()
   assert.deepEqual(lastPreview(h).body.timeout_updates, [
-    expectedTimeout('default', 3, 0, 3600),
-    expectedTimeout('other', 11, 0, 3600)
+    expectedTimeout('default', 3, 0, { design: 3600 }),
+    expectedTimeout('other', 11, 0, { design: 3600 })
   ])
   assert.equal(h.calls.filter(call => call.operation === 'apply').length, 1)
 })
@@ -310,9 +295,8 @@ test('timeout-only save copies unchanged values to a frozen manual subset and om
   assert.deepEqual(body.routing_profiles, ['claire'])
   // Baseline models of the roles the page edits; the delegation role is never sent.
   assert.deepEqual(body.models, (({ delegation: _kept, ...rest }) => rest)(sourceModels))
-  const { fallback: _retired, ...sourceRoutingWithoutFallback } = sourceRouting
-  assert.deepEqual(body.routing, sourceRoutingWithoutFallback)
-  assert.deepEqual(body.timeout_updates, [expectedTimeout('other', 11, 0, 3600)])
+  assert.deepEqual(body.routing, sourceRouting)
+  assert.deepEqual(body.timeout_updates, [expectedTimeout('other', 11, 0, { design: 3600 })])
   assert.equal('fallback_updates' in body, false)
   assert.equal('fallback_confirmations' in body, false)
   assert.equal(h.calls.filter(call => call.operation === 'preview').length, 1)
@@ -343,7 +327,7 @@ test('non-source timeout revision drift during preview cancels apply for the ent
     : { status: 'applied', revision: 13 })
   const save = h.click('timeouts-save')
   const captured = structuredClone(h.calls[0].body)
-  assert.deepEqual(captured.timeout_updates, [expectedTimeout('other', 11, 0, 3600)])
+  assert.deepEqual(captured.timeout_updates, [expectedTimeout('other', 11, 0, { design: 3600 })])
   const drifted = structuredClone(h.data())
   drifted.profiles.find(row => row.name === 'other').timeouts.revision = 12
   h.setData(drifted)
@@ -397,7 +381,7 @@ for (const action of ['individual-save', 'new-edit', 'new-target-action']) {
     if (action !== 'new-edit') h.check('timeout-copy-all', true)
     await h.click(action === 'individual-save' ? 'timeouts-save' : 'global-save')
     await h.flush()
-    assert.deepEqual(lastPreview(h).body.timeout_updates, [expectedTimeout('claire', 8, action === 'new-edit' ? 1260 : 12, 7200)])
+    assert.deepEqual(lastPreview(h).body.timeout_updates, [expectedTimeout('claire', 8, action === 'new-edit' ? 1260 : 12, { design: 7200 })])
   })
 }
 
@@ -451,7 +435,7 @@ test('the page-made time-limit default follows a newly eligible profile until th
 })
 
 // v0.15.0: with the service capability the time-limit save sends only the changed fields.
-test('partial: a time-limit save sends only the changed field to each target; copy-all sends all three', async () => {
+test('partial: a time-limit save sends only the changed field to each target; copy-all sends every value', async () => {
   const data = statusFixture(); data.partial_save_schema = 1
   const h = harness(data)
   h.click('timeout-target-none'); h.check('timeout-target-claire', true); h.check('timeout-target-other', true)
@@ -472,22 +456,23 @@ test('partial: a time-limit save sends only the changed field to each target; co
   g.click('timeout-target-none'); g.check('timeout-target-other', true); g.check('timeout-copy-all', true)
   await g.click('timeouts-save')
   await g.flush()
-  assert.deepEqual(Object.keys(lastPreview(g).body.timeout_updates[0]).sort(),
-    ['delegate_total_seconds', 'expected_revision', 'profile', 'routed_heavy_total_seconds', 'routed_light_total_seconds'])
+  const copied = lastPreview(g).body.timeout_updates[0]
+  assert.deepEqual(Object.keys(copied).sort(), ['delegate_total_seconds', 'expected_revision', 'profile', 'slot_seconds'])
+  assert.deepEqual(copied.slot_seconds, { design: 3600, 'code-complex': null, 'code-simple': null, 'verify-simple': null, 'verify-complex': null, 'computer-use': null, advise: null },
+    'a copy of everything also clears each limit the loaded profile does not set')
 })
 
 test('partial: the whole-page save uses the same partial forms', async () => {
   const data = statusFixture(); data.partial_save_schema = 1
   const h = harness(data)
   h.click('timeout-target-none'); h.check('timeout-target-other', true)
-  h.input('routed-heavy-total-minutes', '30')
+  h.input('slot-timeout-verify-complex', '30')
   h.input('model-main-model', 'page-wide-main')
   await h.click('global-save')
   await h.flush()
   const body = lastPreview(h).body
   assert.equal(body.partial_save_schema, 1)
-  assert.equal(Object.hasOwn(body.routing, 'heavy'), false)
-  assert.equal(Object.hasOwn(body.routing, 'light'), false)
-  assert.deepEqual(body.timeout_updates.map(update => Object.keys(update).sort()), [['expected_revision', 'profile', 'routed_heavy_total_seconds']])
+  assert.deepEqual(Object.keys(body.routing), ['enabled'])
+  assert.deepEqual(body.timeout_updates, [{ profile: 'other', expected_revision: 11, slot_seconds: { 'verify-complex': 1800 } }])
   assert.equal(body.models.main.model, 'page-wide-main')
 })

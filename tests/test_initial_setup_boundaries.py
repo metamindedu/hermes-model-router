@@ -34,7 +34,7 @@ def test_real_initial_setup_boundary(tmp_path, case):
         case = os.environ['INITIAL_BOUNDARY_CASE']
         files = subprocess.check_output(['git','ls-files','-z','--cached','--others','--exclude-standard'],cwd=repo).decode().split('\0')
         base = {'model':{'provider':'openai-codex','default':'offline-fixture'},'agent':{'reasoning_effort':'high'},
-                'delegation':{'model':'offline-light','provider':'openai-codex'}, 'plugins':{'enabled':['model-router']},
+                'delegation':{'model':'offline-delegate','provider':'openai-codex'}, 'plugins':{'enabled':['model-router']},
                 'skills':{'disabled':[]}, 'unrelated':{'keep':'opaque'}}
         for name in ('default','target'):
             home = root if name == 'default' else root/'profiles'/name
@@ -119,7 +119,7 @@ def test_real_initial_setup_boundary(tmp_path, case):
             assert not writes
         elif case in ('modified_enable','modified_select'):
             assert dto('target')['action']==('enable' if case=='modified_enable' else 'select_backend'),dto('target')
-            for filename in ['model_router/native_watchdog.py','model_router/fast_inheritance.py','model_router/routing.py','lib/run_routed_agent.py']:
+            for filename in ['model_router/native_watchdog.py','model_router/fast_inheritance.py','model_router/slots.py','model_router/timeouts.py']:
                 path=package/filename; old=path.read_bytes()
                 path.write_bytes(old+b'\nraise RuntimeError("fixture custom code must never execute")\n')
                 status=dto('target')

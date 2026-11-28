@@ -7,7 +7,6 @@ import os
 def register(ctx):
     from hermes_constants import get_hermes_home, set_hermes_home_override, reset_hermes_home_override
     from .model_router.service import Service
-    from .model_router.routing import Router
 
     home = Path(get_hermes_home())
 
@@ -110,31 +109,8 @@ def register(ctx):
 
     ctx.register_cli_command("model-router", "Profile model settings and task routing", cli_setup, cli_handler)
 
-    # Observers are inert outside a validated plugin-owned attempt. Registration
-    # does not change profile settings or make ordinary requests route-scoped.
-    from .model_router.attempt_observer import record_event
-    def make_observer(event_name):
-        def observer(**payload):
-            # Each hook belongs to its loading profile. The observer validates
-            # an environment-bound child request, so reject a foreign manager
-            # before its own module can record that child's API events.
-            bound_home = os.environ.get("HERMES_HOME")
-            try:
-                if not bound_home or Path(bound_home).resolve(strict=True) != home.resolve(strict=True):
-                    return
-            except (OSError, RuntimeError):
-                return
-            token = set_hermes_home_override(home)
-            try:
-                record_event(event_name, **payload)
-            finally:
-                reset_hermes_home_override(token)
-        return observer
-    for event_name in ("pre_api_request", "post_api_request", "api_request_error", "pre_tool_call", "post_tool_call"):
-        ctx.register_hook(event_name, make_observer(event_name))
-
     # Ordinary native delegation has its own opt-in total limit, independent
-    # of Heavy/Light routing membership. Never mutate native inactivity config.
+    # of routing membership. Never mutate native inactivity config.
     from .model_router.native_watchdog import register_native_watchdog
     register_native_watchdog(ctx, home)
 
@@ -164,47 +140,26 @@ def register(ctx):
         ctx.register_skill(
             "adaptive-coding-orchestration",
             Path(__file__).parent / "skills/adaptive-coding-orchestration/SKILL.md",
-            "Profile-enabled coding and complex non-coding orchestration: Main handles small bounded changes directly; delegate implementation only for worthwhile parallel work; retain required Heavy review.",
+            "Profile-enabled coding and complex non-coding orchestration: Main handles small bounded changes directly; delegate implementation only for worthwhile parallel work; keep required reviews.",
         )
 
     def handler(args, **kwargs):
         try:
-            def run(service):
-                action = args.get("action")
-                if action == "start":
-                    return {"error": "start_retired", "message": "New jobs use native delegate_task with an explicitly selected model-router backend; standalone starts are retired."}
-                if action == "config":
-                    return service.routing_config(service.active_profile())
-                if action == "status":
-                    return Router(service).status(args.get("job_id", ""))
-                if action == "join":
-                    if set(args) - {"action", "job_id", "wait_timeout"}:
-                        raise ValueError("unsupported join fields; wait_timeout is not a job timeout")
-                    from .model_router.runtime_tracking import capture_runtime, route_session_context
-                    profile = service.active_profile()
-                    with route_session_context(session_id=kwargs.get("session_id", ""), expected_profile=profile):
-                        runtime = capture_runtime(task_id=kwargs.get("task_id") or "", expected_profile=profile)
-                        return Router(service, runtime=runtime).join(
-                            args.get("job_id", ""), wait_timeout=args.get("wait_timeout"))
-                raise ValueError("action must be config, status, or join")
-            return json.dumps(scoped(run), ensure_ascii=False)
+            if set(args) != {"action"} or args.get("action") != "config":
+                raise ValueError("action must be config")
+            return json.dumps(scoped(lambda service: service.routing_config(service.active_profile())), ensure_ascii=False)
         except (ValueError, PermissionError, KeyError) as exc:
             return json.dumps({"error": "invalid_or_denied", "message": str(exc)}, ensure_ascii=False)
         except Exception:
-            return json.dumps({"error": "route_operation_failed", "message": "작업 상태를 확인하세요. 모델 실행/설정 변경은 자동 재시도하지 않습니다."}, ensure_ascii=False)
+            return json.dumps({"error": "route_operation_failed", "message": "라우팅 설정을 읽지 못했습니다. 설정 화면에서 상태를 확인하세요."}, ensure_ascii=False)
 
     schema = {
         "name": "coding_route",
-        "description": "Read effective Heavy/Light roles or inspect/join historical process-backed jobs. New work uses native delegate_task with the selected model-router, model-router-profiles or model-router-auto backend, never coding_route start. Main handles small bounded changes directly, including tests. Ordinary delegation needs a concrete benefit: a different-model route the task needs, heavy context, long runtime, or at least two substantive independent workstreams; on Main's own model, design stays with Main unless explicitly requested by the user; required Heavy/independent review remains mandatory. ask_advisor is a read-only same-turn consultation of the advise slot at a decision point, not delegation or a required review. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
+        "description": "Read this profile's task slots: which model each purpose runs on and its runtime limit. New work uses native delegate_task with the selected model-router, model-router-profiles or model-router-auto backend. Main handles small bounded changes directly, including tests. Ordinary delegation needs a concrete benefit: a different-model route the task needs, large context, long runtime, or at least two substantive independent workstreams; on Main's own model, design stays with Main unless explicitly requested by the user; required reviews (semantic-final, independent-review) remain mandatory. ask_advisor is a read-only same-turn consultation of the advise slot at a decision point, not delegation or a required review. Read model-router:adaptive-coding-orchestration. config is not proof that this session selected a native backend. Native route reports are runtime-reported identity, not successful-response evidence or semantic GO. This tool never launches work or changes settings.",
         "parameters": {
             "type": "object", "additionalProperties": False,
-            "properties": {
-                "action": {"type": "string", "enum": ["config", "status", "join"]},
-                "wait_timeout": {"type": "integer", "minimum": 1, "description": "Legacy join only: seconds for this bounded wait, never a child's total runtime. Stop/steer interrupts; no automatic rejoin."},
-                "job_id": {"type": "string", "description": "Historical process-backed job ID, never a native subagent handle."},
-            },
+            "properties": {"action": {"type": "string", "enum": ["config"]}},
             "required": ["action"],
         },
     }
-    # Preserve historical results even when new purpose routing is disabled.
     ctx.register_tool(name="coding_route", toolset="model_router", schema=schema, handler=handler, check_fn=lambda: True)

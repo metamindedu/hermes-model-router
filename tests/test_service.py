@@ -18,20 +18,15 @@ def route(provider: str, model: str, reasoning: str = "medium") -> dict[str, str
 
 def make_models(suffix: str = "") -> dict[str, dict[str, str]]:
     return {
-        "main": route("openai-codex", f"heavy{suffix}", "high"),
-        "delegation": route("deepseek", f"light{suffix}", "low"),
-        "compression": route("openai-codex", f"heavy{suffix}", "high"),
-        "title": route("openai-codex", f"heavy{suffix}", "high"),
+        "main": route("openai-codex", f"main-model{suffix}", "high"),
+        "delegation": route("deepseek", f"delegation-model{suffix}", "low"),
+        "compression": route("openai-codex", f"main-model{suffix}", "high"),
+        "title": route("openai-codex", f"main-model{suffix}", "high"),
     }
 
 
 def make_routing(enabled: bool = False) -> dict:
-    return {
-        "enabled": enabled,
-        "heavy": {"follow": "main", "custom": None},
-        "light": {"follow": "delegation", "custom": None},
-        "fallback": {"enabled": False, "heavy": None, "light": None},
-    }
+    return {"enabled": enabled, "slots": {}}
 
 
 class FakeCLI:
@@ -41,10 +36,10 @@ class FakeCLI:
             suffix = str(index)
             self.values[profile] = {
                 "model.provider": "openai-codex",
-                "model.default": f"heavy{suffix}",
+                "model.default": f"main-model{suffix}",
                 "agent.reasoning_effort": "high",
                 "delegation.provider": "deepseek",
-                "delegation.model": f"light{suffix}",
+                "delegation.model": f"delegation-model{suffix}",
                 "delegation.reasoning_effort": "low",
                 "auxiliary.compression.provider": "auto",
                 "auxiliary.compression.model": "",
@@ -125,8 +120,7 @@ def test_initialize_preserves_models_and_only_toggles_selected_skill(tmp_path, m
     assert p1["models"] == make_models("1")
     assert p1["routing"]["enabled"] is True
     assert p1["drift"] == []
-    assert service.routing_config("p1")["light"] == make_models("1")["delegation"]
-    assert service.routing_config("p1")["heavy"] == make_models("1")["main"]
+    assert service.routing_config("p1")["slots"]["design"] == make_models("1")["main"]
     assert service.routing_config("p2")["enabled"] is False
     assert cli.values["default"]["skills.disabled"] == ["unrelated-skill", SKILL_NAME]
     assert cli.values["p1"]["skills.disabled"] == ["unrelated-skill"]
@@ -135,17 +129,6 @@ def test_initialize_preserves_models_and_only_toggles_selected_skill(tmp_path, m
     assert cli.values["default"]["model.default"] == original["default"]["model.default"]
     assert not (root / "profiles" / "p1" / "skills" / SKILL_NAME / "SKILL.md").exists()
     assert not (root / "profiles" / "p2" / "skills" / SKILL_NAME / "SKILL.md").exists()
-
-
-def test_initialize_imports_only_explicit_fallback_routes(tmp_path, monkeypatch):
-    root, cli = setup_home(tmp_path, monkeypatch)
-    service = Service(root=root, writer=cli.writer)
-    fallbacks = {"enabled": True, "heavy": route("xiaomi", "mimo/pro:1", "high"), "light": route("deepseek", "flash:free", "low")}
-
-    status = service.initialize(["p1"], fallbacks={"p1": fallbacks})
-
-    assert find_profile(status, "p1")["routing"]["fallback"] == fallbacks
-    assert find_profile(status, "p2")["routing"]["fallback"] == {"enabled": False, "heavy": None, "light": None}
 
 
 def test_preview_apply_projects_models_only_to_targets_and_clears_existing_stale_overrides(tmp_path, monkeypatch):
@@ -242,12 +225,11 @@ def test_preview_rejects_extra_fields_unsafe_tokens_and_collapsed_routes(tmp_pat
         service.preview(unsafe)
     collapsed = copy.deepcopy(base)
     same = route("one", "same-model")
-    collapsed["routing"]["heavy"] = {"follow": "custom", "custom": same}
-    collapsed["routing"]["light"] = {"follow": "custom", "custom": same}
+    collapsed["routing"]["slots"] = {"design": {"follow": "custom", "custom": same}, "verify-complex": {"follow": "custom", "custom": same}}
     plan = service.preview(collapsed)
     assert service.apply(plan['plan_id'])['status'] == 'applied'
     effective = service.routing_config('p1')
-    assert effective['heavy'] == effective['light'] == same
+    assert effective['slots']['design'] == effective['slots']['verify-complex'] == same
 
 
 def test_new_config_backed_profile_is_off_until_explicitly_selected(tmp_path, monkeypatch):
@@ -262,7 +244,7 @@ def test_new_config_backed_profile_is_off_until_explicitly_selected(tmp_path, mo
     config = service.routing_config("newone")
 
     assert config["enabled"] is False
-    assert config["heavy"]["model"] == cli.values["newone"]["model.default"]
+    assert config["slots"]["design"]["model"] == cli.values["newone"]["model.default"]
     with pytest.raises(ValueError, match="invalid profile name"):
         service.routing_config("../p1")
 

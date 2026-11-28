@@ -1,5 +1,5 @@
 # Hermes Model Router
-Read PLAN.md before changes. One native Hermes plugin: UI + safe settings backend + gated routing + bundled skill. No Hermes core changes, no secrets in output/repo. No live profile writes from implementation workers. Use supported config CLI for settings. Preserve unrelated state. Unit/integration tests use fake homes and fake subprocesses. Heavy independent final review required before live installation. Never claim model identity from requested flags alone.
+Read PLAN.md before changes. One native Hermes plugin: UI + safe settings backend + gated routing + bundled skill. No Hermes core changes, no secrets in output/repo. No live profile writes from implementation workers. Use supported config CLI for settings. Preserve unrelated state. Unit/integration tests use fake homes and fake subprocesses. A fresh `independent-review` child is required before live installation. Never claim model identity from requested flags alone.
 
 ## Common PR/CI policy
 

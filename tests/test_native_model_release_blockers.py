@@ -55,7 +55,7 @@ def test_status_and_custom_route_survive_a_list_valued_title_model(svc):
     item = row(service.status())
     assert item["model_roles"]["title"]["state"] == "unverified" and item["model_roles"]["title"]["reason"] == "invalid"
     assert "title" not in item["models"]
-    assert item["models"]["main"] == route("openai-codex", "heavy0", "high")
+    assert item["models"]["main"] == route("openai-codex", "main-model0", "high")
     assert set(item["models"]) == {"main", "delegation", "compression"}
     # The other roles still save normally (a main edit is unaffected by the broken title).
     plan = service.preview(native_body(service, {"main": route("openai-codex", "next-main", "high")}))
@@ -255,7 +255,7 @@ def test_extra_body_model_is_not_shown_as_the_configured_model(svc):
 def test_fallback_plan_refuses_a_same_name_alias_added_after_preview(svc):
     service, fake, _ = svc
     plan = service.fallback_preview(fallback_request(service, {"enabled": True, "chain": chain("spare")}, [confirmation("native")]))
-    fake.values["default"]["model_aliases"] = {"heavy0": {"provider": "xiaomi", "model": "spare"}}
+    fake.values["default"]["model_aliases"] = {"main-model0": {"provider": "xiaomi", "model": "spare"}}
     with pytest.raises(RevisionConflict):
         service.apply(plan["plan_id"])
     assert fake.calls == []
@@ -268,7 +268,7 @@ def test_fallback_preview_refuses_alias_added_as_primary_is_projected(svc, monke
 
     def project_and_edit(*args, **kwargs):
         result = project(*args, **kwargs)
-        fake.values["default"]["model_aliases"] = {"heavy0": {"provider": "xiaomi", "model": "spare"}}
+        fake.values["default"]["model_aliases"] = {"main-model0": {"provider": "xiaomi", "model": "spare"}}
         return result
 
     monkeypatch.setattr(service, "_native_models", project_and_edit)
@@ -278,8 +278,8 @@ def test_fallback_preview_refuses_alias_added_as_primary_is_projected(svc, monke
 
 
 @pytest.mark.parametrize("edit", [
-    {"agent.reasoning_overrides": {"heavy0": "low"}},
-    {"providers": {"heavy0-host": {"base_url": "https://x.example"}}},
+    {"agent.reasoning_overrides": {"main-model0": "low"}},
+    {"providers": {"main-model0-host": {"base_url": "https://x.example"}}},
     {"model.api_mode": "chat_completions"},
 ])
 def test_fallback_plan_refuses_other_main_dependency_changes(svc, edit):
@@ -311,7 +311,7 @@ def test_main_model_save_refuses_a_same_name_alias_added_after_preview(svc):
     fake.values["default"]["model.aliases"] = {"next-main": {"provider": "xiaomi", "model": "other"}}
     with pytest.raises(RevisionConflict):
         service.apply(plan["plan_id"])
-    assert fake.calls == [] and fake.values["default"]["model.default"] == "heavy0"
+    assert fake.calls == [] and fake.values["default"]["model.default"] == "main-model0"
 
 
 def test_title_save_refuses_a_reasoning_extra_body_added_after_preview_but_not_main_edits(svc):

@@ -75,7 +75,7 @@ def test_status_reports_each_task_chain_with_its_flags(env):
     assert set(rows["default"]) == {"compression", "title"}
     assert rows["default"]["compression"] == {"schema": 1, "key": COMPRESSION, "editable": True, "present": False, "chain": [],
                                               "actual_chain": [], "drift": False, "managed_overlay": False, "env_masked": False,
-                                              "primary": {"provider": "openai-codex", "model": "heavy0"}, "warnings": []}
+                                              "primary": {"provider": "openai-codex", "model": "main-model0"}, "warnings": []}
     assert rows["p1"]["title"]["chain"] == [spare("deepseek", "flash")]
     assert rows["p1"]["title"]["present"] is True
     # A value Hermes resolves differently (here an overlay) is drift, and an overlaid key is read-only.
@@ -137,7 +137,7 @@ def test_setting_spare_models_needs_the_cost_confirmation_turning_them_off_does_
 def test_a_spare_equal_to_the_task_primary_is_refused_as_hermes_resolves_it(env):
     service, fake, _state = env
     # provider 'auto' and no model: the task runs on the main model, so the main model is refused.
-    main = spare("OpenAI-Codex", "HEAVY0")
+    main = spare("OpenAI-Codex", fake.values["default"]["model.default"].upper())
     with pytest.raises(ValueError, match="differ from the task's primary"):
         service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"compression": [main]}}]))
     # A pinned task route is its own primary: the main model is then a valid spare, the pin is not.
@@ -145,7 +145,7 @@ def test_a_spare_equal_to_the_task_primary_is_refused_as_hermes_resolves_it(env)
     fake.values["default"]["auxiliary.compression.model"] = "flash"
     with pytest.raises(ValueError, match="differ from the task's primary"):
         service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"compression": [spare("deepseek", "FLASH")]}}]))
-    plan = service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"compression": [spare("openai-codex", "heavy0")]}}]))
+    plan = service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"compression": [spare("openai-codex", "main-model0")]}}]))
     assert plan["changes"][0]["field"] == COMPRESSION
     assert fake.calls == []
 
@@ -301,7 +301,7 @@ def test_whole_page_save_carries_auxiliary_chains_checked_against_the_new_main_m
     # The plan pins each saved role to the route the page showed: compression stays on the old main
     # model while main moves to xiaomi/new-main, so the old main model is now that task's own model.
     with pytest.raises(ValueError, match="differ from the task's primary"):
-        service.preview({**request, "fallback_updates": [{"profile": "default", "auxiliary_fallback": {"compression": [spare("openai-codex", "heavy0")]}}]})
+        service.preview({**request, "fallback_updates": [{"profile": "default", "auxiliary_fallback": {"compression": [spare("openai-codex", "main-model0")]}}]})
     plan = service.preview(request)
     receipt = service.apply(plan["plan_id"])
     assert receipt["status"] == "applied", receipt
@@ -322,8 +322,8 @@ def test_auto_auto_runs_on_the_main_model_so_the_main_model_is_refused(env):
     service, fake, _state = env
     fake.values["default"]["auxiliary.title_generation.model"] = "AUTO"
     with pytest.raises(ValueError, match="differ from the task's primary"):
-        service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"title": [spare("openai-codex", "heavy0")]}}]))
-    assert profile(service.status())["auxiliary_fallbacks"]["title"]["primary"] == {"provider": "openai-codex", "model": "heavy0"}
+        service.fallback_preview(body(service, [{"profile": "default", "auxiliary_fallback": {"title": [spare("openai-codex", "main-model0")]}}]))
+    assert profile(service.status())["auxiliary_fallbacks"]["title"]["primary"] == {"provider": "openai-codex", "model": "main-model0"}
 
 
 def test_a_provider_without_a_model_is_not_known_here_so_an_equal_spare_is_not_refused(env):
@@ -396,7 +396,7 @@ def test_an_omitted_delegation_role_keeps_the_canonical_store_route_exactly(env)
     service.store_path.write_text(json.dumps(data), encoding="utf-8")
     status = service.status()
     row = profile(status)
-    assert row["actual_models"]["delegation"]["model"] == "light0", "the native value differs already"
+    assert row["actual_models"]["delegation"]["model"] == "delegation-model0", "the native value differs already"
     models = {role: copy.deepcopy(item) for role, item in row["models"].items() if role != "delegation"}
     models["title"] = {"provider": "deepseek", "model": "title-only", "reasoning": "low"}
     request = {"expected_revision": status["revision"], "profile": "default", "save_scope": "models", "models": models,
@@ -550,5 +550,5 @@ def test_an_unreadable_task_row_has_the_same_fields_as_a_readable_one(env, monke
     row = profile(service.status())["auxiliary_fallbacks"]["compression"]
     assert set(row) == set(readable)
     assert row["editable"] is False and row["env_masked"] is False and row["chain"] == [] and row["actual_chain"] == []
-    assert row["primary"] == readable["primary"] == {"provider": "openai-codex", "model": "heavy0"}
+    assert row["primary"] == readable["primary"] == {"provider": "openai-codex", "model": "main-model0"}
     assert row["warnings"] == ["auxiliary_fallback_unavailable"]

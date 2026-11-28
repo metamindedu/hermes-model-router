@@ -1,6 +1,7 @@
 import json
 import pytest
 from model_router import native_watchdog as nw
+from test_native_delegation import Service as SlotService
 from test_native_watchdog import NativeHarness, ManualScheduler
 
 
@@ -9,10 +10,9 @@ def routed(tmp_path, monkeypatch):
     h = NativeHarness(tmp_path, total=0)
     monkeypatch.setattr(nw, '_dispatch_backend', lambda parent: 'model-router')
     monkeypatch.setattr('model_router.native_delegation._origin', lambda home, service: 'default')
-    class Service:
-        def routing_config(self, profile):
-            return {'enabled': True, 'light_timeout_seconds': .5, 'heavy_timeout_seconds': 10800}
-    monkeypatch.setattr('model_router.service.Service', Service)
+    service = SlotService(tmp_path)
+    service.config['slot_timeout_seconds'].update({'code-simple': .5, 'design': 10800})
+    monkeypatch.setattr('model_router.service.Service', lambda: service)
     return h
 
 
@@ -22,10 +22,11 @@ def dispatch(h, tasks, callback):
 
 def test_mixed_budgets_exact_goal_async_and_queue(routed):
     h = routed
-    tasks = [{'goal': 'perform the light task', 'purpose': 'mechanical'}, {'goal': 'perform the heavy task', 'purpose': 'plan'}]
+    tasks = [{'goal': 'apply a mechanical edit', 'purpose': 'mechanical'}, {'goal': 'design the implementation plan', 'purpose': 'plan'}]
     def call():
-        assert nw.verify_routed_binding(h.home, tasks[0]['goal'], 'light', .5)
-        assert not nw.verify_routed_binding(h.home, tasks[0]['goal'], 'heavy', 10800)
+        assert nw.verify_routed_binding(h.home, tasks[0]['goal'], 'code-simple', .5)
+        assert not nw.verify_routed_binding(h.home, tasks[0]['goal'], 'design', .5)
+        assert not nw.verify_routed_binding(h.home, tasks[0]['goal'], 'code-simple', 10800)
         for i in (1, 0):
             h.watchdog.on_subagent_start(parent_session_id='parent-A', child_session_id=f'c{i}', child_subagent_id=f'sa{i}', child_goal=tasks[i]['goal'])
         return json.dumps({'status': 'dispatched'})
@@ -62,7 +63,7 @@ def test_duplicate_same_policy_allowed_and_zero_override(routed):
     tasks = [{'goal': goal, 'purpose': 'mechanical', 'total_timeout_seconds': 0},
              {'goal': goal, 'purpose': 'mechanical', 'total_timeout_seconds': 0}]
     def call():
-        assert nw.verify_routed_binding(routed.home, goal, 'light', 0)
+        assert nw.verify_routed_binding(routed.home, goal, 'code-simple', 0)
         routed.watchdog.on_subagent_start(parent_session_id='parent-A', child_session_id='child', child_subagent_id='sa', child_goal=goal)
         return 'ok'
     assert dispatch(routed, tasks, call) == 'ok'
@@ -103,7 +104,7 @@ def test_scheduler_stays_alive_while_dispatch_is_resolving_before_first_child(ro
         scheduler = routed.watchdog._scheduler
         routed.watchdog.poll_once()
         assert routed.watchdog._scheduler is scheduler
-        assert nw.verify_routed_binding(routed.home, goal, 'heavy', 10800)
+        assert nw.verify_routed_binding(routed.home, goal, 'design', 10800)
         return json.dumps({'results': [], 'status': 'completed'})
     dispatch(routed, [{'goal': goal, 'purpose': 'plan'}], call)
     assert routed.watchdog._scheduler is None
@@ -141,18 +142,12 @@ def test_actual_core_dispatch_with_stubbed_child_and_no_provider_calls(tmp_path,
     ctx.register_hook('subagent_start', h.watchdog.on_subagent_start)
     monkeypatch.setattr(plugins, '_delivery_manager', lambda: manager)
     monkeypatch.setattr('hermes_constants.get_hermes_home', lambda: tmp_path)
-    class Service:
-        root = tmp_path
-        def active_profile(self): return 'default'
-        def routing_config(self, profile):
-            return {'enabled': True, 'light': {'provider': 'p', 'model': 'light', 'reasoning': 'low'},
-                    'heavy': {'provider': 'p', 'model': 'heavy', 'reasoning': 'high'},
-                    'light_timeout_seconds': 2, 'heavy_timeout_seconds': 10800}
-        native_route_config = routing_config
-    monkeypatch.setattr('model_router.service.Service', Service)
-    provider = ModelRouterProvider(tmp_path, Service)
+    service = SlotService(tmp_path)
+    service.config['slot_timeout_seconds'].update({'code-simple': 2, 'design': 10800})
+    monkeypatch.setattr('model_router.service.Service', lambda: service)
+    provider = ModelRouterProvider(tmp_path, lambda: service)
     monkeypatch.setattr(routes, '_active_provider', lambda config: provider)
-    monkeypatch.setattr(dt, '_load_config', lambda: {'backend': 'model-router'})
+    monkeypatch.setattr(dt.delegate_tool_config, '_load_config', lambda: {'backend': 'model-router'})
     monkeypatch.setattr(dt, '_get_max_spawn_depth', lambda: 5)
     monkeypatch.setattr(dt, '_get_max_concurrent_children', lambda: 5)
     monkeypatch.setattr(dt, '_oneshot_spawn_budget', lambda *args: None)
@@ -160,21 +155,21 @@ def test_actual_core_dispatch_with_stubbed_child_and_no_provider_calls(tmp_path,
     monkeypatch.setattr(live, 'create_live_transcripts', lambda *args, **kwargs: (None, [], []))
     monkeypatch.setattr(dt, '_announce_batch', lambda *args: None)
     monkeypatch.setattr(dt, '_capture_origin', lambda: (None, None, None, None, False))
-    monkeypatch.setattr(dt, '_resolve_delegation_credentials', lambda route, parent: {'provider': route['provider'], 'model': route['model'], 'base_url': None, 'api_key': None, 'api_mode': None})
+    monkeypatch.setattr(routes, '_resolve_delegation_credentials', lambda route, parent: {'provider': route['provider'], 'model': route['model'], 'base_url': None, 'api_key': None, 'api_mode': None})
     built = []
     def build(**kw):
         built.append(kw)
         manager.invoke_hook('subagent_start', parent_session_id='parent-A', child_session_id=f"c{len(built)}", child_subagent_id=f"s{len(built)}", child_goal=kw['goal'])
         return SimpleNamespace(tool_progress_callback=None)
     monkeypatch.setattr(dt, '_build_child_preserving_parent_tools', build)
-    monkeypatch.setattr('tools.delegate_tool_tuning.pin_child_service_tier', lambda *args: None)
+    monkeypatch.setattr(dt, 'pin_child_service_tier', lambda *args: None)
     monkeypatch.setattr(dt, '_run_batch', lambda batch, background: json.dumps({'status': 'dispatched'}))
-    tasks = [{'goal': 'refused invalid purpose task', 'purpose': invalid}, {'goal': 'perform the light task', 'purpose': 'mechanical'}, {'goal': 'perform the heavy task', 'purpose': 'plan'}]
+    tasks = [{'goal': 'refused invalid purpose task', 'purpose': invalid}, {'goal': 'apply a mechanical edit', 'purpose': 'mechanical'}, {'goal': 'design the implementation plan', 'purpose': 'plan'}]
     args = {'tasks': tasks}
     try:
         result = middleware.run_tool_execution_middleware('delegate_task', args, lambda value: dt.delegate_task(**value, parent_agent=parent), session_id='parent-A')
-        assert json.loads(result)['status'] == 'dispatched'
-        assert [item['model'] for item in built] == ['light', 'heavy']
+        assert json.loads(result).get('status') == 'dispatched', result
+        assert [item['model'] for item in built] == ['model-code-simple', 'model-design']
         assert all(item['routing_cfg']['fallback_providers'] == [] for item in built)
         assert h.watchdog.children['s1'].total_seconds == 2
         assert h.watchdog.children['s2'].total_seconds == 10800

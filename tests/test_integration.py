@@ -11,16 +11,15 @@ import pytest
 import yaml
 
 from model_router.service import Service, ServiceError
-from model_router.processes import is_process_alive
 
 
 def make_home(tmp_path):
     root = tmp_path / "hermes"; root.mkdir()
     (root / "config.yaml").write_text(yaml.safe_dump({
-        "model": {"provider": "openai-codex", "default": "heavy-test"},
+        "model": {"provider": "openai-codex", "default": "main-test"},
         "agent": {"reasoning_effort": "medium"},
-        "delegation": {"provider": "openai-codex", "model": "light-test", "reasoning_effort": "high"},
-        "auxiliary": {"compression": {"provider": "openai-codex", "model": "light-test", "reasoning_effort": "low"}, "title_generation": {"provider": "openai-codex", "model": "light-test", "reasoning_effort": "none"}},
+        "delegation": {"provider": "openai-codex", "model": "delegate-test", "reasoning_effort": "high"},
+        "auxiliary": {"compression": {"provider": "openai-codex", "model": "delegate-test", "reasoning_effort": "low"}, "title_generation": {"provider": "openai-codex", "model": "delegate-test", "reasoning_effort": "none"}},
         "skills": {"disabled": []},
     }), encoding="utf-8")
     return root
@@ -80,18 +79,6 @@ def test_plan_does_not_store_private_endpoint_and_clears_before_provider(tmp_pat
     assert events.index("model.base_url") < events.index("model.provider")
 
 
-def test_windows_pid_probe_does_not_terminate_child():
-    child = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(20)"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    try:
-        assert is_process_alive(child.pid)
-        assert child.poll() is None
-        assert is_process_alive(child.pid)
-        assert child.poll() is None
-    finally:
-        child.terminate(); child.wait(timeout=10)
-    assert not is_process_alive(child.pid)
-
-
 def run_launcher(command, env, timeout=30):
     """Use file handles instead of inherited pipes; failures remain failures."""
     import tempfile
@@ -129,10 +116,10 @@ def test_actual_native_cli_dispatcher_writes_only_isolated_home(tmp_path):
     service = Service(root)
     service.initialize(["default"])
     body = payload(service); body["model_targets"] = ["default"]
-    body["models"]["main"]["model"] = "isolated-new-heavy"
+    body["models"]["main"]["model"] = "isolated-new-main"
     plan = service.preview(body)
     receipt = service.apply(plan["plan_id"])
     assert receipt["status"] == "applied", receipt
-    assert yaml.safe_load((root / "config.yaml").read_text())["model"]["default"] == "isolated-new-heavy"
-    assert yaml.safe_load((other / "config.yaml").read_text())["model"]["default"] == "heavy-test"
+    assert yaml.safe_load((root / "config.yaml").read_text())["model"]["default"] == "isolated-new-main"
+    assert yaml.safe_load((other / "config.yaml").read_text())["model"]["default"] == "main-test"
     assert service.status()["profiles"][0]["drift"] == []

@@ -1,5 +1,5 @@
 name: model-router
-version: 0.17.0
+version: 0.18.0
 requires_hermes: ">=0.23.1"
 kind: standalone
 description: "Native delegation visibility, opt-in Gateway-owned profile jobs, operator-separated permissions, and profile model controls"
@@ -11,7 +11,6 @@ provides_tools:
 provides_hooks:
   - pre_api_request
   - post_api_request
-  - api_request_error
   - pre_tool_call
   - post_tool_call
   - subagent_start

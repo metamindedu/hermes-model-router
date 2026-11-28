@@ -38,8 +38,8 @@ def test_initial_does_not_activate_dormant_auto_cost_or_profile_authority(setup_
     service, calls, _, _ = setup_fixture
     value = config(service)
     if kind == 'paid':
-        policy = ns.default_policy(); policy['heavy'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'spare'}]}
-        value['delegation']['backends']['model-router-auto'] = ns.build_policy_block('default', policy, True, backend='model-router-auto')
+        policy = ns.default_slot_policy(); policy['design'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'spare'}]}
+        value['delegation']['backends']['model-router-auto'] = ns.build_slot_policy_block('default', policy, True, backend='model-router-auto')
     elif kind == 'profiles':
         value['delegation']['backends']['model-router-profiles'] = {'schema': 1, 'profiles': [{'name': 'p1', 'description': ''}], 'default': None}
     elif kind == 'opaque_profiles': value['delegation']['backends']['model-router-profiles'] = {'unrecognized': 'preserve'}
@@ -53,8 +53,8 @@ def test_initial_does_not_activate_dormant_auto_cost_or_profile_authority(setup_
 def test_unrelated_old_model_only_cost_policy_remains_inactive_and_preserved(setup_fixture):
     service, calls, _, _ = setup_fixture
     value = config(service)
-    policy = ns.default_policy(); policy['heavy'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'old-spare'}]}
-    value['delegation']['backends']['model-router'] = ns.build_policy_block('default', policy, True)
+    policy = ns.default_slot_policy(); policy['design'] = {'mode': 'custom', 'chain': [{'provider': 'fixture', 'model': 'old-spare'}]}
+    value['delegation']['backends']['model-router'] = ns.build_slot_policy_block('default', policy, True)
     write_config(service, value)
     before = copy.deepcopy(value)
     assert service.apply(service.initial_setup_preview(request(service))['plan_id'])['status'] == 'applied'

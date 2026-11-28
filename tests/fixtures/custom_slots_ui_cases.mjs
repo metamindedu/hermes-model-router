@@ -26,8 +26,8 @@ Object.assign(imports, { DesktopSDK: {}, host: {}, jsx, jsxs, Button, Input, Bad
   useState: React.useState, useRef: React.useRef, useEffect: React.useEffect })
 const code = source.replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;?/g, '').replace(/^import \* as DesktopSDK from '@hermes\/plugin-sdk'\s*$/m, '').replace(/export default /g, 'const pluginDefinition = ').replace(/^export\s+/gm, '')
 const api = new Function(...Object.keys(imports), code + '\nreturn { CustomSlotsSection, ExecutionRow, setCustomTaskSlots, taskSlots, executionLabel };')(...Object.values(imports))
-const threeD = { id: 'custom:3d-graphics', label: '3D·그래픽', description: 'Blender Python·Three.js 코드와 렌더 결과 검수', tier: 'heavy' }
-const writing = { id: 'custom:ko-writing', label: '한국어 글쓰기', description: '자연스러운 한국어 원고 작성과 윤문', tier: 'light' }
+const threeD = { id: 'custom:3d-graphics', label: '3D·그래픽', description: 'Blender Python·Three.js 코드와 렌더 결과 검수' }
+const writing = { id: 'custom:ko-writing', label: '한국어 글쓰기', description: '자연스러운 한국어 원고 작성과 윤문' }
 const status = (revision, list, blocking = [], extra = {}) => ({ revision, slot_capabilities: { schema: 1, custom_slots_supported: true, custom_slots: list, blocking_profiles: blocking, ...extra } })
 const $ = sel => document.querySelector(sel)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -92,7 +92,7 @@ test('B2 five stored (over limit) locks; non-array is not locked', async () => {
   await m.close()
 })
 test('B3 unreadable -> readable transition keeps hooks stable', async () => {
-  const m = await mount(status(7, [{ ...threeD, tier: 'x' }]))
+  const m = await mount(status(7, [{ ...threeD, label: 'x'.repeat(25) }]))
   assert.ok($('#custom-slots-unreadable'))
   await m.render(status(8, [threeD]))
   assert.equal($('#custom-slots-unreadable') === null, true); assert.ok($('#custom-slot-0-label'))
@@ -152,22 +152,39 @@ test('E1 with no saved custom slots the section is editable and adds a slot', as
   const m = await mount(status(3, []))
   assert.equal($('#custom-slots-unreadable') === null, true, 'an empty list is not unreadable')
   await click('#custom-slot-add')
+  // A definition is an ID, a name and a description: there is nothing else to choose.
+  const inputs = [...document.querySelectorAll('#custom-slot-0 input')].map(el => el.id)
+  assert.deepEqual(inputs, ['custom-slot-0-id', 'custom-slot-0-label', 'custom-slot-0-description'])
+  assert.doesNotMatch(document.getElementById('root').textContent, /Heavy|Light|긴 작업|짧은 작업/)
   await type('#custom-slot-0-id', 'video-edit'); await type('#custom-slot-0-label', '영상 편집'); await type('#custom-slot-0-description', 'FFmpeg 조립과 자막 검수')
   await click('#custom-slots-check')
-  assert.deepEqual(m.calls, [{ path: '/custom-slots-preview', body: { expected_revision: 3, custom_slots: [{ id: 'custom:video-edit', label: '영상 편집', description: 'FFmpeg 조립과 자막 검수', tier: 'heavy' }] } }])
+  assert.deepEqual(m.calls, [{ path: '/custom-slots-preview', body: { expected_revision: 3, custom_slots: [{ id: 'custom:video-edit', label: '영상 편집', description: 'FFmpeg 조립과 자막 검수' }] } }])
   await m.close()
 })
-test('D1 ExecutionRow names an observed custom slot child by its label', async () => {
+test('D1 ExecutionRow names a model run by its slot: a custom one by its label, an unknown one as such', async () => {
   document.getElementById('root').innerHTML = ''
   const host = document.createElement('div'); document.getElementById('root').appendChild(host); const root = createRoot(host)
-  const row = { id: 'r1', execution_mode: 'native', status: 'running', requested: { kind: 'model', role: 'heavy', profile: null, slot: threeD.id, slot_label: threeD.label, evidence: 'unknown' },
-    observed: { kind: 'model', role: 'heavy', profile: null, slot: null, evidence: 'runtime_reported' } }
+  const row = { id: 'r1', execution_mode: 'native', status: 'running',
+    requested: { kind: 'model', profile: null, purpose: threeD.id, slot: threeD.id, slot_label: threeD.label, evidence: 'unknown' },
+    observed: { kind: 'model', profile: null, slot: threeD.id, backend: 'model-router', model: null, provider: null, evidence: 'runtime_reported' } }
   await React.act(async () => root.render(jsx(api.ExecutionRow, { row })))
-  const badge = host.querySelector('article span').textContent
-  assert.equal(badge, '모델 · 3D·그래픽')
-  const builtin = { ...row, requested: { kind: 'model', role: 'heavy', profile: null, slot: 'design', evidence: 'unknown' } }
+  assert.equal(host.querySelector('article span').textContent, '모델 · 3D·그래픽')
+  const builtin = { ...row, requested: { kind: 'model', profile: null, purpose: 'plan', slot: 'design', evidence: 'unknown' },
+    observed: { ...row.observed, slot: 'design' } }
   await React.act(async () => root.render(jsx(api.ExecutionRow, { row: builtin })))
   assert.equal(host.querySelector('article span').textContent, '모델 · 설계')
+  const unknownSlot = { ...row, requested: { kind: 'model', profile: null, purpose: null, slot: null, evidence: 'unknown' },
+    observed: { kind: 'unknown', profile: null, slot: null, backend: null, model: null, provider: null, evidence: 'unknown' } }
+  await React.act(async () => root.render(jsx(api.ExecutionRow, { row: unknownSlot })))
+  assert.equal(host.querySelector('article span').textContent, '모델 · 슬롯 미확인')
+  const profileRun = { ...row, requested: { kind: 'profile', profile: 'researcher', purpose: null, slot: null, evidence: 'unknown' }, observed: unknownSlot.observed }
+  await React.act(async () => root.render(jsx(api.ExecutionRow, { row: profileRun })))
+  assert.equal(host.querySelector('article span').textContent, '프로필 · researcher')
+  // No rendered row speaks of the old two-role split.
+  for (const item of [row, builtin, unknownSlot, profileRun]) {
+    await React.act(async () => root.render(jsx(api.ExecutionRow, { row: item })))
+    assert.doesNotMatch(host.textContent, /Heavy|Light/)
+  }
   await React.act(async () => root.unmount())
 })
 test('no React errors while the section renders', () => {

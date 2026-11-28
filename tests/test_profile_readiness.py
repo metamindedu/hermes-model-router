@@ -43,7 +43,7 @@ def _manifest(*, release=False, version="0.4.7"):
     )
 
 
-def _install_package(home: Path, *, marker="ROUTED_ROLE_TIMEOUTS_SUPPORTED = True\n", release=False):
+def _install_package(home: Path, *, marker="SLOT_TIMEOUTS_SUPPORTED = True\n", release=False):
     package = home / "plugins" / "model-router"
     code = package / "model_router"
     code.mkdir(parents=True)
@@ -51,10 +51,9 @@ def _install_package(home: Path, *, marker="ROUTED_ROLE_TIMEOUTS_SUPPORTED = Tru
     (package / "__init__.py").write_text("raise RuntimeError('foreign entrypoint executed')\n", encoding="utf-8")
     # These statements are syntactically valid but must never be executed.
     (code / "__init__.py").write_text("raise RuntimeError('foreign plugin executed')\n", encoding="utf-8")
-    (code / "timeouts.py").write_text("raise RuntimeError('foreign timeout module executed')\n", encoding="utf-8")
+    # The slot-limit marker is read from timeouts.py as a literal (the module is never executed).
+    (code / "timeouts.py").write_text((marker or "") + "raise RuntimeError('foreign timeout module executed')\n", encoding="utf-8")
     (code / "native_watchdog.py").write_text("raise RuntimeError('foreign watchdog executed')\n", encoding="utf-8")
-    if marker is not None:
-        (code / "routing.py").write_text(marker, encoding="utf-8")
     if release:
         (package / "pyproject.toml").write_text(
             '[project]\nname = "hermes-model-router"\nversion = "0.4.7"\n'
@@ -95,7 +94,7 @@ def _service(tmp_path, monkeypatch, *, selections=None, skills=None, installed=(
     service = Service(root=root)
     empty_models = {
         "main": {"provider": "openai-codex", "model": "main-model", "reasoning": "high"},
-        "delegation": {"provider": "openai-codex", "model": "light-model", "reasoning": "max"},
+        "delegation": {"provider": "openai-codex", "model": "delegate-model", "reasoning": "max"},
         "compression": {"provider": "openai-codex", "model": "main-model", "reasoning": "high"},
         "title": {"provider": "openai-codex", "model": "main-model", "reasoning": "high"},
     }
@@ -103,7 +102,7 @@ def _service(tmp_path, monkeypatch, *, selections=None, skills=None, installed=(
     skill_values = skills or {}
     monkeypatch.setattr(service, "_read_disabled", lambda profile: list(skill_values.get(profile, [])))
     monkeypatch.setattr(service, "_fallback_dto", lambda *_args: {
-        "native": {}, "routing": {}, "delegation": {},
+        "native": {}, "delegation": {},
     })
 
     # The compression/title spare-model read (its own key-scoped snapshot, never the plugin-selection
@@ -136,20 +135,15 @@ def _row(service, profile="p1"):
 def _store_with_routing(profile: str, enabled: bool):
     models = {
         "main": {"provider": "openai-codex", "model": "main-model", "reasoning": "high"},
-        "delegation": {"provider": "openai-codex", "model": "light-model", "reasoning": "max"},
+        "delegation": {"provider": "openai-codex", "model": "delegate-model", "reasoning": "max"},
         "compression": {"provider": "openai-codex", "model": "main-model", "reasoning": "high"},
         "title": {"provider": "openai-codex", "model": "main-model", "reasoning": "high"},
     }
-    routing = {
-        "enabled": enabled,
-        "heavy": {"follow": "main", "custom": None},
-        "light": {"follow": "delegation", "custom": None},
-        "fallback": {"enabled": False, "heavy": None, "light": None},
-    }
-    return {"schema": 2, "revision": 1, "profiles": {profile: {
+    routing = {"enabled": enabled, "slots": {}}
+    return {"schema": 5, "revision": 1, "custom_slots": [], "profiles": {profile: {
         "models": models, "routing": routing, "native_fallback": None,
         "delegation_fallback": None,
-        "fallback_consent": {"native": None, "routing": None, "delegation": None},
+        "fallback_consent": {"native": None, "delegation": None},
     }}}
 
 
@@ -171,7 +165,7 @@ def test_status_readiness_distinguishes_ready_and_disabled_with_deny_wins(tmp_pa
     assert "plugin_explicitly_disabled" in rows["p1"]["reason_codes"]
     assert set(rows["p1"]) == {
         "schema", "state", "reason_codes", "files", "python", "base_supported",
-        "split_supported", "explicit_opt_out", "managed_selection", "version", "identity",
+        "explicit_opt_out", "managed_selection", "version", "identity",
     }
 
 
@@ -210,7 +204,6 @@ def test_supported_package_is_ready_while_route_and_skill_opt_outs_remain_unchan
     assert readiness["state"] == "ready"
     assert readiness["python"] == "enabled"
     assert readiness["base_supported"] is True
-    assert readiness["split_supported"] is True
     assert readiness["explicit_opt_out"] is True
     assert "routing_opt_out_preserved" in readiness["reason_codes"]
     assert before == after
@@ -297,22 +290,6 @@ def test_nonregular_package_file_is_unsafe_not_missing(tmp_path, monkeypatch):
     assert "package_missing" not in readiness["reason_codes"]
 
 
-def test_unreadable_optional_split_source_makes_readiness_unsupported(tmp_path, monkeypatch):
-    service, _root, homes = _service(tmp_path, monkeypatch, selections={
-        "p1": _selection(enabled=["model-router"]),
-    })
-    package = _install_package(homes["p1"])
-    (package / "model_router" / "routing.py").write_bytes(b"#" * (1024 * 1024 + 1))
-
-    readiness = _row(service, "p1")["readiness"]
-
-    assert readiness["state"] == "unsupported"
-    assert readiness["files"] == "complete"
-    assert readiness["base_supported"] is True
-    assert readiness["split_supported"] is False
-    assert "package_unreadable" in readiness["reason_codes"]
-
-
 def test_partial_package_and_wrong_manifest_are_unsupported_not_missing(tmp_path, monkeypatch):
     service, _root, homes = _service(tmp_path, monkeypatch, selections={
         "p1": _selection(enabled=["model-router"]),
@@ -365,13 +342,13 @@ def test_unsafe_package_file_is_unsupported_without_following_link(tmp_path, mon
 
 @pytest.mark.parametrize("marker", [
     None,
-    "ROUTED_ROLE_TIMEOUTS_SUPPORTED = False\n",
-    "ROUTED_ROLE_TIMEOUTS_SUPPORTED = bool(True)\n",
-    "if True:\n    ROUTED_ROLE_TIMEOUTS_SUPPORTED = True\n",
-    "ROUTED_ROLE_TIMEOUTS_SUPPORTED = True\nROUTED_ROLE_TIMEOUTS_SUPPORTED = False\n",
-    "ROUTED_ROLE_TIMEOUTS_SUPPORTED = True\ndef =\n",
+    "SLOT_TIMEOUTS_SUPPORTED = False\n",
+    "SLOT_TIMEOUTS_SUPPORTED = bool(True)\n",
+    "if True:\n    SLOT_TIMEOUTS_SUPPORTED = True\n",
+    "SLOT_TIMEOUTS_SUPPORTED = True\nSLOT_TIMEOUTS_SUPPORTED = False\n",
+    "ROUTED_ROLE_TIMEOUTS_SUPPORTED = True\n",
 ])
-def test_split_marker_is_unique_literal_ast_and_never_executes_plugin_code(tmp_path, monkeypatch, marker):
+def test_an_older_package_without_the_slot_marker_is_not_supported(tmp_path, monkeypatch, marker):
     service, _root, homes = _service(tmp_path, monkeypatch, selections={
         "p1": _selection(enabled=["model-router"]),
     })
@@ -379,12 +356,20 @@ def test_split_marker_is_unique_literal_ast_and_never_executes_plugin_code(tmp_p
 
     readiness = _row(service, "p1")["readiness"]
 
-    assert readiness["base_supported"] is True
-    assert readiness["split_supported"] is (marker == "ROUTED_ROLE_TIMEOUTS_SUPPORTED = True\n")
-    assert readiness["state"] == "ready"
-    assert "foreign plugin executed" not in json.dumps(readiness)
-    if not readiness["split_supported"]:
-        assert "split_marker_missing_or_invalid" in readiness["reason_codes"]
+    assert readiness["base_supported"] is False
+    assert readiness["state"] == "unsupported"
+    assert "slot_timeout_marker_missing_or_invalid" in readiness["reason_codes"]
+    assert service._timeout_enforcement_available("p1") is False
+    assert "foreign" not in json.dumps(readiness)
+    assert not (homes["p1"] / "plugins" / "model-router" / "model_router" / "__pycache__").exists()
+
+
+def test_the_slot_marker_is_read_as_a_literal_and_never_executes_plugin_code(tmp_path, monkeypatch):
+    service, _root, homes = _service(tmp_path, monkeypatch, selections={
+        "p1": _selection(enabled=["model-router"]),
+    }, installed=("p1",))
+    readiness = _row(service, "p1")["readiness"]
+    assert readiness["base_supported"] is True and readiness["state"] == "ready"
     assert not (homes["p1"] / "plugins" / "model-router" / "model_router" / "__pycache__").exists()
 
 
@@ -494,7 +479,6 @@ def test_timeout_eligibility_requires_supported_files_and_proven_python_selectio
     assert service._timeout_enforcement_available("p1") is False
     monkeypatch.setattr(effective_config, "read_key_scoped", lambda _home, _keys: _selection(enabled=["model-router"]))
     assert service._timeout_enforcement_available("p1") is True
-    assert service._timeout_role_enforcement_available("p1") is True
 
 
 def test_disabling_python_after_timeout_preview_rejects_before_timeout_write(tmp_path, monkeypatch):
@@ -514,8 +498,7 @@ def test_disabling_python_after_timeout_preview_rejects_before_timeout_write(tmp
         "timeout_updates": [{
             "profile": "p1", "expected_revision": 0,
             "delegate_total_seconds": 120,
-            "routed_light_total_seconds": 1800,
-            "routed_heavy_total_seconds": 7200,
+            "slot_seconds": {"code-simple": 1800},
         }],
         "save_scope": "timeouts",
     }
@@ -543,8 +526,7 @@ def test_noop_timeout_plan_rechecks_python_selection_at_final_guard(tmp_path, mo
         "timeout_updates": [{
             "profile": "p1", "expected_revision": 0,
             "delegate_total_seconds": 0,
-            "routed_light_total_seconds": 3600,
-            "routed_heavy_total_seconds": 3600,
+            "slot_seconds": {},
         }],
     }
     preview = service.preview(body)
