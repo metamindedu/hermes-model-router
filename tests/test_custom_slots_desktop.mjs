@@ -67,9 +67,10 @@ test('the definition form refuses what the service refuses', () => {
 test('the save summary names added, changed and removed slots and the cleared slot models', () => {
   const { customSlotChangeLines } = api
   const lines = customSlotChangeLines([threeD, writing], [{ ...threeD, label: '3D 작업' }, { id: 'custom:video', label: '영상 편집', description: 'FFmpeg 조립' }],
-    [{ profile: '*', field: 'custom_slots' }, { profile: 'p1', field: 'routing.slots', before: { [writing.id]: { follow: 'main', custom: null } }, after: null }])
+    [{ profile: '*', field: 'custom_slots' }, { profile: 'p1', field: 'routing.slots', before: { [writing.id]: { follow: 'main', custom: null } }, after: null },
+     { profile: 'p2', field: 'timeouts.slot_seconds', before: { [writing.id]: 600 }, after: null }])
   assert.deepEqual(lines, ['변경: 3D·그래픽 → 3D 작업 (custom:3d-graphics)', '추가: 영상 편집 (custom:video)', '삭제: 한국어 글쓰기 (custom:ko-writing)',
-    'p1: 삭제하는 슬롯의 모델 설정도 지웁니다 (custom:ko-writing)'])
+    'p1: 삭제하는 슬롯의 모델 설정도 지웁니다 (custom:ko-writing)', 'p2: 정의되지 않은 슬롯의 시간 제한을 지웁니다 (custom:ko-writing)'])
 })
 
 test('the status line names a model run by its slot, a custom slot by the label the roster reports', () => {

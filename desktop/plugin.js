@@ -3358,6 +3358,9 @@ export function customSlotChangeLines(before, after, changes) {
     if (change?.field === 'routing.slots' && change.before && typeof change.before === 'object') {
       lines.push(`${change.profile}: 삭제하는 슬롯의 모델 설정도 지웁니다 (${Object.keys(change.before).join(', ')})`)
     }
+    if (change?.field === 'timeouts.slot_seconds' && change.before && typeof change.before === 'object') {
+      lines.push(`${change.profile}: 정의되지 않은 슬롯의 시간 제한을 지웁니다 (${Object.keys(change.before).join(', ')})`)
+    }
   }
   return lines
 }
@@ -3412,9 +3415,13 @@ function CustomSlotsSection({ status, rest, disabled, onApplied }) {
     setBusy(true); setMessage('')
     try {
       const receipt = await rest('/apply', { body: { plan_id: preview.planId } })
-      if (receipt?.status !== 'applied' && receipt?.status !== 'no_change') throw new Error('적용 결과를 확인할 수 없습니다. 상태를 새로고침해 실제 반영 여부를 확인하세요.')
+      const partial = receipt?.status === 'partial'
+      if (receipt?.status !== 'applied' && receipt?.status !== 'no_change' && !partial) throw new Error('적용 결과를 확인할 수 없습니다. 상태를 새로고침해 실제 반영 여부를 확인하세요.')
       setDraft(null); setPreview(null)
-      setMessage('저장했습니다. 새 대화부터 에이전트가 이 슬롯을 고를 수 있습니다.')
+      const left = partial && Array.isArray(receipt.remaining) ? receipt.remaining.map(item => item?.profile).filter(name => typeof name === 'string') : []
+      setMessage(partial
+        ? `슬롯 정의는 저장했지만 다음 프로필에서 삭제한 슬롯의 시간 제한을 지우지 못했습니다: ${left.join(', ') || '확인 불가'}. 해당 프로필의 시간 제한 상태를 확인하세요. 다음 사용자지정 슬롯 저장 때 남은 제한을 다시 지웁니다.`
+        : '저장했습니다. 새 대화부터 에이전트가 이 슬롯을 고를 수 있습니다.')
       await onApplied()
     } catch (failure) { setPreview(null); setMessage(failure?.message || '저장하지 못했습니다. 상태를 새로고침해 확인하세요.') }
     finally { setBusy(false) }
@@ -6557,7 +6564,7 @@ export function ProfileJobsPanel({ ctx, scope, observer, executionData, refreshE
 export default {
   id: PLUGIN_ID,
   name: '모델 및 라우팅',
-  version: '0.18.0',
+  version: '0.18.1',
   defaultEnabled: false,
   register(ctx) {
     preparationStorage = ctx.storage || null

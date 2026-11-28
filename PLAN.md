@@ -1,5 +1,9 @@
 # Model Router implementation contract
 
+## 2026-11-28: v0.18.1 custom slot limits follow their definition
+
+The v0.18.0 release review found that removing a custom slot left its `slot_seconds` entry in each profile's `timeouts.json`, so re-defining the same id inherited the old limit. A custom slot save now drops the limits of ids that are undefined before the store write (invisible) and of the ids it removes after it (CAS per profile; a failure is a `partial` receipt and is repaired by the next save). The user confirmed v0.18.0 works after the restart (settings page, routing) before this follow-up; the same session also fills the v0.18.0 verification notes, re-pins the open catalog PR and removes the agent's `.pre-v018` rollback copies.
+
 ## 2026-11-28: v0.18 removes Heavy/Light; per-slot runtime limits default to two hours
 
 User decision (verbatim):

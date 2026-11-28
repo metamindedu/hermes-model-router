@@ -66,6 +66,20 @@ test('A1 recovery: blocked profile, remove every slot -> check enabled, sends []
   assert.equal(m.calls.at(-1).path, '/apply'); assert.equal(m.applied(), 1)
   await m.close()
 })
+test('A1b a partial receipt keeps the saved definitions and names the profiles whose limits remain', async () => {
+  const m = await mount(status(7, [threeD, writing]), p => p === '/apply'
+    ? { status: 'partial', applied: [{ profile: '*', key: 'custom_slots' }], remaining: [{ profile: 'p2', key: 'timeouts.slot_seconds' }] }
+    : { plan_id: 'plan-1', changes: [{ profile: 'p2', field: 'timeouts.slot_seconds', before: { [writing.id]: 600 }, after: null }] })
+  await click('#custom-slot-1-remove')
+  await click('#custom-slots-check')
+  assert.ok([...document.querySelectorAll('#custom-slots-preview li')].some(li => li.textContent === 'p2: 정의되지 않은 슬롯의 시간 제한을 지웁니다 (custom:ko-writing)'))
+  await click('#custom-slots-apply')
+  assert.equal(m.applied(), 1)
+  assert.match($('#custom-slots-message').textContent, /p2/)
+  assert.match($('#custom-slots-message').textContent, /슬롯 정의는 저장했지만/)
+  assert.equal($('#custom-slots-preview') === null, true)
+  await m.close()
+})
 test('A2 blocked: adding/editing stays disabled', async () => {
   const m = await mount(status(7, [threeD], ['old-profile']))
   await type('#custom-slot-0-label', '3D 작업')

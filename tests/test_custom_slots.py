@@ -425,3 +425,168 @@ def test_the_roster_reads_custom_labels_from_the_store_on_a_delegate_call(tmp_pa
     requested = [row['requested'] for row in roster.rows.values()]
     assert requested[0]['slot_label'] == THREE_D['label'] and requested[0]['slot'] == THREE_D['id'] and 'role' not in requested[0]
     assert requested[1]['kind'] == 'unknown'
+
+
+# ---- runtime limits of custom slots --------------------------------------------------------------
+
+def _limits(service, name, values):
+    from model_router.timeouts import read_timeouts, timeout_digest, write_timeouts
+    home = service._profile_home(name)
+    state = read_timeouts(home)
+    write_timeouts(home, {"delegate_total_seconds": 30, "slot_seconds": values},
+                   expected_digest=timeout_digest(home), expected_revision=state["revision"])
+
+
+def _own(service, name):
+    from model_router.timeouts import read_timeouts
+    return read_timeouts(service._profile_home(name))["slot_seconds"]
+
+
+def test_removing_a_custom_slot_removes_its_limit_and_a_new_definition_starts_on_the_default(tmp_path, monkeypatch):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    define(service, [THREE_D, WRITING])
+    _limits(service, "p1", {"design": 900, THREE_D["id"]: 600, WRITING["id"]: 300})
+    _limits(service, "p2", {THREE_D["id"]: 1200})
+    preview, receipt = define(service, [WRITING])
+    assert receipt["status"] == "applied"
+    rows = {(c["profile"], c["field"]): c for c in preview["changes"]}
+    assert rows[("p1", "timeouts.slot_seconds")]["before"] == {THREE_D["id"]: 600}
+    assert rows[("p2", "timeouts.slot_seconds")]["before"] == {THREE_D["id"]: 1200}
+    # Only the removed slot's limit goes; every other limit and the ordinary limit stay.
+    assert _own(service, "p1") == {"design": 900, WRITING["id"]: 300} and _own(service, "p2") == {}
+    from model_router.timeouts import read_timeouts
+    assert read_timeouts(service._profile_home("p1"))["delegate_total_seconds"] == 30
+    define(service, [WRITING, THREE_D])
+    assert service.routing_config("p2")["slot_timeout_seconds"][THREE_D["id"]] == 7200
+
+
+def test_a_leftover_limit_is_dropped_before_an_id_is_defined_again(tmp_path, monkeypatch):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    _limits(service, "p1", {THREE_D["id"]: 600, "code-simple": 60})  # left over from an earlier failure
+    preview, receipt = define(service, [THREE_D])
+    assert receipt["status"] == "applied"
+    assert {(c["profile"], c["field"]) for c in preview["changes"]} >= {("p1", "timeouts.slot_seconds")}
+    assert _own(service, "p1") == {"code-simple": 60}
+    assert service.routing_config("p1")["slot_timeout_seconds"][THREE_D["id"]] == 7200
+
+
+def test_a_failed_limit_removal_after_the_definition_save_is_partial(tmp_path, monkeypatch):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    define(service, [THREE_D, WRITING])
+    _limits(service, "p1", {THREE_D["id"]: 600})
+    preview = service.custom_slots_preview({"expected_revision": service.status()["revision"], "custom_slots": [WRITING]})
+    from model_router import timeouts
+    original = timeouts.write_timeouts
+    monkeypatch.setattr(timeouts, "write_timeouts", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("write failed")))
+    receipt = service.apply(preview["plan_id"])
+    assert receipt["status"] == "partial" and receipt["remaining"] == [{"profile": "p1", "key": "timeouts.slot_seconds"}]
+    assert json.loads(service.store_path.read_text())["custom_slots"] == [WRITING]
+    assert _own(service, "p1") == {THREE_D["id"]: 600}
+    monkeypatch.setattr(timeouts, "write_timeouts", original)
+    define(service, [WRITING, THREE_D])
+    assert _own(service, "p1") == {}
+
+
+def test_a_changed_limit_before_a_definition_save_writes_nothing(tmp_path, monkeypatch):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    _limits(service, "p1", {THREE_D["id"]: 600})
+    preview = service.custom_slots_preview({"expected_revision": service.status()["revision"], "custom_slots": [THREE_D]})
+    _limits(service, "p1", {THREE_D["id"]: 900})
+    with pytest.raises(RevisionConflict):
+        service.apply(preview["plan_id"])
+    assert json.loads(service.store_path.read_text())["custom_slots"] == []
+    assert _own(service, "p1") == {THREE_D["id"]: 900}
+
+
+def test_an_unreadable_timeouts_file_is_left_alone(tmp_path, monkeypatch):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    define(service, [THREE_D])
+    path = service._profile_home("p1") / "plugin-data" / "model-router" / "timeouts.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"schema": 2}', encoding="utf-8")
+    preview, receipt = define(service, [])
+    assert receipt["status"] == "applied" and not any(c["profile"] == "p1" and c["field"].startswith("timeouts") for c in preview["changes"])
+    assert path.read_text(encoding="utf-8") == '{"schema": 2}'
+
+
+@pytest.mark.parametrize("adding", [True, False])
+@pytest.mark.parametrize("with_existing_file", [True, False])
+def test_a_first_limit_saved_after_preview_refuses_add_or_remove(tmp_path, monkeypatch, adding, with_existing_file):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    define(service, [WRITING] if adding else [WRITING, THREE_D])
+    if with_existing_file:
+        _limits(service, "p1", {"design": 600})
+    body = {"expected_revision": service.status()["revision"], "custom_slots": [WRITING, THREE_D] if adding else [WRITING]}
+    plan = service.custom_slots_preview(body)
+    store_before = service.store_path.read_bytes()
+    _limits(service, "p1", {THREE_D["id"]: 0, "design": 600})
+    # Apply from a fresh instance, so the persisted plan's absence fence is exercised.
+    with pytest.raises(RevisionConflict, match="timeout settings of p1 changed"):
+        Service(root=service.root, writer=service.writer).apply(plan["plan_id"])
+    assert service.store_path.read_bytes() == store_before
+    assert _own(service, "p1") == {THREE_D["id"]: 0, "design": 600}
+
+
+def test_cleanup_only_receipt_names_actual_timeout_writes_and_keeps_shared_revision(tmp_path, monkeypatch):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    define(service, [WRITING])
+    _limits(service, "p1", {THREE_D["id"]: 0, WRITING["id"]: 300})
+    before = service.store_path.read_bytes()
+    revision = service.status()["revision"]
+    _, receipt = define(service, [WRITING])
+    assert receipt["status"] == "applied" and receipt["revision"] == revision
+    assert receipt["applied"] == [{"profile": "p1", "key": "timeouts.slot_seconds"}]
+    assert service.store_path.read_bytes() == before
+    assert _own(service, "p1") == {WRITING["id"]: 300}
+
+
+@pytest.mark.parametrize("adding", [True, False])
+def test_recovered_timeout_file_requires_a_new_preview(tmp_path, monkeypatch, adding):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    define(service, [WRITING] if adding else [WRITING, THREE_D])
+    path = service._profile_home("p1") / "plugin-data/model-router/timeouts.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"schema":2}', encoding="utf-8")
+    plan = service.custom_slots_preview({"expected_revision": service.status()["revision"],
+        "custom_slots": [WRITING, THREE_D] if adding else [WRITING]})
+    before = service.store_path.read_bytes()
+    path.write_text(json.dumps({"schema": 3, "revision": 1, "delegate_total_seconds": 0,
+        "slot_seconds": {THREE_D["id"]: 0}}), encoding="utf-8")
+    with pytest.raises(RevisionConflict, match="became readable"):
+        service.apply(plan["plan_id"])
+    assert service.store_path.read_bytes() == before and _own(service, "p1")[THREE_D["id"]] == 0
+
+
+@pytest.mark.parametrize("phase", ["after_collection", "before_replace"])
+def test_new_profile_during_custom_slot_save_is_not_missed(tmp_path, monkeypatch, phase):
+    service, _cli, _body = setup(tmp_path, monkeypatch)
+    define(service, [WRITING])
+    before = service.store_path.read_bytes()
+
+    def add_profile():
+        home = service.root / "profiles/new-profile"
+        (home / "plugin-data/model-router").mkdir(parents=True)
+        (home / "config.yaml").write_text("{}", encoding="utf-8")
+        (home / "plugin-data/model-router/timeouts.json").write_text(json.dumps({"schema": 3,
+            "revision": 1, "delegate_total_seconds": 0, "slot_seconds": {THREE_D["id"]: 0}}), encoding="utf-8")
+
+    if phase == "after_collection":
+        collect = service._custom_limit_cleanup
+        def collect_then_add(*args):
+            result = collect(*args)
+            add_profile()
+            return result
+        monkeypatch.setattr(service, "_custom_limit_cleanup", collect_then_add)
+    plan = service.custom_slots_preview({"expected_revision": service.status()["revision"], "custom_slots": [WRITING, THREE_D]})
+    if phase == "before_replace":
+        import model_router.service as mod
+        atomic = mod._atomic_write
+        def interleave(path, payload, before_replace=None):
+            if path == service.store_path:
+                add_profile()
+            return atomic(path, payload, before_replace=before_replace)
+        monkeypatch.setattr(mod, "_atomic_write", interleave)
+    with pytest.raises(RevisionConflict, match="profile inventory changed"):
+        service.apply(plan["plan_id"])
+    assert service.store_path.read_bytes() == before
+    assert _own(service, "new-profile")[THREE_D["id"]] == 0

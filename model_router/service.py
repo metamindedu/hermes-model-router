@@ -2765,8 +2765,10 @@ class Service:
         """Replace the custom slot definitions shared by every profile (a whole ordered list).
 
         A removed slot's model declaration is removed from every profile in the same write, so no
-        stored declaration ever names an undefined slot. Models are chosen per profile afterwards on
-        the slot cards (the ordinary preview). Nothing else in any profile changes.
+        stored declaration ever names an undefined slot. Its runtime limit is removed from each
+        profile's timeouts file too, so a slot defined again later under the same id starts on the
+        default limit. Models and limits are chosen per profile afterwards (the ordinary preview).
+        Nothing else in any profile changes.
         """
         if not isinstance(body, dict) or set(body) != {"expected_revision", "custom_slots"}:
             raise ValueError("custom slots preview takes expected_revision and custom_slots")
@@ -2795,12 +2797,20 @@ class Service:
                 continue
             entry["routing"]["slots"] = {slot: value for slot, value in slots.items() if slot not in removed}
             changes.append({"profile": name, "field": "routing.slots", "before": {slot: slots[slot] for slot in gone}, "after": None})
+        timeout_profiles = self._discover_profiles_now()
+        cleanup = self._custom_limit_cleanup({item["id"] for item in current}, removed, timeout_profiles)
+        for name, item in cleanup.items():
+            if not item["pre"] and not item["post"]:
+                continue
+            changes.append({"profile": name, "field": "timeouts.slot_seconds",
+                            "before": {slot: item["before"][slot] for slot in item["pre"] + item["post"]}, "after": None})
         plan_id = uuid.uuid4().hex
         expires_epoch = time.time() + self.PLAN_TTL
         expires_at = datetime.fromtimestamp(expires_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
         plan = {"id": plan_id, "kind": "custom_slots", "revision": revision, "after": after, "custom_slots": definitions,
                 "changes": changes, "state_changed": bool(changes), "expires_epoch": expires_epoch, "store_digest": store_digest,
-                "snapshots": {}, "config_digests": {}, "writes": []}
+                "snapshots": {}, "config_digests": {}, "writes": [], "timeout_cleanup": cleanup,
+                "timeout_profiles": timeout_profiles}
         if self._store_file_digest() != store_digest:
             raise RevisionConflict("settings changed during preview; preview again")
         self._plans[plan_id] = plan
@@ -2819,11 +2829,90 @@ class Service:
             _atomic_write(plans_dir / (plan_id + ".json"), _json_bytes(plan))
         return {"plan_id": plan_id, "changes": json.loads(json.dumps(changes)), "warnings": [], "expires_at": expires_at}
 
+    def _custom_limit_cleanup(self, defined: set[str], removed: set[str], profiles: list[str]) -> dict[str, Any]:
+        """Per profile, the custom slot limits a custom slot save drops (read-only).
+
+        ``pre``: limits of ids not defined now (leftovers, or ids this save defines); ``post``: limits
+        of ids this save removes. A profile whose timeouts file cannot be read is left alone (it is
+        read-only on the page until repaired).
+        """
+        plan: dict[str, Any] = {}
+        for name in profiles:
+            home = self._profile_home(name)
+            try:
+                digest = timeouts.timeout_digest(home)
+                state = timeouts.read_timeouts(home)
+            except (RuntimeError, ValueError, OSError):
+                # A recovery is a changed snapshot too: otherwise newly-readable limits could be
+                # inherited by an added slot without ever appearing in the preview.
+                plan[name] = {"unreadable": True, "pre": [], "post": [], "before": {}}
+                continue
+            own = state["slot_seconds"]
+            pre = sorted(slot for slot in own if slot_model.is_custom_slot(slot) and slot not in defined)
+            post = sorted(slot for slot in own if slot in removed)
+            if digest != timeouts.timeout_digest(home):
+                raise RevisionConflict(f"timeout settings of {name} changed during preview; preview again")
+            # Absence is part of the snapshot too: a first limit written after preview must not
+            # become an unapproved inherited limit or an unpreviewed deletion.
+            plan[name] = {"digest": digest, "revision": state["revision"], "pre": pre, "post": post,
+                          "before": {slot: own[slot] for slot in pre + post}}
+        return plan
+
+    def _check_custom_limit_snapshots(self, cleanup: dict[str, Any]) -> None:
+        """Fence the complete inventory, absence and readability (caller holds settings lock).
+
+        Use uncached discovery at both apply boundaries; request-scoped cached discovery cannot
+        detect a profile created while the save is in progress.
+        """
+        if set(cleanup) != set(self._discover_profiles_now()):
+            raise RevisionConflict("profile inventory changed since preview; preview again")
+        for name, item in cleanup.items():
+            home = self._profile_home(name)
+            if item.get("unreadable"):
+                try:
+                    timeouts.read_timeouts(home)
+                except (RuntimeError, ValueError, OSError):
+                    continue
+                raise RevisionConflict(f"timeout settings of {name} became readable since preview; preview again")
+            expected_digest = item.get("applied_digest", item["digest"])
+            expected_revision = item.get("applied_revision", item["revision"])
+            try:
+                digest = timeouts.timeout_digest(home)
+                state = timeouts.read_timeouts(home)
+                valid = (digest == expected_digest and state["revision"] == expected_revision
+                         and digest == timeouts.timeout_digest(home))
+            except (RuntimeError, ValueError, OSError):
+                valid = False
+            if not valid:
+                raise RevisionConflict(f"timeout settings of {name} changed since preview; preview again")
+
+    def _drop_custom_limits(self, name: str, item: dict[str, Any], slots: list[str]) -> None:
+        """Remove ``slots`` from one profile's limits, compare-and-set against what preview read."""
+        home = self._profile_home(name)
+        state = timeouts.read_timeouts(home)
+        digest = timeouts.timeout_digest(home)
+        if "applied_digest" in item:
+            expected_digest, expected_revision = item["applied_digest"], item["applied_revision"]
+        else:
+            expected_digest, expected_revision = item["digest"], item["revision"]
+        if digest != expected_digest or state["revision"] != expected_revision:
+            raise RevisionConflict(f"timeout settings of {name} changed since preview; preview again")
+        values = {"delegate_total_seconds": state["delegate_total_seconds"],
+                  "slot_seconds": {slot: value for slot, value in state["slot_seconds"].items() if slot not in slots}}
+        written = timeouts.write_timeouts(home, values, expected_digest=expected_digest, expected_revision=expected_revision)
+        if set(slots) & set(written["slot_seconds"]):
+            raise ServiceError(f"timeout settings readback mismatch for {name}")
+        item["applied_digest"], item["applied_revision"] = timeouts.timeout_digest(home), written["revision"]
+
     def _apply_custom_slots(self, plan: dict[str, Any], plan_id: str, current: dict[str, Any] | None, revision: int) -> dict[str, Any]:
         """Apply a custom slot definition plan (caller holds the lock and consumed the plan)."""
         if plan.get("store_digest") is None or self._store_file_digest() != plan["store_digest"]:
             raise RevisionConflict("settings changed since preview; preview again")
         definitions = slot_model.validate_custom_slots(plan.get("custom_slots"))
+        cleanup = plan.get("timeout_cleanup") or {}
+        if set(plan.get("timeout_profiles", [])) != set(self._discover_profiles_now()):
+            raise RevisionConflict("profile inventory changed since preview; preview again")
+        self._check_custom_limit_snapshots(cleanup)
         if not plan["changes"]:
             receipt = {"status": "no_change", "plan_id": plan_id, "revision": revision, "applied": [], "remaining": [], "finished_at": _now()}
             self._store_apply(receipt)
@@ -2836,20 +2925,42 @@ class Service:
             # Never write a declaration of a slot this plan leaves undefined.
             if set(entry["routing"].get("slots") or {}) - set(slot_model.slot_ids(definitions)):
                 raise ServiceError("custom slot plan is inconsistent")
-        new_revision = revision + 1
+        applied = []
+        # Limits of ids that are not defined now are invisible: drop them first, so an id defined
+        # by this plan never starts on a leftover limit.
+        for name, item in cleanup.items():
+            if item["pre"]:
+                self._drop_custom_limits(name, item, item["pre"])
+                applied.append({"profile": name, "key": "timeouts.slot_seconds"})
+        definitions_changed = definitions != ((current or {}).get("custom_slots") or [])
+        new_revision = revision + 1 if definitions_changed else revision
         profiles = self._preserve_untouched_entries(after, (current or {}).get("profiles") or {}, plan["store_digest"], definitions)
         next_store = _store_payload(new_revision, profiles, definitions)
 
         def store_unchanged() -> None:
             if self._store_file_digest() != plan["store_digest"]:
-                raise RevisionConflict("settings changed during apply; nothing was written; preview again")
+                raise RevisionConflict("settings changed during apply; preview again")
+            self._check_custom_limit_snapshots(cleanup)
 
-        _atomic_write(self.store_path, _json_bytes(next_store), before_replace=store_unchanged)
-        written = self._load_store()
-        if not written or written["revision"] != new_revision or written["custom_slots"] != definitions:
-            raise ServiceError("custom slot readback mismatch")
-        receipt = {"status": "applied", "plan_id": plan_id, "revision": new_revision,
-                   "applied": [{"profile": "*", "key": "custom_slots"}], "remaining": [], "finished_at": _now()}
+        if definitions_changed:
+            _atomic_write(self.store_path, _json_bytes(next_store), before_replace=store_unchanged)
+            written = self._load_store()
+            if not written or written["revision"] != new_revision or written["custom_slots"] != definitions:
+                raise ServiceError("custom slot readback mismatch")
+            applied.append({"profile": "*", "key": "custom_slots"})
+        remaining = []
+        # The removed ids are undefined now; their limits go last. A failure leaves only an invisible
+        # leftover, which the next custom slot save drops in its first step.
+        for name, item in cleanup.items():
+            if not item["post"]:
+                continue
+            try:
+                self._drop_custom_limits(name, item, item["post"])
+                applied.append({"profile": name, "key": "timeouts.slot_seconds"})
+            except (RuntimeError, ValueError, OSError, ServiceError):
+                remaining.append({"profile": name, "key": "timeouts.slot_seconds"})
+        receipt = {"status": "partial" if remaining else "applied", "plan_id": plan_id, "revision": new_revision,
+                   "applied": applied, "remaining": remaining, "finished_at": _now()}
         self._store_apply(receipt)
         return receipt
 

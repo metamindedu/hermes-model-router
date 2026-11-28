@@ -2,7 +2,7 @@
 
 Model Router assigns a profile's native `delegate_task` work by task slot and exposes model settings in Hermes Desktop. A separate, opt-in `profile_task` tool attaches to Gateway-owned target sessions. This is an independent NewMetaW plugin, not a Hermes core fork or a NousResearch bundled plugin.
 
-[한국어 안내](#한국어-안내) · [Installation](INSTALL.md) · [Security and disclosures](SECURITY.md) · [Release notes](docs/releases/v0.18.0.md) · [MIT license](LICENSE)
+[한국어 안내](#한국어-안내) · [Installation](INSTALL.md) · [Security and disclosures](SECURITY.md) · [Release notes](docs/releases/v0.18.1.md) · [MIT license](LICENSE)
 
 ## Task slots and runtime limits
 
